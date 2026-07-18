@@ -268,22 +268,56 @@ class XtreamSource(rawHost: String, private val user: String, private val pass: 
         }
     }
 
+    // Guide entries come back in different shapes depending on the provider's panel.
+    // Accept unix timestamps OR "2026-07-18 20:00:00" style text, and if the primary
+    // guide call returns nothing, fall back to the full-day table call.
+    private val epgTimeFmt = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US)
+
+    private fun epgTime(o: JSONObject, tsField: String, txtField: String): Long {
+        val ts = o.optString(tsField, "").toLongOrNull()
+        if (ts != null && ts > 0) return ts * 1000
+        val txt = o.optString(txtField, "")
+        if (txt.isNotBlank()) {
+            try {
+                return epgTimeFmt.parse(txt)?.time ?: 0L
+            } catch (e: Exception) { /* fall through */ }
+        }
+        return 0L
+    }
+
+    private fun parseEpgListings(raw: String): List<EpgEntry> {
+        val arr = JSONObject(raw).optJSONArray("epg_listings") ?: return emptyList()
+        return (0 until arr.length()).mapNotNull { i ->
+            val o = arr.getJSONObject(i)
+            val start = epgTime(o, "start_timestamp", "start")
+            val end = epgTime(o, "stop_timestamp", "end").let {
+                if (it > 0) it else epgTime(o, "stop_timestamp", "stop")
+            }
+            if (start <= 0L) null else EpgEntry(
+                title = b64(o.optString("title", "")),
+                desc = b64(o.optString("description", "")),
+                startMs = start,
+                endMs = if (end > start) end else start + 30 * 60 * 1000
+            )
+        }
+    }
+
     override suspend fun epg(channelId: String, limit: Int): List<EpgEntry> =
         withContext(Dispatchers.IO) {
             try {
-                val raw = Net.get(api("get_short_epg") + "&stream_id=$channelId&limit=$limit")
-                val arr = JSONObject(raw).optJSONArray("epg_listings") ?: return@withContext emptyList()
-                (0 until arr.length()).mapNotNull { i ->
-                    val o = arr.getJSONObject(i)
-                    val start = o.optString("start_timestamp", "0").toLongOrNull() ?: 0L
-                    val stop = o.optString("stop_timestamp", "0").toLongOrNull() ?: 0L
-                    if (start <= 0L) null else EpgEntry(
-                        title = b64(o.optString("title", "")),
-                        desc = b64(o.optString("description", "")),
-                        startMs = start * 1000,
-                        endMs = stop * 1000
-                    )
+                var out = runCatching {
+                    parseEpgListings(Net.get(api("get_short_epg") + "&stream_id=$channelId&limit=$limit"))
+                }.getOrDefault(emptyList())
+
+                if (out.isEmpty()) {
+                    // Fallback: full-day guide table, then keep shows that haven't ended yet.
+                    out = runCatching {
+                        parseEpgListings(Net.get(api("get_simple_data_table") + "&stream_id=$channelId"))
+                    }.getOrDefault(emptyList())
+                    val now = System.currentTimeMillis()
+                    out = out.filter { it.endMs >= now }.sortedBy { it.startMs }.take(limit)
                 }
+                out
             } catch (e: Exception) {
                 emptyList()
             }

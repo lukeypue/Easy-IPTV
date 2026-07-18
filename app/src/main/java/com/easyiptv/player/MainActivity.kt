@@ -1469,6 +1469,9 @@ fun PlayerScreen(
     var currentIdx by remember { mutableIntStateOf(start.coerceIn(0, queue.size - 1)) }
     val current = queue[currentIdx.coerceIn(0, queue.size - 1)]
     var nowNext by remember { mutableStateOf<List<EpgEntry>>(emptyList()) }
+    // Our top bar follows the player's own controls: hides after a few seconds,
+    // comes back when the screen is tapped.
+    var overlayVisible by remember { mutableStateOf(true) }
     val fmt = remember { SimpleDateFormat("h:mm a", Locale.getDefault()) }
 
     val exo = remember {
@@ -1531,12 +1534,18 @@ fun PlayerScreen(
                     useController = true
                     setShowNextButton(queue.size > 1)
                     setShowPreviousButton(queue.size > 1)
+                    // Show/hide our top bar together with the player's controls.
+                    setControllerVisibilityListener(
+                        PlayerView.ControllerVisibilityListener { vis ->
+                            overlayVisible = vis == android.view.View.VISIBLE
+                        }
+                    )
                 }
             },
             update = { view -> view.resizeMode = resizeMode },
             modifier = Modifier.fillMaxSize()
         )
-        Column(
+        if (overlayVisible) Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(Color(0xAA000000))
