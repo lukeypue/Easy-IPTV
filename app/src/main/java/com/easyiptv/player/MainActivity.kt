@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -150,9 +151,8 @@ data class Playable(
 
 sealed class Nav {
     object Home : Nav()
-    data class Play(val queue: List<Playable>, val start: Int = 0) : Nav()
+    data class Play(val queue: List<Playable>, val start: Int = 0, val from: Nav = Home) : Nav()
     data class Series(val s: SeriesItem) : Nav()
-    object SearchAll : Nav()
     object Downloads : Nav()
     object Recordings : Nav()
     object Playlists : Nav()
@@ -185,6 +185,13 @@ fun App() {
     var data by remember { mutableStateOf<AppData?>(null) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var reload by remember { mutableIntStateOf(0) }
+
+    // Remembered across screens so "back" lands where you left off.
+    var tab by remember { mutableIntStateOf(0) }
+    var liveCat by remember(activeIdx) { mutableStateOf("all") }
+    var movieCat by remember(activeIdx) { mutableStateOf("all") }
+    var seriesCat by remember(activeIdx) { mutableStateOf("all") }
+    var searchQuery by remember { mutableStateOf("") }
 
     LaunchedEffect(Unit) {
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -237,24 +244,21 @@ fun App() {
                 start = pl.start,
                 source = source,
                 prefs = prefs,
+                onBack = { nav = pl.from }
+            )
+        }
+        nav is Nav.Series && source != null -> {
+            val cur = nav as Nav.Series
+            SeriesDetailScreen(
+                source = source,
+                s = cur.s,
+                prefs = prefs,
+                onPlayQueue = { q, i -> nav = Nav.Play(q, i, from = cur) },
                 onBack = { nav = Nav.Home }
             )
         }
-        nav is Nav.Series && source != null -> SeriesDetailScreen(
-            source = source,
-            s = (nav as Nav.Series).s,
-            prefs = prefs,
-            onPlayQueue = { q, i -> nav = Nav.Play(q, i) },
-            onBack = { nav = Nav.Home }
-        )
-        nav is Nav.SearchAll -> SearchScreen(
-            data = data,
-            onPlay = { nav = Nav.Play(listOf(it)) },
-            onSeries = { nav = Nav.Series(it) },
-            onBack = { nav = Nav.Home }
-        )
-        nav is Nav.Downloads -> DownloadsScreen(prefs, onPlay = { nav = Nav.Play(listOf(it)) }, onBack = { nav = Nav.Home })
-        nav is Nav.Recordings -> RecordingsScreen(onPlay = { nav = Nav.Play(listOf(it)) }, onBack = { nav = Nav.Home })
+        nav is Nav.Downloads -> DownloadsScreen(prefs, onPlay = { nav = Nav.Play(listOf(it), from = Nav.Downloads) }, onBack = { nav = Nav.Home })
+        nav is Nav.Recordings -> RecordingsScreen(onPlay = { nav = Nav.Play(listOf(it), from = Nav.Recordings) }, onBack = { nav = Nav.Home })
         nav is Nav.Playlists -> PlaylistsScreen(
             playlists = playlists,
             activeIdx = activeIdx,
@@ -284,10 +288,15 @@ fun App() {
             data = data,
             loadError = loadError,
             activeIdx = activeIdx,
+            tab = tab,
+            onTab = { tab = it },
+            liveCat = liveCat, onLiveCat = { liveCat = it },
+            movieCat = movieCat, onMovieCat = { movieCat = it },
+            seriesCat = seriesCat, onSeriesCat = { seriesCat = it },
+            searchQuery = searchQuery, onSearchQuery = { searchQuery = it },
             onRetry = { reload++ },
-            onPlay = { nav = Nav.Play(listOf(it)) },
+            onPlay = { nav = Nav.Play(listOf(it), from = Nav.Home) },
             onSeries = { nav = Nav.Series(it) },
-            onSearch = { nav = Nav.SearchAll },
             onDownloads = { nav = Nav.Downloads },
             onRecordings = { nav = Nav.Recordings },
             onPlaylists = { nav = Nav.Playlists }
@@ -493,24 +502,27 @@ fun HomeScreen(
     data: AppData?,
     loadError: String?,
     activeIdx: Int,
+    tab: Int,
+    onTab: (Int) -> Unit,
+    liveCat: String, onLiveCat: (String) -> Unit,
+    movieCat: String, onMovieCat: (String) -> Unit,
+    seriesCat: String, onSeriesCat: (String) -> Unit,
+    searchQuery: String, onSearchQuery: (String) -> Unit,
     onRetry: () -> Unit,
     onPlay: (Playable) -> Unit,
     onSeries: (SeriesItem) -> Unit,
-    onSearch: () -> Unit,
     onDownloads: () -> Unit,
     onRecordings: () -> Unit,
     onPlaylists: () -> Unit
 ) {
-    var tab by remember { mutableIntStateOf(0) }
-
     Column(Modifier.fillMaxSize()) {
         // header
         Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 12.dp, bottom = 4.dp),
+            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(Modifier.weight(1f)) {
-                Text("Easy IPTV", fontWeight = FontWeight.ExtraBold, fontSize = 18.sp, color = Ink)
+                Text("Easy IPTV", fontWeight = FontWeight.ExtraBold, fontSize = 17.sp, color = Ink)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.size(7.dp).background(Accent, CircleShape))
                     Spacer(Modifier.width(6.dp))
@@ -519,10 +531,6 @@ fun HomeScreen(
             }
             if (Recorder.activeName.value != null) {
                 Icon(Icons.Filled.FiberManualRecord, contentDescription = "Recording", tint = Live)
-                Spacer(Modifier.width(4.dp))
-            }
-            IconButton(onClick = onSearch, modifier = Modifier.tvFocus(RoundedCornerShape(24.dp))) {
-                Icon(Icons.Filled.Search, contentDescription = "Search everything", tint = Muted)
             }
         }
 
@@ -532,9 +540,10 @@ fun HomeScreen(
                 data == null && loadError == null -> LoadingBox("Loading your playlist…")
                 loadError != null -> ErrorBox(loadError, onRetry)
                 else -> when (tab) {
-                    0 -> LiveTab(prefs, activeIdx, data!!, onPlay)
-                    1 -> MoviesTab(prefs, data!!, onPlay)
-                    2 -> SeriesTab(source, data!!, onSeries)
+                    0 -> LiveTab(prefs, activeIdx, data!!, liveCat, onLiveCat, onPlay)
+                    1 -> MoviesTab(prefs, data!!, movieCat, onMovieCat, onPlay)
+                    2 -> SeriesTab(source, data!!, seriesCat, onSeriesCat, onSeries)
+                    3 -> SearchTab(prefs, data!!, searchQuery, onSearchQuery, onPlay, onSeries)
                     else -> MoreTab(prefs, onDownloads, onRecordings, onPlaylists)
                 }
             }
@@ -548,15 +557,66 @@ fun HomeScreen(
                 unselectedIconColor = Muted,
                 unselectedTextColor = Muted
             )
-            NavigationBarItem(selected = tab == 0, onClick = { tab = 0 }, colors = itemColors,
+            NavigationBarItem(selected = tab == 0, onClick = { onTab(0) }, colors = itemColors,
                 icon = { Icon(Icons.Filled.LiveTv, contentDescription = null) }, label = { Text("Live") })
-            NavigationBarItem(selected = tab == 1, onClick = { tab = 1 }, colors = itemColors,
+            NavigationBarItem(selected = tab == 1, onClick = { onTab(1) }, colors = itemColors,
                 icon = { Icon(Icons.Filled.Movie, contentDescription = null) }, label = { Text("Movies") })
-            NavigationBarItem(selected = tab == 2, onClick = { tab = 2 }, colors = itemColors,
+            NavigationBarItem(selected = tab == 2, onClick = { onTab(2) }, colors = itemColors,
                 icon = { Icon(Icons.Filled.Tv, contentDescription = null) }, label = { Text("Series") })
-            NavigationBarItem(selected = tab == 3, onClick = { tab = 3 }, colors = itemColors,
+            NavigationBarItem(selected = tab == 3, onClick = { onTab(3) }, colors = itemColors,
+                icon = { Icon(Icons.Filled.Search, contentDescription = null) }, label = { Text("Search") })
+            NavigationBarItem(selected = tab == 4, onClick = { onTab(4) }, colors = itemColors,
                 icon = { Icon(Icons.Filled.MoreHoriz, contentDescription = null) }, label = { Text("More") })
         }
+    }
+}
+
+/* File-browser style category list down the left side. */
+@Composable
+private fun CategoryRail(
+    cats: List<Category>,
+    extras: List<Pair<String, String>>,
+    selected: String,
+    onSelect: (String) -> Unit
+) {
+    LazyColumn(
+        modifier = Modifier.width(126.dp).fillMaxHeight().background(SurfaceCol),
+        contentPadding = PaddingValues(vertical = 6.dp)
+    ) {
+        items(extras) { p ->
+            RailItem(p.second, selected == p.first) { onSelect(p.first) }
+        }
+        items(cats) { c ->
+            RailItem(c.name, selected == c.id) { onSelect(c.id) }
+        }
+    }
+}
+
+@Composable
+private fun RailItem(label: String, active: Boolean, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .tvFocus(RoundedCornerShape(8.dp))
+            .background(if (active) Surface2 else SurfaceCol)
+            .clickable { onClick() }
+            .padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            Modifier.width(3.dp).height(18.dp)
+                .background(if (active) Accent else Color.Transparent)
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            label,
+            color = if (active) Ink else Muted,
+            fontSize = 12.sp,
+            fontWeight = if (active) FontWeight.Bold else FontWeight.SemiBold,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(end = 6.dp)
+        )
     }
 }
 
@@ -597,9 +657,15 @@ private fun ErrorBox(err: String, onRetry: () -> Unit) {
 
 /* ----------------------------- live tab (with built-in guide) ----------------------------- */
 @Composable
-fun LiveTab(prefs: SharedPreferences, activeIdx: Int, data: AppData, onPlay: (Playable) -> Unit) {
+fun LiveTab(
+    prefs: SharedPreferences,
+    activeIdx: Int,
+    data: AppData,
+    selectedCat: String,
+    onCat: (String) -> Unit,
+    onPlay: (Playable) -> Unit
+) {
     val favKey = "fav_live_$activeIdx"
-    var selectedCat by remember(activeIdx) { mutableStateOf("all") }
     var favs by remember(activeIdx) { mutableStateOf(prefs.getStringSet(favKey, emptySet())?.toSet() ?: emptySet()) }
     var expandedId by remember { mutableStateOf<String?>(null) }
     val fmt = remember { SimpleDateFormat("h:mm a", Locale.getDefault()) }
@@ -621,110 +687,108 @@ fun LiveTab(prefs: SharedPreferences, activeIdx: Int, data: AppData, onPlay: (Pl
         }
     }
 
-    Column(Modifier.fillMaxSize()) {
-        if (guideLoading) {
-            Text(
-                "Downloading TV guide… this can take a minute or two.",
-                fontSize = 11.sp, color = Muted,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp)
-            )
-        }
-        LazyRow(
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            item { Chip("★ Favorites", selectedCat == "fav") { selectedCat = "fav" } }
-            item { Chip("All", selectedCat == "all") { selectedCat = "all" } }
-            items(data.liveCats) { cat ->
-                Chip(cat.name, selectedCat == cat.id) { selectedCat = cat.id }
-            }
-        }
-        if (filtered.isEmpty()) {
-            Column(
-                Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
+    Row(Modifier.fillMaxSize()) {
+        CategoryRail(
+            cats = data.liveCats,
+            extras = listOf("fav" to "★ Favorites", "all" to "All channels"),
+            selected = selectedCat,
+            onSelect = onCat
+        )
+        Column(Modifier.weight(1f)) {
+            if (guideLoading) {
                 Text(
-                    if (selectedCat == "fav") "No favorites yet — tap a star." else "No channels here.",
-                    color = Muted, fontSize = 14.sp
+                    "Downloading TV guide… this can take a minute or two.",
+                    fontSize = 11.sp, color = Muted,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
                 )
             }
-        } else {
-            LazyColumn(
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(filtered) { ch ->
-                    val schedule = if (guideReady) EpgStore.guide(ch.epgId, ch.name) else emptyList()
-                    val now = System.currentTimeMillis()
-                    val current = schedule.firstOrNull { now in it.startMs until it.endMs }
-                    Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .tvFocus()
-                            .background(SurfaceCol, RoundedCornerShape(14.dp))
-                            .clickable { onPlay(livePlayable(ch)) }
-                            .padding(10.dp)
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            ChannelIcon(ch.name, ch.icon)
-                            Spacer(Modifier.width(12.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    ch.name,
-                                    color = Ink, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis
-                                )
-                                if (current != null) {
+            if (filtered.isEmpty()) {
+                Column(
+                    Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        if (selectedCat == "fav") "No favorites yet — tap a star." else "No channels here.",
+                        color = Muted, fontSize = 14.sp
+                    )
+                }
+            } else {
+                LazyColumn(
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(filtered) { ch ->
+                        val schedule = if (guideReady) EpgStore.guide(ch.epgId, ch.name) else emptyList()
+                        val now = System.currentTimeMillis()
+                        val current = schedule.firstOrNull { now in it.startMs until it.endMs }
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .tvFocus()
+                                .background(SurfaceCol, RoundedCornerShape(14.dp))
+                                .clickable { onPlay(livePlayable(ch)) }
+                                .padding(10.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                ChannelIcon(ch.name, ch.icon)
+                                Spacer(Modifier.width(10.dp))
+                                Column(Modifier.weight(1f)) {
                                     Text(
-                                        "${fmt.format(Date(current.startMs))}–${fmt.format(Date(current.endMs))}  •  ${current.title}",
-                                        color = Accent, fontSize = 12.sp,
+                                        ch.name,
+                                        color = Ink, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
                                         maxLines = 1, overflow = TextOverflow.Ellipsis
                                     )
+                                    if (current != null) {
+                                        Text(
+                                            "${fmt.format(Date(current.startMs))}–${fmt.format(Date(current.endMs))}  •  ${current.title}",
+                                            color = Accent, fontSize = 12.sp,
+                                            maxLines = 1, overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
                                 }
-                            }
-                            if (schedule.isNotEmpty()) {
-                                IconButton(onClick = {
-                                    expandedId = if (expandedId == ch.id) null else ch.id
-                                }) {
+                                if (schedule.isNotEmpty()) {
+                                    IconButton(onClick = {
+                                        expandedId = if (expandedId == ch.id) null else ch.id
+                                    }) {
+                                        Icon(
+                                            Icons.Filled.Today,
+                                            contentDescription = "See what's on later",
+                                            tint = if (expandedId == ch.id) Accent else Muted
+                                        )
+                                    }
+                                }
+                                IconButton(onClick = { toggleFav(ch.id) }) {
                                     Icon(
-                                        Icons.Filled.Today,
-                                        contentDescription = "See what's on later",
-                                        tint = if (expandedId == ch.id) Accent else Muted
+                                        if (favs.contains(ch.id)) Icons.Filled.Star else Icons.Filled.StarBorder,
+                                        contentDescription = "Favorite",
+                                        tint = if (favs.contains(ch.id)) Accent else Muted
                                     )
                                 }
                             }
-                            IconButton(onClick = { toggleFav(ch.id) }) {
-                                Icon(
-                                    if (favs.contains(ch.id)) Icons.Filled.Star else Icons.Filled.StarBorder,
-                                    contentDescription = "Favorite",
-                                    tint = if (favs.contains(ch.id)) Accent else Muted
-                                )
-                            }
-                        }
-                        if (expandedId == ch.id && schedule.isNotEmpty()) {
-                            Spacer(Modifier.height(6.dp))
-                            schedule.take(10).forEach { e ->
-                                val isNow = now in e.startMs until e.endMs
-                                Row(
-                                    Modifier.fillMaxWidth().padding(vertical = 3.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        fmt.format(Date(e.startMs)),
-                                        fontSize = 12.sp,
-                                        color = if (isNow) Accent else Muted,
-                                        modifier = Modifier.width(72.dp)
-                                    )
-                                    Text(
-                                        (if (isNow) "NOW  •  " else "") + e.title,
-                                        fontSize = 13.sp,
-                                        fontWeight = if (isNow) FontWeight.Bold else FontWeight.Normal,
-                                        color = if (isNow) Ink else Muted,
-                                        maxLines = 2, overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f)
-                                    )
+                            if (expandedId == ch.id && schedule.isNotEmpty()) {
+                                Spacer(Modifier.height(6.dp))
+                                schedule.take(10).forEach { e ->
+                                    val isNow = now in e.startMs until e.endMs
+                                    Row(
+                                        Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            fmt.format(Date(e.startMs)),
+                                            fontSize = 12.sp,
+                                            color = if (isNow) Accent else Muted,
+                                            modifier = Modifier.width(72.dp)
+                                        )
+                                        Text(
+                                            (if (isNow) "NOW  •  " else "") + e.title,
+                                            fontSize = 13.sp,
+                                            fontWeight = if (isNow) FontWeight.Bold else FontWeight.Normal,
+                                            color = if (isNow) Ink else Muted,
+                                            maxLines = 2, overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -746,9 +810,14 @@ private fun livePlayable(ch: LiveChannel) = Playable(
 
 /* ----------------------------- movies tab ----------------------------- */
 @Composable
-fun MoviesTab(prefs: SharedPreferences, data: AppData, onPlay: (Playable) -> Unit) {
+fun MoviesTab(
+    prefs: SharedPreferences,
+    data: AppData,
+    selectedCat: String,
+    onCat: (String) -> Unit,
+    onPlay: (Playable) -> Unit
+) {
     val context = LocalContext.current
-    var selectedCat by remember { mutableStateOf("all") }
 
     if (data.movies.isEmpty()) {
         Column(
@@ -765,18 +834,16 @@ fun MoviesTab(prefs: SharedPreferences, data: AppData, onPlay: (Playable) -> Uni
 
     val filtered = data.movies.filter { selectedCat == "all" || it.categoryId == selectedCat }
 
-    Column(Modifier.fillMaxSize()) {
-        LazyRow(
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            item { Chip("All", selectedCat == "all") { selectedCat = "all" } }
-            items(data.vodCats) { cat ->
-                Chip(cat.name, selectedCat == cat.id) { selectedCat = cat.id }
-            }
-        }
+    Row(Modifier.fillMaxSize()) {
+        CategoryRail(
+            cats = data.vodCats,
+            extras = listOf("all" to "All movies"),
+            selected = selectedCat,
+            onSelect = onCat
+        )
         LazyColumn(
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+            modifier = Modifier.weight(1f),
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             items(filtered) { m ->
@@ -799,9 +866,13 @@ fun MoviesTab(prefs: SharedPreferences, data: AppData, onPlay: (Playable) -> Uni
 
 /* ----------------------------- series tab ----------------------------- */
 @Composable
-fun SeriesTab(source: Source?, data: AppData, onSeries: (SeriesItem) -> Unit) {
-    var selectedCat by remember { mutableStateOf("all") }
-
+fun SeriesTab(
+    source: Source?,
+    data: AppData,
+    selectedCat: String,
+    onCat: (String) -> Unit,
+    onSeries: (SeriesItem) -> Unit
+) {
     if (source?.supportsSeries != true || data.series.isEmpty()) {
         Column(
             Modifier.fillMaxSize().padding(32.dp),
@@ -823,18 +894,16 @@ fun SeriesTab(source: Source?, data: AppData, onSeries: (SeriesItem) -> Unit) {
 
     val filtered = data.series.filter { selectedCat == "all" || it.categoryId == selectedCat }
 
-    Column(Modifier.fillMaxSize()) {
-        LazyRow(
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            item { Chip("All", selectedCat == "all") { selectedCat = "all" } }
-            items(data.seriesCats) { cat ->
-                Chip(cat.name, selectedCat == cat.id) { selectedCat = cat.id }
-            }
-        }
+    Row(Modifier.fillMaxSize()) {
+        CategoryRail(
+            cats = data.seriesCats,
+            extras = listOf("all" to "All series"),
+            selected = selectedCat,
+            onSelect = onCat
+        )
         LazyColumn(
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+            modifier = Modifier.weight(1f),
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             items(filtered) { s ->
@@ -896,51 +965,101 @@ private fun MoreRow(title: String, subtitle: String, onClick: () -> Unit) {
     }
 }
 
-/* ----------------------------- search everything ----------------------------- */
+/* ----------------------------- search (bottom tab, with recents) ----------------------------- */
+
+private fun loadRecents(prefs: SharedPreferences): List<String> {
+    val raw = prefs.getString("recent_searches", null) ?: return emptyList()
+    return try {
+        val arr = org.json.JSONArray(raw)
+        (0 until arr.length()).map { arr.getString(it) }
+    } catch (e: Exception) {
+        emptyList()
+    }
+}
+
+private fun addRecent(prefs: SharedPreferences, q: String) {
+    val query = q.trim()
+    if (query.length < 2) return
+    val next = (listOf(query) + loadRecents(prefs).filterNot { it.equals(query, ignoreCase = true) }).take(20)
+    val arr = org.json.JSONArray()
+    next.forEach { arr.put(it) }
+    prefs.edit().putString("recent_searches", arr.toString()).apply()
+}
+
 @Composable
-fun SearchScreen(
-    data: AppData?,
+fun SearchTab(
+    prefs: SharedPreferences,
+    data: AppData,
+    query: String,
+    onQuery: (String) -> Unit,
     onPlay: (Playable) -> Unit,
-    onSeries: (SeriesItem) -> Unit,
-    onBack: () -> Unit
+    onSeries: (SeriesItem) -> Unit
 ) {
-    var query by remember { mutableStateOf("") }
-    BackHandler { onBack() }
+    var recents by remember { mutableStateOf(loadRecents(prefs)) }
+
+    fun saveRecent(q: String) {
+        addRecent(prefs, q)
+        recents = loadRecents(prefs)
+    }
 
     Column(Modifier.fillMaxSize()) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 4.dp, end = 16.dp, top = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.Filled.ArrowBack, contentDescription = "Back", tint = Muted)
-            }
-            OutlinedTextField(
-                value = query, onValueChange = { query = it },
-                placeholder = { Text("Search live, movies & series…") },
-                singleLine = true,
-                modifier = Modifier.weight(1f)
-            )
-        }
+        OutlinedTextField(
+            value = query, onValueChange = onQuery,
+            placeholder = { Text("Search live, movies & series…") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp).tvFocus(RoundedCornerShape(8.dp))
+        )
         Text(
             "Matches any part of a name — \"wars\" finds Star Wars.",
             fontSize = 11.sp, color = Muted,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+            modifier = Modifier.padding(horizontal = 16.dp)
         )
-
-        if (data == null) {
-            LoadingBox("Loading your playlist…")
-            return
-        }
 
         val q = query.trim()
         if (q.length < 2) {
-            Column(
-                Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text("Type at least 2 letters to search.", color = Muted, fontSize = 14.sp)
+            if (recents.isEmpty()) {
+                Column(
+                    Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text("Type at least 2 letters to search.", color = Muted, fontSize = 14.sp)
+                }
+            } else {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Recent searches", fontWeight = FontWeight.ExtraBold, fontSize = 14.sp, color = Accent, modifier = Modifier.weight(1f))
+                    Text(
+                        "Clear",
+                        fontSize = 12.sp, color = Muted,
+                        modifier = Modifier.tvFocus(RoundedCornerShape(8.dp)).clickable {
+                            prefs.edit().remove("recent_searches").apply()
+                            recents = emptyList()
+                        }.padding(6.dp)
+                    )
+                }
+                LazyColumn(
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 2.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    items(recents) { r ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .tvFocus()
+                                .background(SurfaceCol, RoundedCornerShape(12.dp))
+                                .clickable { onQuery(r) }
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Filled.Search, contentDescription = null, tint = Muted)
+                            Spacer(Modifier.width(10.dp))
+                            Text(r, color = Ink, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                }
             }
             return
         }
@@ -967,19 +1086,19 @@ fun SearchScreen(
             if (liveHits.isNotEmpty()) {
                 item { SectionHeader("Live TV") }
                 items(liveHits) { ch ->
-                    MediaRow(ch.name, ch.icon, onClick = { onPlay(livePlayable(ch)) }, trailing = {})
+                    MediaRow(ch.name, ch.icon, onClick = { saveRecent(q); onPlay(livePlayable(ch)) }, trailing = {})
                 }
             }
             if (movieHits.isNotEmpty()) {
                 item { SectionHeader("Movies") }
                 items(movieHits) { m ->
-                    MediaRow(m.name, m.icon, onClick = { onPlay(Playable(m.name, m.url, isLive = false)) }, trailing = {})
+                    MediaRow(m.name, m.icon, onClick = { saveRecent(q); onPlay(Playable(m.name, m.url, isLive = false)) }, trailing = {})
                 }
             }
             if (seriesHits.isNotEmpty()) {
                 item { SectionHeader("Series") }
                 items(seriesHits) { s ->
-                    MediaRow(s.name, s.icon, onClick = { onSeries(s) }, trailing = {})
+                    MediaRow(s.name, s.icon, onClick = { saveRecent(q); onSeries(s) }, trailing = {})
                 }
             }
         }
@@ -1422,9 +1541,15 @@ fun PlayerScreen(
     var currentIdx by remember { mutableIntStateOf(start.coerceIn(0, queue.size - 1)) }
     val current = queue[currentIdx.coerceIn(0, queue.size - 1)]
     var nowNext by remember { mutableStateOf<List<EpgEntry>>(emptyList()) }
-    // Our top bar follows the player's own controls: hides after a few seconds,
-    // comes back when the screen is tapped.
+    // Our top bar follows the player's own controls, plus a timer of our own so it
+    // ALWAYS hides after 5 seconds — even on Fire TV where control behavior differs.
     var overlayVisible by remember { mutableStateOf(true) }
+    LaunchedEffect(overlayVisible, currentIdx) {
+        if (overlayVisible) {
+            kotlinx.coroutines.delay(5000)
+            overlayVisible = false
+        }
+    }
     val fmt = remember { SimpleDateFormat("h:mm a", Locale.getDefault()) }
 
     val exo = remember {
@@ -1452,7 +1577,16 @@ fun PlayerScreen(
                 .setMediaMetadata(MediaMetadata.Builder().setTitle(pl.name).build())
                 .build()
         }
+        // Many IPTV servers stream movies without a seek index. Constant-bitrate
+        // seeking lets the player estimate positions so fast-forward/rewind work anyway.
+        val extractors = androidx.media3.extractor.DefaultExtractorsFactory()
+            .setConstantBitrateSeekingEnabled(true)
+            .setConstantBitrateSeekingAlwaysEnabled(true)
+        val mediaSources = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(context, extractors)
         ExoPlayer.Builder(context, renderersFactory)
+            .setMediaSourceFactory(mediaSources)
+            .setSeekBackIncrementMs(10_000)
+            .setSeekForwardIncrementMs(30_000)
             .setLoadControl(loadControl)
             .build().apply {
                 setMediaItems(mediaItems, start.coerceIn(0, queue.size - 1), C.TIME_UNSET)
@@ -1491,6 +1625,7 @@ fun PlayerScreen(
                 PlayerView(ctx).apply {
                     player = exo
                     useController = true
+                    controllerShowTimeoutMs = 5000
                     setShowNextButton(queue.size > 1)
                     setShowPreviousButton(queue.size > 1)
                     // Show/hide our top bar together with the player's controls.
