@@ -1625,6 +1625,8 @@ fun PlayerScreen(
                 PlayerView(ctx).apply {
                     player = exo
                     useController = true
+                    // Never let the screen saver / sleep kick in while watching.
+                    keepScreenOn = true
                     controllerShowTimeoutMs = 5000
                     setShowNextButton(queue.size > 1)
                     setShowPreviousButton(queue.size > 1)
