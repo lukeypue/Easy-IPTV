@@ -21,7 +21,8 @@ data class LiveChannel(
     val name: String,
     val icon: String?,
     val categoryId: String?,
-    val url: String
+    val url: String,
+    val epgId: String? = null
 )
 data class Movie(
     val id: String,
@@ -144,6 +145,9 @@ interface Source {
     val supportsEpg: Boolean
     val supportsSeries: Boolean
 
+    /** Link to the provider's full TV guide file (XMLTV), if one is known. */
+    fun xmltvUrl(): String?
+
     /** Returns null when the login works, or a friendly error message. */
     suspend fun test(): String?
     suspend fun loadAll(): AppData
@@ -160,6 +164,12 @@ class XtreamSource(rawHost: String, private val user: String, private val pass: 
     private val base: String = normalizeHost(rawHost)
     override val supportsEpg = true
     override val supportsSeries = true
+
+    override fun xmltvUrl(): String {
+        val u = java.net.URLEncoder.encode(user, "UTF-8")
+        val p = java.net.URLEncoder.encode(pass, "UTF-8")
+        return "$base/xmltv.php?username=$u&password=$p"
+    }
 
     private fun api(action: String?): String {
         val u = URLEncoder.encode(user, "UTF-8")
@@ -206,7 +216,8 @@ class XtreamSource(rawHost: String, private val user: String, private val pass: 
                         name = o.optString("name", "Channel"),
                         icon = o.optString("stream_icon", "").ifBlank { null },
                         categoryId = o.opt("category_id")?.toString(),
-                        url = "$base/live/$user/$pass/$id.ts"
+                        url = "$base/live/$user/$pass/$id.ts",
+                        epgId = o.optString("epg_channel_id", "").ifBlank { null }
                     )
                 }
             }
@@ -364,6 +375,9 @@ class XtreamSource(rawHost: String, private val user: String, private val pass: 
 class M3uSource(private val playlistUrl: String) : Source {
     override val supportsEpg = false
     override val supportsSeries = false
+    private var tvgUrl: String? = null
+
+    override fun xmltvUrl(): String? = tvgUrl
 
     private val movieExts = setOf("mp4", "mkv", "avi", "mov", "m4v", "wmv", "flv")
 
@@ -392,12 +406,18 @@ class M3uSource(private val playlistUrl: String) : Source {
         var pending = false
         var idx = 0
 
+        var tvgId: String? = null
         for (rawLine in body.lineSequence()) {
             val line = rawLine.trim()
-            if (line.startsWith("#EXTINF")) {
+            if (line.startsWith("#EXTM3U")) {
+                // Some playlists announce their guide file here: url-tvg="http://..."
+                val m = Regex("url-tvg=\"(.*?)\"").find(line)
+                if (m != null && m.groupValues[1].isNotBlank()) tvgUrl = m.groupValues[1]
+            } else if (line.startsWith("#EXTINF")) {
                 val attrs = attrRe.findAll(line).associate { it.groupValues[1] to it.groupValues[2] }
                 logo = (attrs["tvg-logo"] ?: "").ifBlank { null }
                 group = attrs["group-title"] ?: ""
+                tvgId = (attrs["tvg-id"] ?: "").ifBlank { null }
                 // Display name is whatever follows the comma after the attribute block.
                 // Done this way so names that themselves contain commas stay whole.
                 name = line.substringAfterLast('"', line)
@@ -413,7 +433,7 @@ class M3uSource(private val playlistUrl: String) : Source {
                     movies.add(Movie("m3u_$idx", name, logo, g, line))
                 } else {
                     liveGroups.add(g)
-                    live.add(LiveChannel("m3u_$idx", name, logo, g, line))
+                    live.add(LiveChannel("m3u_$idx", name, logo, g, line, epgId = tvgId))
                 }
                 pending = false
             }
@@ -431,4 +451,141 @@ class M3uSource(private val playlistUrl: String) : Source {
 
     override suspend fun epg(channelId: String, limit: Int): List<EpgEntry> = emptyList()
     override suspend fun seriesEpisodes(seriesId: String): Map<Int, List<Episode>> = emptyMap()
+}
+
+/* ----------------------------- full TV guide (XMLTV) ----------------------------- */
+
+/**
+ * Downloads the provider's full guide file once and keeps ~36 hours of it in memory.
+ * This is how the big IPTV apps populate their guide (and why it takes a minute).
+ */
+object EpgStore {
+    val loading = androidx.compose.runtime.mutableStateOf(false)
+    val loaded = androidx.compose.runtime.mutableStateOf(false)
+
+    private var loadedUrl: String? = null
+    private var byChannel: Map<String, List<EpgEntry>> = emptyMap()
+    private var nameToId: Map<String, String> = emptyMap()
+
+    private fun norm(s: String): String = s.lowercase().replace(Regex("[^a-z0-9]"), "")
+
+    fun clear() {
+        loadedUrl = null
+        byChannel = emptyMap()
+        nameToId = emptyMap()
+        loaded.value = false
+        loading.value = false
+    }
+
+    /** Guide for one channel: match by guide id first, then by channel name. */
+    fun guide(epgId: String?, channelName: String): List<EpgEntry> {
+        if (byChannel.isEmpty()) return emptyList()
+        val now = System.currentTimeMillis()
+        val direct = epgId?.let { byChannel[it.lowercase()] }
+        val byName = if (direct == null) {
+            nameToId[norm(channelName)]?.let { byChannel[it] }
+        } else null
+        val list = direct ?: byName ?: return emptyList()
+        return list.filter { it.endMs >= now }
+    }
+
+    suspend fun load(url: String?) {
+        if (url.isNullOrBlank()) return
+        if (loadedUrl == url && loaded.value) return
+        if (loading.value) return
+        loading.value = true
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val fmtZ = java.text.SimpleDateFormat("yyyyMMddHHmmss Z", java.util.Locale.US)
+                val fmtNoZ = java.text.SimpleDateFormat("yyyyMMddHHmmss", java.util.Locale.US)
+                fun parseTime(raw: String): Long {
+                    val t = raw.trim()
+                    if (t.isEmpty()) return 0L
+                    return try {
+                        if (t.contains(' ')) fmtZ.parse(t)?.time ?: 0L
+                        else fmtNoZ.parse(t)?.time ?: 0L
+                    } catch (e: Exception) { 0L }
+                }
+
+                val now = System.currentTimeMillis()
+                val windowStart = now - 60L * 60 * 1000            // keep last hour
+                val windowEnd = now + 36L * 60 * 60 * 1000         // ...through next 36h
+                val programmes = HashMap<String, ArrayList<EpgEntry>>()
+                val names = HashMap<String, String>()
+
+                val req = okhttp3.Request.Builder().url(url).header("User-Agent", Net.UA).build()
+                Net.streamClient.newCall(req).execute().use { resp ->
+                    val stream = resp.body?.byteStream() ?: return@use
+                    val parser = android.util.Xml.newPullParser()
+                    parser.setInput(stream, null)
+
+                    var event = parser.eventType
+                    var curChannelId: String? = null           // inside <channel>
+                    var progChannel: String? = null            // inside <programme>
+                    var progStart = 0L
+                    var progStop = 0L
+                    var progTitle = ""
+                    var progDesc = ""
+                    var textTarget = 0                          // 1=display-name 2=title 3=desc
+
+                    while (event != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
+                        when (event) {
+                            org.xmlpull.v1.XmlPullParser.START_TAG -> when (parser.name) {
+                                "channel" -> curChannelId =
+                                    parser.getAttributeValue(null, "id")?.lowercase()
+                                "display-name" -> if (curChannelId != null) textTarget = 1
+                                "programme" -> {
+                                    progChannel = parser.getAttributeValue(null, "channel")?.lowercase()
+                                    progStart = parseTime(parser.getAttributeValue(null, "start") ?: "")
+                                    progStop = parseTime(parser.getAttributeValue(null, "stop") ?: "")
+                                    progTitle = ""; progDesc = ""
+                                }
+                                "title" -> if (progChannel != null) textTarget = 2
+                                "desc" -> if (progChannel != null) textTarget = 3
+                            }
+                            org.xmlpull.v1.XmlPullParser.TEXT -> when (textTarget) {
+                                1 -> {
+                                    val id = curChannelId
+                                    val nm = parser.text?.trim() ?: ""
+                                    if (id != null && nm.isNotBlank()) {
+                                        val key = norm(nm)
+                                        if (key.isNotBlank() && !names.containsKey(key)) names[key] = id
+                                    }
+                                }
+                                2 -> progTitle = (progTitle + (parser.text ?: "")).trim()
+                                3 -> progDesc = (progDesc + (parser.text ?: "")).trim()
+                            }
+                            org.xmlpull.v1.XmlPullParser.END_TAG -> when (parser.name) {
+                                "channel" -> curChannelId = null
+                                "display-name", "title", "desc" -> textTarget = 0
+                                "programme" -> {
+                                    val ch = progChannel
+                                    if (ch != null && progStart in 1 until windowEnd &&
+                                        (if (progStop > 0) progStop else progStart) >= windowStart
+                                    ) {
+                                        val end = if (progStop > progStart) progStop
+                                        else progStart + 30 * 60 * 1000
+                                        programmes.getOrPut(ch) { ArrayList() }
+                                            .add(EpgEntry(progTitle.ifBlank { "Program" }, progDesc, progStart, end))
+                                    }
+                                    progChannel = null
+                                }
+                            }
+                        }
+                        event = parser.next()
+                    }
+                }
+
+                programmes.values.forEach { it.sortBy { e -> e.startMs } }
+                byChannel = programmes
+                nameToId = names
+                loadedUrl = url
+                loaded.value = programmes.isNotEmpty()
+            } catch (e: Exception) {
+                // Guide stays empty; the app still works fine without it.
+            } finally {
+                loading.value = false
+            }
+        }
+    }
 }

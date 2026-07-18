@@ -144,6 +144,7 @@ data class Playable(
     val url: String,
     val isLive: Boolean,
     val epgId: String? = null,
+    val guideKey: String? = null,
     val canRecord: Boolean = false
 )
 
@@ -199,12 +200,21 @@ fun App() {
     LaunchedEffect(source, reload) {
         data = null
         loadError = null
+        EpgStore.clear()
         if (source != null) {
             try {
                 data = source.loadAll()
             } catch (e: Exception) {
                 loadError = e.message ?: "error"
             }
+        }
+    }
+
+    // Once channels are in, quietly download the full TV guide in the background.
+    LaunchedEffect(data) {
+        val s = source
+        if (data != null && s != null) {
+            EpgStore.load(s.xmltvUrl())
         }
     }
 
@@ -525,7 +535,6 @@ fun HomeScreen(
                     0 -> LiveTab(prefs, activeIdx, data!!, onPlay)
                     1 -> MoviesTab(prefs, data!!, onPlay)
                     2 -> SeriesTab(source, data!!, onSeries)
-                    3 -> GuideTab(source, data!!, onPlay)
                     else -> MoreTab(prefs, onDownloads, onRecordings, onPlaylists)
                 }
             }
@@ -546,8 +555,6 @@ fun HomeScreen(
             NavigationBarItem(selected = tab == 2, onClick = { tab = 2 }, colors = itemColors,
                 icon = { Icon(Icons.Filled.Tv, contentDescription = null) }, label = { Text("Series") })
             NavigationBarItem(selected = tab == 3, onClick = { tab = 3 }, colors = itemColors,
-                icon = { Icon(Icons.Filled.Today, contentDescription = null) }, label = { Text("Guide") })
-            NavigationBarItem(selected = tab == 4, onClick = { tab = 4 }, colors = itemColors,
                 icon = { Icon(Icons.Filled.MoreHoriz, contentDescription = null) }, label = { Text("More") })
         }
     }
@@ -588,12 +595,16 @@ private fun ErrorBox(err: String, onRetry: () -> Unit) {
     }
 }
 
-/* ----------------------------- live tab ----------------------------- */
+/* ----------------------------- live tab (with built-in guide) ----------------------------- */
 @Composable
 fun LiveTab(prefs: SharedPreferences, activeIdx: Int, data: AppData, onPlay: (Playable) -> Unit) {
     val favKey = "fav_live_$activeIdx"
     var selectedCat by remember(activeIdx) { mutableStateOf("all") }
     var favs by remember(activeIdx) { mutableStateOf(prefs.getStringSet(favKey, emptySet())?.toSet() ?: emptySet()) }
+    var expandedId by remember { mutableStateOf<String?>(null) }
+    val fmt = remember { SimpleDateFormat("h:mm a", Locale.getDefault()) }
+    val guideLoading = EpgStore.loading.value
+    val guideReady = EpgStore.loaded.value
 
     fun toggleFav(id: String) {
         val n = favs.toMutableSet()
@@ -611,8 +622,15 @@ fun LiveTab(prefs: SharedPreferences, activeIdx: Int, data: AppData, onPlay: (Pl
     }
 
     Column(Modifier.fillMaxSize()) {
+        if (guideLoading) {
+            Text(
+                "Downloading TV guide… this can take a minute or two.",
+                fontSize = 11.sp, color = Muted,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp)
+            )
+        }
         LazyRow(
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             item { Chip("★ Favorites", selectedCat == "fav") { selectedCat = "fav" } }
@@ -638,11 +656,45 @@ fun LiveTab(prefs: SharedPreferences, activeIdx: Int, data: AppData, onPlay: (Pl
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(filtered) { ch ->
-                    MediaRow(
-                        name = ch.name,
-                        icon = ch.icon,
-                        onClick = { onPlay(livePlayable(ch)) },
-                        trailing = {
+                    val schedule = if (guideReady) EpgStore.guide(ch.epgId, ch.name) else emptyList()
+                    val now = System.currentTimeMillis()
+                    val current = schedule.firstOrNull { now in it.startMs until it.endMs }
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .tvFocus()
+                            .background(SurfaceCol, RoundedCornerShape(14.dp))
+                            .clickable { onPlay(livePlayable(ch)) }
+                            .padding(10.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            ChannelIcon(ch.name, ch.icon)
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    ch.name,
+                                    color = Ink, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis
+                                )
+                                if (current != null) {
+                                    Text(
+                                        "${fmt.format(Date(current.startMs))}–${fmt.format(Date(current.endMs))}  •  ${current.title}",
+                                        color = Accent, fontSize = 12.sp,
+                                        maxLines = 1, overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                            if (schedule.isNotEmpty()) {
+                                IconButton(onClick = {
+                                    expandedId = if (expandedId == ch.id) null else ch.id
+                                }) {
+                                    Icon(
+                                        Icons.Filled.Today,
+                                        contentDescription = "See what's on later",
+                                        tint = if (expandedId == ch.id) Accent else Muted
+                                    )
+                                }
+                            }
                             IconButton(onClick = { toggleFav(ch.id) }) {
                                 Icon(
                                     if (favs.contains(ch.id)) Icons.Filled.Star else Icons.Filled.StarBorder,
@@ -651,7 +703,32 @@ fun LiveTab(prefs: SharedPreferences, activeIdx: Int, data: AppData, onPlay: (Pl
                                 )
                             }
                         }
-                    )
+                        if (expandedId == ch.id && schedule.isNotEmpty()) {
+                            Spacer(Modifier.height(6.dp))
+                            schedule.take(10).forEach { e ->
+                                val isNow = now in e.startMs until e.endMs
+                                Row(
+                                    Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        fmt.format(Date(e.startMs)),
+                                        fontSize = 12.sp,
+                                        color = if (isNow) Accent else Muted,
+                                        modifier = Modifier.width(72.dp)
+                                    )
+                                    Text(
+                                        (if (isNow) "NOW  •  " else "") + e.title,
+                                        fontSize = 13.sp,
+                                        fontWeight = if (isNow) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (isNow) Ink else Muted,
+                                        maxLines = 2, overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -663,6 +740,7 @@ private fun livePlayable(ch: LiveChannel) = Playable(
     url = ch.url,
     isLive = true,
     epgId = ch.id,
+    guideKey = ch.epgId,
     canRecord = ch.url.endsWith(".ts")
 )
 
@@ -761,131 +839,6 @@ fun SeriesTab(source: Source?, data: AppData, onSeries: (SeriesItem) -> Unit) {
         ) {
             items(filtered) { s ->
                 MediaRow(name = s.name, icon = s.icon, onClick = { onSeries(s) }, trailing = {})
-            }
-        }
-    }
-}
-
-/* ----------------------------- guide tab ----------------------------- */
-@Composable
-fun GuideTab(source: Source?, data: AppData, onPlay: (Playable) -> Unit) {
-    var selectedCat by remember { mutableStateOf("all") }
-    var expandedId by remember { mutableStateOf<String?>(null) }
-    var schedule by remember { mutableStateOf<List<EpgEntry>?>(null) }
-    var loadingEpg by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-    val fmt = remember { SimpleDateFormat("h:mm a", Locale.getDefault()) }
-
-    if (source == null || !source.supportsEpg) {
-        Column(
-            Modifier.fillMaxSize().padding(32.dp),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text("TV Guide needs an Xtream login", fontWeight = FontWeight.Bold, fontSize = 17.sp, color = Ink)
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "The guide works with a username & password (Xtream) playlist. M3U link playlists don't carry program info.",
-                fontSize = 13.sp, color = Muted
-            )
-        }
-        return
-    }
-
-    fun open(ch: LiveChannel) {
-        if (expandedId == ch.id) { expandedId = null; return }
-        expandedId = ch.id
-        schedule = null
-        loadingEpg = true
-        scope.launch {
-            val e = source.epg(ch.id, 12)
-            if (expandedId == ch.id) {
-                schedule = e
-                loadingEpg = false
-            }
-        }
-    }
-
-    val filtered = data.live.filter { selectedCat == "all" || it.categoryId == selectedCat }
-
-    Column(Modifier.fillMaxSize()) {
-        Text(
-            "Tap any channel to see what's on now and later.",
-            fontSize = 12.sp, color = Muted,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
-        )
-        LazyRow(
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            item { Chip("All", selectedCat == "all") { selectedCat = "all" } }
-            items(data.liveCats) { cat ->
-                Chip(cat.name, selectedCat == cat.id) { selectedCat = cat.id }
-            }
-        }
-        LazyColumn(
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            items(filtered) { ch ->
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .tvFocus()
-                        .background(SurfaceCol, RoundedCornerShape(14.dp))
-                        .clickable { open(ch) }
-                        .padding(10.dp)
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        ChannelIcon(ch.name, ch.icon)
-                        Spacer(Modifier.width(12.dp))
-                        Text(
-                            ch.name,
-                            modifier = Modifier.weight(1f),
-                            color = Ink, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis
-                        )
-                        IconButton(onClick = { onPlay(livePlayable(ch)) }) {
-                            Icon(Icons.Filled.PlayArrow, contentDescription = "Watch", tint = Accent)
-                        }
-                    }
-                    if (expandedId == ch.id) {
-                        Spacer(Modifier.height(6.dp))
-                        when {
-                            loadingEpg -> Text("Loading guide…", fontSize = 13.sp, color = Muted)
-                            schedule.isNullOrEmpty() -> Text(
-                                "No guide info for this channel.",
-                                fontSize = 13.sp, color = Muted
-                            )
-                            else -> {
-                                val now = System.currentTimeMillis()
-                                schedule!!.forEach { e ->
-                                    val isNow = now in e.startMs until e.endMs
-                                    Row(
-                                        Modifier.fillMaxWidth().padding(vertical = 3.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(
-                                            fmt.format(Date(e.startMs)),
-                                            fontSize = 12.sp,
-                                            color = if (isNow) Accent else Muted,
-                                            modifier = Modifier.width(72.dp)
-                                        )
-                                        Column(Modifier.weight(1f)) {
-                                            Text(
-                                                (if (isNow) "NOW  •  " else "") + e.title,
-                                                fontSize = 13.sp,
-                                                fontWeight = if (isNow) FontWeight.Bold else FontWeight.Normal,
-                                                color = if (isNow) Ink else Muted,
-                                                maxLines = 2, overflow = TextOverflow.Ellipsis
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
             }
         }
     }
@@ -1517,10 +1470,16 @@ fun PlayerScreen(
     }
     BackHandler { onBack() }
 
-    LaunchedEffect(current.epgId) {
-        val id = current.epgId
-        if (id != null && source != null && source.supportsEpg) {
-            nowNext = source.epg(id, 2)
+    LaunchedEffect(current.epgId, EpgStore.loaded.value) {
+        if (!current.isLive) return@LaunchedEffect
+        val fromGuide = EpgStore.guide(current.guideKey, current.name)
+        if (fromGuide.isNotEmpty()) {
+            nowNext = fromGuide.take(2)
+        } else {
+            val id = current.epgId
+            if (id != null && source != null && source.supportsEpg) {
+                nowNext = source.epg(id, 2)
+            }
         }
     }
 
