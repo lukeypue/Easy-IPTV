@@ -466,6 +466,26 @@ object EpgStore {
     private var loadedUrl: String? = null
     private var byChannel: Map<String, List<EpgEntry>> = emptyMap()
     private var nameToId: Map<String, String> = emptyMap()
+    private var idToName: Map<String, String> = emptyMap()
+
+    data class GuideHit(val channelXmlId: String, val channelName: String, val entry: EpgEntry)
+
+    /** Search every channel's schedule for upcoming shows matching the text. */
+    fun search(q: String, limit: Int = 40): List<GuideHit> {
+        val query = q.trim()
+        if (query.length < 2 || byChannel.isEmpty()) return emptyList()
+        val now = System.currentTimeMillis()
+        val out = ArrayList<GuideHit>()
+        for ((cid, list) in byChannel) {
+            val cname = idToName[cid] ?: cid
+            for (e in list) {
+                if (e.endMs >= now && e.title.contains(query, ignoreCase = true)) {
+                    out.add(GuideHit(cid, cname, e))
+                }
+            }
+        }
+        return out.sortedBy { it.entry.startMs }.take(limit)
+    }
 
     private fun norm(s: String): String = s.lowercase().replace(Regex("[^a-z0-9]"), "")
 
@@ -473,6 +493,7 @@ object EpgStore {
         loadedUrl = null
         byChannel = emptyMap()
         nameToId = emptyMap()
+        idToName = emptyMap()
         loaded.value = false
         loading.value = false
     }
@@ -509,9 +530,10 @@ object EpgStore {
 
                 val now = System.currentTimeMillis()
                 val windowStart = now - 60L * 60 * 1000            // keep last hour
-                val windowEnd = now + 36L * 60 * 60 * 1000         // ...through next 36h
+                val windowEnd = now + 7L * 24 * 60 * 60 * 1000     // ...through the next 7 days
                 val programmes = HashMap<String, ArrayList<EpgEntry>>()
                 val names = HashMap<String, String>()
+                val idNames = HashMap<String, String>()
 
                 val req = okhttp3.Request.Builder().url(url).header("User-Agent", Net.UA).build()
                 Net.streamClient.newCall(req).execute().use { resp ->
@@ -550,10 +572,11 @@ object EpgStore {
                                     if (id != null && nm.isNotBlank()) {
                                         val key = norm(nm)
                                         if (key.isNotBlank() && !names.containsKey(key)) names[key] = id
+                                        if (!idNames.containsKey(id)) idNames[id] = nm
                                     }
                                 }
                                 2 -> progTitle = (progTitle + (parser.text ?: "")).trim()
-                                3 -> progDesc = (progDesc + (parser.text ?: "")).trim()
+                                3 -> { /* descriptions skipped: keeps a 7-day guide light in memory */ }
                             }
                             org.xmlpull.v1.XmlPullParser.END_TAG -> when (parser.name) {
                                 "channel" -> curChannelId = null
@@ -579,6 +602,7 @@ object EpgStore {
                 programmes.values.forEach { it.sortBy { e -> e.startMs } }
                 byChannel = programmes
                 nameToId = names
+                idToName = idNames
                 loadedUrl = url
                 loaded.value = programmes.isNotEmpty()
             } catch (e: Exception) {

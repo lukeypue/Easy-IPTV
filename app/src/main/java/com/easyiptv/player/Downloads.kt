@@ -4,21 +4,9 @@ import android.app.DownloadManager
 import android.content.Context
 import android.content.SharedPreferences
 import android.net.Uri
-import androidx.compose.runtime.mutableStateOf
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.io.FileOutputStream
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 /* ----------------------------- offline downloads (expire after 7 days) ----------------------------- */
 
@@ -102,56 +90,5 @@ object DownloadStore {
         } catch (e: Exception) {
             "Couldn't start that download. (${e.message})"
         }
-    }
-}
-
-/* ----------------------------- live TV recorder (DVR) ----------------------------- */
-
-object Recorder {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var job: Job? = null
-
-    /** Name of the channel currently recording, or null. Compose-observable. */
-    val activeName = mutableStateOf<String?>(null)
-
-    fun recordingsDir(context: Context): File =
-        File(context.getExternalFilesDir(null), "recordings").apply { mkdirs() }
-
-    fun start(context: Context, url: String, name: String) {
-        stop()
-        activeName.value = name
-        val dir = recordingsDir(context)
-        job = scope.launch {
-            try {
-                val req = Request.Builder().url(url).header("User-Agent", Net.UA).build()
-                Net.streamClient.newCall(req).execute().use { resp ->
-                    val body = resp.body ?: return@use
-                    val stamp = SimpleDateFormat("MMM-d_h-mm-ss_a", Locale.US).format(Date())
-                    val safe = name.replace(Regex("[^A-Za-z0-9 _-]"), "").trim()
-                        .replace(' ', '_').take(40).ifBlank { "channel" }
-                    val f = File(dir, "REC_${safe}_$stamp.ts")
-                    body.byteStream().use { inp ->
-                        FileOutputStream(f).use { out ->
-                            val buf = ByteArray(64 * 1024)
-                            while (isActive) {
-                                val n = inp.read(buf)
-                                if (n < 0) break
-                                out.write(buf, 0, n)
-                            }
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                // stream closed or network error — the partial file is kept and playable
-            } finally {
-                activeName.value = null
-            }
-        }
-    }
-
-    fun stop() {
-        job?.cancel()
-        job = null
-        activeName.value = null
     }
 }

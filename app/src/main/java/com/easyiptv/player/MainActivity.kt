@@ -38,9 +38,6 @@ import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FiberManualRecord
-import androidx.compose.material.icons.filled.LiveTv
-import androidx.compose.material.icons.filled.Movie
-import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
@@ -48,18 +45,16 @@ import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Today
-import androidx.compose.material.icons.filled.Tv
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -153,9 +148,6 @@ sealed class Nav {
     object Home : Nav()
     data class Play(val queue: List<Playable>, val start: Int = 0, val from: Nav = Home) : Nav()
     data class Series(val s: SeriesItem) : Nav()
-    object Downloads : Nav()
-    object Recordings : Nav()
-    object Playlists : Nav()
     object AddPlaylist : Nav()
 }
 
@@ -187,7 +179,8 @@ fun App() {
     var reload by remember { mutableIntStateOf(0) }
 
     // Remembered across screens so "back" lands where you left off.
-    var tab by remember { mutableIntStateOf(0) }
+    var railSection by remember { mutableStateOf("live") }
+    var railDepth by remember { mutableIntStateOf(1) }   // 0 = main menu, 1 = inside a section
     var liveCat by remember(activeIdx) { mutableStateOf("all") }
     var movieCat by remember(activeIdx) { mutableStateOf("all") }
     var seriesCat by remember(activeIdx) { mutableStateOf("all") }
@@ -196,6 +189,21 @@ fun App() {
     LaunchedEffect(Unit) {
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             DownloadStore.cleanup(prefs)
+            ScheduleStore.cleanup(prefs)
+        }
+    }
+
+    // Recording shows a notification; Android 13+ wants permission for that.
+    val notifPermission = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { }
+    LaunchedEffect(Unit) {
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                context, android.Manifest.permission.POST_NOTIFICATIONS
+            ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            notifPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 
@@ -236,7 +244,7 @@ fun App() {
 
     when {
         playlists.isEmpty() -> AddPlaylistScreen(first = true, onSaved = { addPlaylist(it) }, onBack = null)
-        nav is Nav.AddPlaylist -> AddPlaylistScreen(first = false, onSaved = { addPlaylist(it) }, onBack = { nav = Nav.Playlists })
+        nav is Nav.AddPlaylist -> AddPlaylistScreen(first = false, onSaved = { addPlaylist(it) }, onBack = { nav = Nav.Home })
         nav is Nav.Play -> {
             val pl = nav as Nav.Play
             PlayerScreen(
@@ -257,18 +265,31 @@ fun App() {
                 onBack = { nav = Nav.Home }
             )
         }
-        nav is Nav.Downloads -> DownloadsScreen(prefs, onPlay = { nav = Nav.Play(listOf(it), from = Nav.Downloads) }, onBack = { nav = Nav.Home })
-        nav is Nav.Recordings -> RecordingsScreen(onPlay = { nav = Nav.Play(listOf(it), from = Nav.Recordings) }, onBack = { nav = Nav.Home })
-        nav is Nav.Playlists -> PlaylistsScreen(
-            playlists = playlists,
+        else -> HomeScreen(
+            prefs = prefs,
+            playlistName = playlists.getOrNull(activeIdx)?.name ?: "",
+            source = source,
+            data = data,
+            loadError = loadError,
             activeIdx = activeIdx,
-            onSelect = { i ->
+            section = railSection,
+            depth = railDepth,
+            onRoot = { id ->
+                railSection = id
+                railDepth = if (id == "live" || id == "movies" || id == "series") 1 else 0
+            },
+            onBackToRoot = { railDepth = 0 },
+            liveCat = liveCat, onLiveCat = { liveCat = it },
+            movieCat = movieCat, onMovieCat = { movieCat = it },
+            seriesCat = seriesCat, onSeriesCat = { seriesCat = it },
+            searchQuery = searchQuery, onSearchQuery = { searchQuery = it },
+            playlists = playlists,
+            onSelectPlaylist = { i ->
                 activeIdx = i
                 PlaylistStore.setActive(prefs, i)
                 reload++
-                nav = Nav.Home
             },
-            onDelete = { i ->
+            onDeletePlaylist = { i ->
                 val next = playlists.toMutableList().apply { removeAt(i) }
                 playlists = next
                 PlaylistStore.save(prefs, next)
@@ -278,28 +299,10 @@ fun App() {
                 }
                 reload++
             },
-            onAdd = { nav = Nav.AddPlaylist },
-            onBack = { nav = Nav.Home }
-        )
-        else -> HomeScreen(
-            prefs = prefs,
-            playlistName = playlists.getOrNull(activeIdx)?.name ?: "",
-            source = source,
-            data = data,
-            loadError = loadError,
-            activeIdx = activeIdx,
-            tab = tab,
-            onTab = { tab = it },
-            liveCat = liveCat, onLiveCat = { liveCat = it },
-            movieCat = movieCat, onMovieCat = { movieCat = it },
-            seriesCat = seriesCat, onSeriesCat = { seriesCat = it },
-            searchQuery = searchQuery, onSearchQuery = { searchQuery = it },
+            onAddPlaylist = { nav = Nav.AddPlaylist },
             onRetry = { reload++ },
             onPlay = { nav = Nav.Play(listOf(it), from = Nav.Home) },
-            onSeries = { nav = Nav.Series(it) },
-            onDownloads = { nav = Nav.Downloads },
-            onRecordings = { nav = Nav.Recordings },
-            onPlaylists = { nav = Nav.Playlists }
+            onSeries = { nav = Nav.Series(it) }
         )
     }
 }
@@ -493,7 +496,7 @@ private fun BigOption(title: String, subtitle: String, onClick: () -> Unit) {
     }
 }
 
-/* ----------------------------- home + tabs ----------------------------- */
+/* ----------------------------- home: left-menu navigation ----------------------------- */
 @Composable
 fun HomeScreen(
     prefs: SharedPreferences,
@@ -502,19 +505,25 @@ fun HomeScreen(
     data: AppData?,
     loadError: String?,
     activeIdx: Int,
-    tab: Int,
-    onTab: (Int) -> Unit,
+    section: String,
+    depth: Int,
+    onRoot: (String) -> Unit,
+    onBackToRoot: () -> Unit,
     liveCat: String, onLiveCat: (String) -> Unit,
     movieCat: String, onMovieCat: (String) -> Unit,
     seriesCat: String, onSeriesCat: (String) -> Unit,
     searchQuery: String, onSearchQuery: (String) -> Unit,
+    playlists: List<Playlist>,
+    onSelectPlaylist: (Int) -> Unit,
+    onDeletePlaylist: (Int) -> Unit,
+    onAddPlaylist: () -> Unit,
     onRetry: () -> Unit,
     onPlay: (Playable) -> Unit,
-    onSeries: (SeriesItem) -> Unit,
-    onDownloads: () -> Unit,
-    onRecordings: () -> Unit,
-    onPlaylists: () -> Unit
+    onSeries: (SeriesItem) -> Unit
 ) {
+    // Remote's Back button climbs out one level instead of leaving the app.
+    BackHandler(enabled = depth == 1) { onBackToRoot() }
+
     Column(Modifier.fillMaxSize()) {
         // header
         Row(
@@ -534,60 +543,111 @@ fun HomeScreen(
             }
         }
 
-        // tab body
-        Box(Modifier.weight(1f)) {
-            when {
-                data == null && loadError == null -> LoadingBox("Loading your playlist…")
-                loadError != null -> ErrorBox(loadError, onRetry)
-                else -> when (tab) {
-                    0 -> LiveTab(prefs, activeIdx, data!!, liveCat, onLiveCat, onPlay)
-                    1 -> MoviesTab(prefs, data!!, movieCat, onMovieCat, onPlay)
-                    2 -> SeriesTab(source, data!!, seriesCat, onSeriesCat, onSeries)
-                    3 -> SearchTab(prefs, data!!, searchQuery, onSearchQuery, onPlay, onSeries)
-                    else -> MoreTab(prefs, onDownloads, onRecordings, onPlaylists)
+        when {
+            data == null && loadError == null -> Box(Modifier.weight(1f)) { LoadingBox("Loading your playlist…") }
+            loadError != null -> Box(Modifier.weight(1f)) { ErrorBox(loadError, onRetry) }
+            else -> Row(Modifier.weight(1f)) {
+                HomeRail(
+                    data = data!!,
+                    section = section,
+                    depth = depth,
+                    liveCat = liveCat,
+                    movieCat = movieCat,
+                    seriesCat = seriesCat,
+                    onRoot = onRoot,
+                    onBackToRoot = onBackToRoot,
+                    onCat = { id ->
+                        when (section) {
+                            "live" -> onLiveCat(id)
+                            "movies" -> onMovieCat(id)
+                            else -> onSeriesCat(id)
+                        }
+                    }
+                )
+                Box(Modifier.weight(1f)) {
+                    when {
+                        depth == 1 && section == "live" -> LivePane(prefs, activeIdx, data!!, liveCat, onPlay)
+                        depth == 1 && section == "movies" -> MoviesPane(prefs, data!!, movieCat, onPlay)
+                        depth == 1 && section == "series" -> SeriesPane(source, data!!, seriesCat, onSeries)
+                        section == "search" -> SearchTab(prefs, data!!, searchQuery, onSearchQuery, onPlay, onSeries)
+                        section == "downloads" -> DownloadsPane(prefs, onPlay)
+                        section == "recordings" -> RecordingsPane(prefs, onPlay)
+                        section == "playlists" -> PlaylistsPane(playlists, activeIdx, onSelectPlaylist, onDeletePlaylist, onAddPlaylist)
+                        section == "settings" -> SettingsPane(prefs)
+                        else -> Column(
+                            Modifier.fillMaxSize(),
+                            verticalArrangement = Arrangement.Center,
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text("Pick a section on the left.", color = Muted, fontSize = 14.sp)
+                        }
+                    }
                 }
             }
-        }
-
-        NavigationBar(containerColor = SurfaceCol) {
-            val itemColors = NavigationBarItemDefaults.colors(
-                selectedIconColor = Color(0xFF20160A),
-                selectedTextColor = Accent,
-                indicatorColor = Accent,
-                unselectedIconColor = Muted,
-                unselectedTextColor = Muted
-            )
-            NavigationBarItem(selected = tab == 0, onClick = { onTab(0) }, colors = itemColors,
-                icon = { Icon(Icons.Filled.LiveTv, contentDescription = null) }, label = { Text("Live") })
-            NavigationBarItem(selected = tab == 1, onClick = { onTab(1) }, colors = itemColors,
-                icon = { Icon(Icons.Filled.Movie, contentDescription = null) }, label = { Text("Movies") })
-            NavigationBarItem(selected = tab == 2, onClick = { onTab(2) }, colors = itemColors,
-                icon = { Icon(Icons.Filled.Tv, contentDescription = null) }, label = { Text("Series") })
-            NavigationBarItem(selected = tab == 3, onClick = { onTab(3) }, colors = itemColors,
-                icon = { Icon(Icons.Filled.Search, contentDescription = null) }, label = { Text("Search") })
-            NavigationBarItem(selected = tab == 4, onClick = { onTab(4) }, colors = itemColors,
-                icon = { Icon(Icons.Filled.MoreHoriz, contentDescription = null) }, label = { Text("More") })
         }
     }
 }
 
-/* File-browser style category list down the left side. */
+private val RootItems = listOf(
+    "live" to "Live TV",
+    "movies" to "Movies",
+    "series" to "Series",
+    "search" to "Search",
+    "downloads" to "Downloads",
+    "recordings" to "Recordings",
+    "playlists" to "Playlists",
+    "settings" to "Settings"
+)
+
+/* The whole app steers from this left menu: OK goes deeper, Back climbs out. */
 @Composable
-private fun CategoryRail(
-    cats: List<Category>,
-    extras: List<Pair<String, String>>,
-    selected: String,
-    onSelect: (String) -> Unit
+private fun HomeRail(
+    data: AppData,
+    section: String,
+    depth: Int,
+    liveCat: String,
+    movieCat: String,
+    seriesCat: String,
+    onRoot: (String) -> Unit,
+    onBackToRoot: () -> Unit,
+    onCat: (String) -> Unit
 ) {
     LazyColumn(
         modifier = Modifier.width(126.dp).fillMaxHeight().background(SurfaceCol),
         contentPadding = PaddingValues(vertical = 6.dp)
     ) {
-        items(extras) { p ->
-            RailItem(p.second, selected == p.first) { onSelect(p.first) }
-        }
-        items(cats) { c ->
-            RailItem(c.name, selected == c.id) { onSelect(c.id) }
+        if (depth == 0) {
+            items(RootItems) { p ->
+                RailItem(p.second, section == p.first) { onRoot(p.first) }
+            }
+        } else {
+            item { RailItem("←  Main menu", false) { onBackToRoot() } }
+            val cats: List<Category>
+            val extras: List<Pair<String, String>>
+            val selected: String
+            when (section) {
+                "live" -> {
+                    cats = data.liveCats
+                    extras = listOf("fav" to "★ Favorites", "all" to "All channels")
+                    selected = liveCat
+                }
+                "movies" -> {
+                    cats = data.vodCats
+                    extras = listOf("all" to "All movies")
+                    selected = movieCat
+                }
+                else -> {
+                    cats = data.seriesCats
+                    extras = listOf("all" to "All series")
+                    selected = seriesCat
+                }
+            }
+            items(extras) { p ->
+                RailItem(p.second, selected == p.first) { onCat(p.first) }
+            }
+            items(cats) { c ->
+                RailItem(c.name, selected == c.id) { onCat(c.id) }
+            }
         }
     }
 }
@@ -655,16 +715,16 @@ private fun ErrorBox(err: String, onRetry: () -> Unit) {
     }
 }
 
-/* ----------------------------- live tab (with built-in guide) ----------------------------- */
+/* ----------------------------- live pane (with built-in guide) ----------------------------- */
 @Composable
-fun LiveTab(
+fun LivePane(
     prefs: SharedPreferences,
     activeIdx: Int,
     data: AppData,
     selectedCat: String,
-    onCat: (String) -> Unit,
     onPlay: (Playable) -> Unit
 ) {
+    val context = LocalContext.current
     val favKey = "fav_live_$activeIdx"
     var favs by remember(activeIdx) { mutableStateOf(prefs.getStringSet(favKey, emptySet())?.toSet() ?: emptySet()) }
     var expandedId by remember { mutableStateOf<String?>(null) }
@@ -687,107 +747,119 @@ fun LiveTab(
         }
     }
 
-    Row(Modifier.fillMaxSize()) {
-        CategoryRail(
-            cats = data.liveCats,
-            extras = listOf("fav" to "★ Favorites", "all" to "All channels"),
-            selected = selectedCat,
-            onSelect = onCat
-        )
-        Column(Modifier.weight(1f)) {
-            if (guideLoading) {
+    Column(Modifier.fillMaxSize()) {
+        if (guideLoading) {
+            Text(
+                "Downloading TV guide… this can take a minute or two.",
+                fontSize = 11.sp, color = Muted,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+            )
+        }
+        if (filtered.isEmpty()) {
+            Column(
+                Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
                 Text(
-                    "Downloading TV guide… this can take a minute or two.",
-                    fontSize = 11.sp, color = Muted,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                    if (selectedCat == "fav") "No favorites yet — tap a star." else "No channels here.",
+                    color = Muted, fontSize = 14.sp
                 )
             }
-            if (filtered.isEmpty()) {
-                Column(
-                    Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Text(
-                        if (selectedCat == "fav") "No favorites yet — tap a star." else "No channels here.",
-                        color = Muted, fontSize = 14.sp
-                    )
-                }
-            } else {
-                LazyColumn(
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    items(filtered) { ch ->
-                        val schedule = if (guideReady) EpgStore.guide(ch.epgId, ch.name) else emptyList()
-                        val now = System.currentTimeMillis()
-                        val current = schedule.firstOrNull { now in it.startMs until it.endMs }
-                        Column(
-                            Modifier
-                                .fillMaxWidth()
-                                .tvFocus()
-                                .background(SurfaceCol, RoundedCornerShape(14.dp))
-                                .clickable { onPlay(livePlayable(ch)) }
-                                .padding(10.dp)
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                ChannelIcon(ch.name, ch.icon)
-                                Spacer(Modifier.width(10.dp))
-                                Column(Modifier.weight(1f)) {
+        } else {
+            LazyColumn(
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(filtered) { ch ->
+                    val schedule = if (guideReady) EpgStore.guide(ch.epgId, ch.name) else emptyList()
+                    val now = System.currentTimeMillis()
+                    val current = schedule.firstOrNull { now in it.startMs until it.endMs }
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .tvFocus()
+                            .background(SurfaceCol, RoundedCornerShape(14.dp))
+                            .clickable { onPlay(livePlayable(ch)) }
+                            .padding(10.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            ChannelIcon(ch.name, ch.icon)
+                            Spacer(Modifier.width(10.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    ch.name,
+                                    color = Ink, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis
+                                )
+                                if (current != null) {
                                     Text(
-                                        ch.name,
-                                        color = Ink, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                                        "${fmt.format(Date(current.startMs))}–${fmt.format(Date(current.endMs))}  •  ${current.title}",
+                                        color = Accent, fontSize = 12.sp,
                                         maxLines = 1, overflow = TextOverflow.Ellipsis
-                                    )
-                                    if (current != null) {
-                                        Text(
-                                            "${fmt.format(Date(current.startMs))}–${fmt.format(Date(current.endMs))}  •  ${current.title}",
-                                            color = Accent, fontSize = 12.sp,
-                                            maxLines = 1, overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-                                }
-                                if (schedule.isNotEmpty()) {
-                                    IconButton(onClick = {
-                                        expandedId = if (expandedId == ch.id) null else ch.id
-                                    }) {
-                                        Icon(
-                                            Icons.Filled.Today,
-                                            contentDescription = "See what's on later",
-                                            tint = if (expandedId == ch.id) Accent else Muted
-                                        )
-                                    }
-                                }
-                                IconButton(onClick = { toggleFav(ch.id) }) {
-                                    Icon(
-                                        if (favs.contains(ch.id)) Icons.Filled.Star else Icons.Filled.StarBorder,
-                                        contentDescription = "Favorite",
-                                        tint = if (favs.contains(ch.id)) Accent else Muted
                                     )
                                 }
                             }
-                            if (expandedId == ch.id && schedule.isNotEmpty()) {
-                                Spacer(Modifier.height(6.dp))
-                                schedule.take(10).forEach { e ->
-                                    val isNow = now in e.startMs until e.endMs
-                                    Row(
-                                        Modifier.fillMaxWidth().padding(vertical = 3.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(
-                                            fmt.format(Date(e.startMs)),
-                                            fontSize = 12.sp,
-                                            color = if (isNow) Accent else Muted,
-                                            modifier = Modifier.width(72.dp)
-                                        )
-                                        Text(
-                                            (if (isNow) "NOW  •  " else "") + e.title,
-                                            fontSize = 13.sp,
-                                            fontWeight = if (isNow) FontWeight.Bold else FontWeight.Normal,
-                                            color = if (isNow) Ink else Muted,
-                                            maxLines = 2, overflow = TextOverflow.Ellipsis,
-                                            modifier = Modifier.weight(1f)
-                                        )
+                            if (schedule.isNotEmpty()) {
+                                IconButton(onClick = {
+                                    expandedId = if (expandedId == ch.id) null else ch.id
+                                }) {
+                                    Icon(
+                                        Icons.Filled.Today,
+                                        contentDescription = "See what's on later",
+                                        tint = if (expandedId == ch.id) Accent else Muted
+                                    )
+                                }
+                            }
+                            IconButton(onClick = { toggleFav(ch.id) }) {
+                                Icon(
+                                    if (favs.contains(ch.id)) Icons.Filled.Star else Icons.Filled.StarBorder,
+                                    contentDescription = "Favorite",
+                                    tint = if (favs.contains(ch.id)) Accent else Muted
+                                )
+                            }
+                        }
+                        if (expandedId == ch.id && schedule.isNotEmpty()) {
+                            Spacer(Modifier.height(6.dp))
+                            val dayFmt = remember { SimpleDateFormat("EEE h:mm a", Locale.getDefault()) }
+                            schedule.take(30).forEach { e ->
+                                val isNow = now in e.startMs until e.endMs
+                                Row(
+                                    Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        dayFmt.format(Date(e.startMs)),
+                                        fontSize = 12.sp,
+                                        color = if (isNow) Accent else Muted,
+                                        modifier = Modifier.width(96.dp)
+                                    )
+                                    Text(
+                                        (if (isNow) "NOW  •  " else "") + e.title,
+                                        fontSize = 13.sp,
+                                        fontWeight = if (isNow) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (isNow) Ink else Muted,
+                                        maxLines = 2, overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    if (ch.url.endsWith(".ts")) {
+                                        IconButton(
+                                            modifier = Modifier.size(32.dp),
+                                            onClick = {
+                                                if (isNow) {
+                                                    Recorder.start(context, ch.url, "${e.title} (${ch.name})", e.endMs + 2 * 60 * 1000)
+                                                    toast(context, "Recording \"${e.title}\" until it ends.")
+                                                } else {
+                                                    toast(context, ScheduleStore.add(context, prefs, e.title, ch.name, ch.url, e.startMs, e.endMs))
+                                                }
+                                            }
+                                        ) {
+                                            Icon(
+                                                Icons.Filled.FiberManualRecord,
+                                                contentDescription = if (isNow) "Record now" else "Schedule recording",
+                                                tint = Live
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -808,13 +880,12 @@ private fun livePlayable(ch: LiveChannel) = Playable(
     canRecord = ch.url.endsWith(".ts")
 )
 
-/* ----------------------------- movies tab ----------------------------- */
+/* ----------------------------- movies pane ----------------------------- */
 @Composable
-fun MoviesTab(
+fun MoviesPane(
     prefs: SharedPreferences,
     data: AppData,
     selectedCat: String,
-    onCat: (String) -> Unit,
     onPlay: (Playable) -> Unit
 ) {
     val context = LocalContext.current
@@ -834,43 +905,33 @@ fun MoviesTab(
 
     val filtered = data.movies.filter { selectedCat == "all" || it.categoryId == selectedCat }
 
-    Row(Modifier.fillMaxSize()) {
-        CategoryRail(
-            cats = data.vodCats,
-            extras = listOf("all" to "All movies"),
-            selected = selectedCat,
-            onSelect = onCat
-        )
-        LazyColumn(
-            modifier = Modifier.weight(1f),
-            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            items(filtered) { m ->
-                MediaRow(
-                    name = m.name,
-                    icon = m.icon,
-                    onClick = { onPlay(Playable(m.name, m.url, isLive = false)) },
-                    trailing = {
-                        IconButton(onClick = {
-                            toast(context, DownloadStore.start(context, prefs, m.name, m.url))
-                        }) {
-                            Icon(Icons.Filled.Download, contentDescription = "Download for offline", tint = Muted)
-                        }
+    LazyColumn(
+        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        items(filtered) { m ->
+            MediaRow(
+                name = m.name,
+                icon = m.icon,
+                onClick = { onPlay(Playable(m.name, m.url, isLive = false)) },
+                trailing = {
+                    IconButton(onClick = {
+                        toast(context, DownloadStore.start(context, prefs, m.name, m.url))
+                    }) {
+                        Icon(Icons.Filled.Download, contentDescription = "Download for offline", tint = Muted)
                     }
-                )
-            }
+                }
+            )
         }
     }
 }
 
-/* ----------------------------- series tab ----------------------------- */
+/* ----------------------------- series pane ----------------------------- */
 @Composable
-fun SeriesTab(
+fun SeriesPane(
     source: Source?,
     data: AppData,
     selectedCat: String,
-    onCat: (String) -> Unit,
     onSeries: (SeriesItem) -> Unit
 ) {
     if (source?.supportsSeries != true || data.series.isEmpty()) {
@@ -894,43 +955,22 @@ fun SeriesTab(
 
     val filtered = data.series.filter { selectedCat == "all" || it.categoryId == selectedCat }
 
-    Row(Modifier.fillMaxSize()) {
-        CategoryRail(
-            cats = data.seriesCats,
-            extras = listOf("all" to "All series"),
-            selected = selectedCat,
-            onSelect = onCat
-        )
-        LazyColumn(
-            modifier = Modifier.weight(1f),
-            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            items(filtered) { s ->
-                MediaRow(name = s.name, icon = s.icon, onClick = { onSeries(s) }, trailing = {})
-            }
+    LazyColumn(
+        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        items(filtered) { s ->
+            MediaRow(name = s.name, icon = s.icon, onClick = { onSeries(s) }, trailing = {})
         }
     }
 }
 
-/* ----------------------------- more tab ----------------------------- */
+/* ----------------------------- settings pane ----------------------------- */
 @Composable
-fun MoreTab(
-    prefs: SharedPreferences,
-    onDownloads: () -> Unit,
-    onRecordings: () -> Unit,
-    onPlaylists: () -> Unit
-) {
+fun SettingsPane(prefs: SharedPreferences) {
     var bufferSec by remember { mutableIntStateOf(prefs.getInt("buffer_sec", 20)) }
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
-        MoreRow("Downloads", "Movies & episodes saved for offline (kept 7 days)", onDownloads)
-        Spacer(Modifier.height(10.dp))
-        MoreRow("Recordings", "Live TV you've recorded", onRecordings)
-        Spacer(Modifier.height(10.dp))
-        MoreRow("Playlists", "Add, switch, or remove playlists (up to 3)", onPlaylists)
-
-        Spacer(Modifier.height(24.dp))
         Text("Stream buffer", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
         Text(
@@ -945,23 +985,7 @@ fun MoreTab(
         }
 
         Spacer(Modifier.height(24.dp))
-        Text("Easy IPTV 2.0 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
-    }
-}
-
-@Composable
-private fun MoreRow(title: String, subtitle: String, onClick: () -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .tvFocus()
-            .background(SurfaceCol, RoundedCornerShape(14.dp))
-            .clickable { onClick() }
-            .padding(16.dp)
-    ) {
-        Text(title, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Ink)
-        Spacer(Modifier.height(3.dp))
-        Text(subtitle, fontSize = 12.sp, color = Muted)
+        Text("Easy IPTV 3.0 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
     }
 }
 
@@ -1067,8 +1091,17 @@ fun SearchTab(
         val liveHits = data.live.filter { it.name.contains(q, ignoreCase = true) }.take(30)
         val movieHits = data.movies.filter { it.name.contains(q, ignoreCase = true) }.take(30)
         val seriesHits = data.series.filter { it.name.contains(q, ignoreCase = true) }.take(30)
+        val guideHits = if (EpgStore.loaded.value) EpgStore.search(q, 30) else emptyList()
 
-        if (liveHits.isEmpty() && movieHits.isEmpty() && seriesHits.isEmpty()) {
+        // Match guide channels back to playable channels (by guide id, then by name).
+        val context = LocalContext.current
+        val byEpgId = remember(data) { data.live.filter { it.epgId != null }.associateBy { it.epgId!!.lowercase() } }
+        val byNorm = remember(data) {
+            data.live.associateBy { it.name.lowercase().replace(Regex("[^a-z0-9]"), "") }
+        }
+        val guideFmt = remember { SimpleDateFormat("EEE h:mm a", Locale.getDefault()) }
+
+        if (liveHits.isEmpty() && movieHits.isEmpty() && seriesHits.isEmpty() && guideHits.isEmpty()) {
             Column(
                 Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.Center,
@@ -1099,6 +1132,53 @@ fun SearchTab(
                 item { SectionHeader("Series") }
                 items(seriesHits) { s ->
                     MediaRow(s.name, s.icon, onClick = { saveRecent(q); onSeries(s) }, trailing = {})
+                }
+            }
+            if (guideHits.isNotEmpty()) {
+                item { SectionHeader("TV Guide — upcoming shows") }
+                items(guideHits) { hit ->
+                    val ch = byEpgId[hit.channelXmlId]
+                        ?: byNorm[hit.channelName.lowercase().replace(Regex("[^a-z0-9]"), "")]
+                    val now = System.currentTimeMillis()
+                    val airingNow = now in hit.entry.startMs until hit.entry.endMs
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .tvFocus()
+                            .background(SurfaceCol, RoundedCornerShape(14.dp))
+                            .clickable(enabled = ch != null) {
+                                if (ch == null) return@clickable
+                                saveRecent(q)
+                                if (airingNow) {
+                                    onPlay(livePlayable(ch))
+                                } else {
+                                    toast(context, ScheduleStore.add(context, prefs, hit.entry.title, ch.name, ch.url, hit.entry.startMs, hit.entry.endMs))
+                                }
+                            }
+                            .padding(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                hit.entry.title,
+                                color = Ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                "${guideFmt.format(Date(hit.entry.startMs))}  •  ${ch?.name ?: hit.channelName}" +
+                                    if (ch == null) "  (channel not in your playlist)" else "",
+                                color = if (airingNow) Accent else Muted, fontSize = 12.sp,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        if (ch != null && (airingNow || ch.url.endsWith(".ts"))) {
+                            Icon(
+                                if (airingNow) Icons.Filled.PlayArrow else Icons.Filled.FiberManualRecord,
+                                contentDescription = if (airingNow) "Watch now" else "Schedule recording",
+                                tint = if (airingNow) Accent else Live
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -1207,12 +1287,10 @@ fun SeriesDetailScreen(
 
 /* ----------------------------- downloads ----------------------------- */
 @Composable
-fun DownloadsScreen(prefs: SharedPreferences, onPlay: (Playable) -> Unit, onBack: () -> Unit) {
+fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
     var items by remember { mutableStateOf(DownloadStore.load(prefs)) }
-    BackHandler { onBack() }
 
     Column(Modifier.fillMaxSize()) {
-        ScreenHeader("Downloads", onBack)
         Text(
             "Saved for offline watching. Each download is kept for 7 days, then removed automatically.",
             fontSize = 12.sp, color = Muted,
@@ -1277,17 +1355,54 @@ fun DownloadsScreen(prefs: SharedPreferences, onPlay: (Playable) -> Unit, onBack
 
 /* ----------------------------- recordings ----------------------------- */
 @Composable
-fun RecordingsScreen(onPlay: (Playable) -> Unit, onBack: () -> Unit) {
+fun RecordingsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
     val context = LocalContext.current
     var files by remember {
         mutableStateOf(
             Recorder.recordingsDir(context).listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList()
         )
     }
-    BackHandler { onBack() }
+    var scheds by remember { mutableStateOf(ScheduleStore.load(prefs)) }
+    val schedFmt = remember { SimpleDateFormat("EEE, MMM d  h:mm a", Locale.getDefault()) }
 
     Column(Modifier.fillMaxSize()) {
-        ScreenHeader("Recordings", onBack)
+        if (scheds.isNotEmpty()) {
+            Text(
+                "Scheduled",
+                fontWeight = FontWeight.ExtraBold, fontSize = 14.sp, color = Accent,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+            )
+            scheds.forEach { s ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 3.dp)
+                        .background(SurfaceCol, RoundedCornerShape(12.dp))
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(s.title, color = Ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            "${schedFmt.format(Date(s.startMs))}  •  ${s.channelName}",
+                            color = Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    IconButton(onClick = {
+                        ScheduleStore.cancel(context, prefs, s.id)
+                        scheds = ScheduleStore.load(prefs)
+                    }) {
+                        Icon(Icons.Filled.Delete, contentDescription = "Cancel", tint = Muted)
+                    }
+                }
+            }
+            Text(
+                "The device must be powered on when a scheduled recording starts.",
+                fontSize = 11.sp, color = Muted,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp)
+            )
+        }
         val active = Recorder.activeName.value
         if (active != null) {
             Row(
@@ -1302,7 +1417,7 @@ fun RecordingsScreen(onPlay: (Playable) -> Unit, onBack: () -> Unit) {
                 Spacer(Modifier.width(8.dp))
                 Text("Recording: $active", color = Ink, fontSize = 14.sp, modifier = Modifier.weight(1f))
                 Button(onClick = {
-                    Recorder.stop()
+                    Recorder.stop(context)
                     files = Recorder.recordingsDir(context).listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList()
                 }) {
                     Icon(Icons.Filled.Stop, contentDescription = null)
@@ -1362,17 +1477,14 @@ fun RecordingsScreen(onPlay: (Playable) -> Unit, onBack: () -> Unit) {
 
 /* ----------------------------- playlists ----------------------------- */
 @Composable
-fun PlaylistsScreen(
+fun PlaylistsPane(
     playlists: List<Playlist>,
     activeIdx: Int,
     onSelect: (Int) -> Unit,
     onDelete: (Int) -> Unit,
-    onAdd: () -> Unit,
-    onBack: () -> Unit
+    onAdd: () -> Unit
 ) {
-    BackHandler { onBack() }
     Column(Modifier.fillMaxSize()) {
-        ScreenHeader("Playlists", onBack)
         Text(
             "Tap a playlist to switch to it. You can save up to ${PlaylistStore.MAX}.",
             fontSize = 12.sp, color = Muted,
@@ -1433,19 +1545,6 @@ fun PlaylistsScreen(
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun ScreenHeader(title: String, onBack: () -> Unit) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(start = 4.dp, end = 8.dp, top = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        IconButton(onClick = onBack) {
-            Icon(Icons.Filled.ArrowBack, contentDescription = "Back", tint = Muted)
-        }
-        Text(title, fontWeight = FontWeight.ExtraBold, fontSize = 18.sp, color = Ink)
     }
 }
 
@@ -1544,6 +1643,7 @@ fun PlayerScreen(
     // Our top bar follows the player's own controls, plus a timer of our own so it
     // ALWAYS hides after 5 seconds — even on Fire TV where control behavior differs.
     var overlayVisible by remember { mutableStateOf(true) }
+    var showRecordChoice by remember { mutableStateOf(false) }
     LaunchedEffect(overlayVisible, currentIdx) {
         if (overlayVisible) {
             kotlinx.coroutines.delay(5000)
@@ -1602,6 +1702,15 @@ fun PlayerScreen(
     DisposableEffect(Unit) {
         onDispose { exo.release() }
     }
+    // If the person presses Home / switches apps, pause — no ghost audio in the background.
+    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_STOP) exo.pause()
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+    }
     BackHandler { onBack() }
 
     LaunchedEffect(current.epgId, EpgStore.loaded.value) {
@@ -1627,6 +1736,11 @@ fun PlayerScreen(
                     useController = true
                     // Never let the screen saver / sleep kick in while watching.
                     keepScreenOn = true
+                    // Grab the remote's key presses so OK re-opens the controls
+                    // even after they've auto-hidden (Fire TV).
+                    isFocusable = true
+                    isFocusableInTouchMode = true
+                    requestFocus()
                     controllerShowTimeoutMs = 5000
                     setShowNextButton(queue.size > 1)
                     setShowPreviousButton(queue.size > 1)
@@ -1698,11 +1812,10 @@ fun PlayerScreen(
                         modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)),
                         onClick = {
                             if (recordingThis) {
-                                Recorder.stop()
-                                toast(context, "Recording saved — find it in More → Recordings.")
+                                Recorder.stop(context)
+                                toast(context, "Recording saved — find it in Recordings.")
                             } else {
-                                Recorder.start(context, current.url, current.name)
-                                toast(context, "Recording started. Tap the red button again to stop.")
+                                showRecordChoice = true
                             }
                         }
                     ) {
@@ -1731,6 +1844,53 @@ fun PlayerScreen(
                     )
                 }
             }
+        }
+
+        if (showRecordChoice) {
+            val nowShow = nowNext.firstOrNull { System.currentTimeMillis() in it.startMs until it.endMs }
+            AlertDialog(
+                onDismissRequest = { showRecordChoice = false },
+                containerColor = SurfaceCol,
+                title = { Text("Record ${current.name}?", color = Ink) },
+                text = {
+                    Text(
+                        if (nowShow != null)
+                            "\"${nowShow.title}\" ends at ${fmt.format(Date(nowShow.endMs))}. Recording keeps going in the background even if you leave the app."
+                        else
+                            "Recording keeps going in the background even if you leave the app. Tap the red button again to stop.",
+                        color = Muted, fontSize = 13.sp
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        showRecordChoice = false
+                        if (nowShow != null) {
+                            Recorder.start(context, current.url, "${nowShow.title} (${current.name})", nowShow.endMs + 2 * 60 * 1000)
+                            toast(context, "Recording until this show ends.")
+                        } else {
+                            Recorder.start(context, current.url, current.name)
+                            toast(context, "Recording started. Tap the red button again to stop.")
+                        }
+                    }) {
+                        Text(if (nowShow != null) "Record this show" else "Start recording", color = Accent)
+                    }
+                },
+                dismissButton = {
+                    if (nowShow != null) {
+                        TextButton(onClick = {
+                            showRecordChoice = false
+                            Recorder.start(context, current.url, current.name)
+                            toast(context, "Recording until you stop it.")
+                        }) {
+                            Text("Record until I stop", color = Muted)
+                        }
+                    } else {
+                        TextButton(onClick = { showRecordChoice = false }) {
+                            Text("Cancel", color = Muted)
+                        }
+                    }
+                }
+            )
         }
     }
 }
