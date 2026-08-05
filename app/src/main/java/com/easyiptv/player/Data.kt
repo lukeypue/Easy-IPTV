@@ -1,5 +1,6 @@
 package com.easyiptv.player
 
+import android.content.Context
 import android.content.SharedPreferences
 import android.util.Base64
 import kotlinx.coroutines.Dispatchers
@@ -112,6 +113,124 @@ object PlaylistStore {
     fun activeIndex(prefs: SharedPreferences): Int = prefs.getInt("active_playlist", 0)
     fun setActive(prefs: SharedPreferences, i: Int) {
         prefs.edit().putInt("active_playlist", i).apply()
+    }
+}
+
+/* ----------------------------- startup cache ----------------------------- */
+
+/**
+ * Saves the last successfully loaded channel/movie/series lists to disk.
+ * Next launch, the app opens INSTANTLY with this saved copy, then quietly
+ * refreshes from the provider in the background (the same trick Netflix,
+ * YouTube, and Xfinity use for a fast cold start).
+ */
+object DataCache {
+    fun keyFor(p: Playlist): String =
+        (p.type + "|" + p.host + "|" + p.user + "|" + p.url).hashCode().toString()
+
+    private fun file(context: Context, key: String) =
+        java.io.File(context.cacheDir, "playlist_cache_$key.json")
+
+    private fun catsToJson(cats: List<Category>): JSONArray {
+        val arr = JSONArray()
+        cats.forEach { c -> arr.put(JSONObject().put("i", c.id).put("n", c.name)) }
+        return arr
+    }
+
+    private fun catsFromJson(arr: JSONArray?): List<Category> {
+        if (arr == null) return emptyList()
+        return (0 until arr.length()).map { i ->
+            val o = arr.getJSONObject(i)
+            Category(o.optString("i"), o.optString("n"))
+        }
+    }
+
+    fun save(context: Context, key: String, data: AppData) {
+        try {
+            val root = JSONObject()
+            root.put("liveCats", catsToJson(data.liveCats))
+            root.put("vodCats", catsToJson(data.vodCats))
+            root.put("serCats", catsToJson(data.seriesCats))
+            val liveArr = JSONArray()
+            data.live.forEach { c ->
+                liveArr.put(
+                    JSONObject().put("i", c.id).put("n", c.name).put("ic", c.icon ?: "")
+                        .put("c", c.categoryId ?: "").put("u", c.url).put("e", c.epgId ?: "")
+                )
+            }
+            root.put("live", liveArr)
+            val movArr = JSONArray()
+            data.movies.forEach { m ->
+                movArr.put(
+                    JSONObject().put("i", m.id).put("n", m.name).put("ic", m.icon ?: "")
+                        .put("c", m.categoryId ?: "").put("u", m.url)
+                )
+            }
+            root.put("movies", movArr)
+            val serArr = JSONArray()
+            data.series.forEach { s ->
+                serArr.put(
+                    JSONObject().put("i", s.id).put("n", s.name).put("ic", s.icon ?: "")
+                        .put("c", s.categoryId ?: "")
+                )
+            }
+            root.put("series", serArr)
+            file(context, key).writeText(root.toString())
+        } catch (e: Exception) {
+            // Cache is a nice-to-have; never let it break the app.
+        }
+    }
+
+    fun load(context: Context, key: String): AppData? {
+        return try {
+            val f = file(context, key)
+            if (!f.exists()) return null
+            val root = JSONObject(f.readText())
+            val live = root.optJSONArray("live")?.let { arr ->
+                (0 until arr.length()).map { i ->
+                    val o = arr.getJSONObject(i)
+                    LiveChannel(
+                        id = o.optString("i"), name = o.optString("n"),
+                        icon = o.optString("ic").ifBlank { null },
+                        categoryId = o.optString("c").ifBlank { null },
+                        url = o.optString("u"),
+                        epgId = o.optString("e").ifBlank { null }
+                    )
+                }
+            } ?: emptyList()
+            val movies = root.optJSONArray("movies")?.let { arr ->
+                (0 until arr.length()).map { i ->
+                    val o = arr.getJSONObject(i)
+                    Movie(
+                        id = o.optString("i"), name = o.optString("n"),
+                        icon = o.optString("ic").ifBlank { null },
+                        categoryId = o.optString("c").ifBlank { null },
+                        url = o.optString("u")
+                    )
+                }
+            } ?: emptyList()
+            val series = root.optJSONArray("series")?.let { arr ->
+                (0 until arr.length()).map { i ->
+                    val o = arr.getJSONObject(i)
+                    SeriesItem(
+                        id = o.optString("i"), name = o.optString("n"),
+                        icon = o.optString("ic").ifBlank { null },
+                        categoryId = o.optString("c").ifBlank { null }
+                    )
+                }
+            } ?: emptyList()
+            if (live.isEmpty() && movies.isEmpty() && series.isEmpty()) return null
+            AppData(
+                liveCats = catsFromJson(root.optJSONArray("liveCats")),
+                live = live,
+                vodCats = catsFromJson(root.optJSONArray("vodCats")),
+                movies = movies,
+                seriesCats = catsFromJson(root.optJSONArray("serCats")),
+                series = series
+            )
+        } catch (e: Exception) {
+            null
+        }
     }
 }
 
@@ -611,5 +730,84 @@ object EpgStore {
                 loading.value = false
             }
         }
+    }
+}
+
+/* ----------------------------- watch history & resume ----------------------------- */
+
+/**
+ * Remembers how far into each movie/episode/recording the person got.
+ * ≥92% counts as "watched". Keeps the most recent 300 items.
+ */
+object WatchStore {
+    private const val KEY = "watch_v1"
+
+    data class Item(val pos: Long, val dur: Long, val watched: Boolean, val updated: Long)
+
+    private fun loadJson(prefs: android.content.SharedPreferences): org.json.JSONObject =
+        try {
+            org.json.JSONObject(prefs.getString(KEY, null) ?: "{}")
+        } catch (e: Exception) {
+            org.json.JSONObject()
+        }
+
+    private fun save(prefs: android.content.SharedPreferences, o: org.json.JSONObject) {
+        prefs.edit().putString(KEY, o.toString()).apply()
+    }
+
+    fun get(prefs: android.content.SharedPreferences, url: String): Item? {
+        val o = loadJson(prefs).optJSONObject(url) ?: return null
+        return Item(o.optLong("p"), o.optLong("d"), o.optBoolean("w"), o.optLong("u"))
+    }
+
+    fun isWatched(prefs: android.content.SharedPreferences, url: String): Boolean =
+        get(prefs, url)?.watched == true
+
+    fun setProgress(prefs: android.content.SharedPreferences, url: String, pos: Long, dur: Long) {
+        val root = loadJson(prefs)
+        val existing = root.optJSONObject(url)
+        val wasWatched = existing?.optBoolean("w") == true
+        val watched = wasWatched || (dur > 0 && pos >= (dur * 0.92).toLong())
+        val o = org.json.JSONObject()
+        o.put("p", pos); o.put("d", dur); o.put("w", watched); o.put("u", System.currentTimeMillis())
+        root.put(url, o)
+        trim(root)
+        save(prefs, root)
+    }
+
+    fun markWatched(prefs: android.content.SharedPreferences, url: String) {
+        val root = loadJson(prefs)
+        val o = root.optJSONObject(url) ?: org.json.JSONObject()
+        o.put("w", true); o.put("u", System.currentTimeMillis())
+        if (!o.has("p")) o.put("p", 0L)
+        if (!o.has("d")) o.put("d", 0L)
+        root.put(url, o)
+        trim(root)
+        save(prefs, root)
+    }
+
+    /** Forget one item (used by "Start over"). */
+    fun clear(prefs: android.content.SharedPreferences, url: String) {
+        val root = loadJson(prefs)
+        root.remove(url)
+        save(prefs, root)
+    }
+
+    /** Forget a whole set (used by "Reset watched" on a series). */
+    fun clearAll(prefs: android.content.SharedPreferences, urls: Collection<String>) {
+        val root = loadJson(prefs)
+        urls.forEach { root.remove(it) }
+        save(prefs, root)
+    }
+
+    private fun trim(root: org.json.JSONObject) {
+        if (root.length() <= 300) return
+        val keys = ArrayList<Pair<String, Long>>()
+        val it = root.keys()
+        while (it.hasNext()) {
+            val k = it.next()
+            keys.add(k to (root.optJSONObject(k)?.optLong("u") ?: 0L))
+        }
+        keys.sortedBy { it.second }.take(root.length() - 300).forEach { root.remove(it.first) }
     }
 }

@@ -14,6 +14,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -68,6 +69,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -152,6 +156,13 @@ sealed class Nav {
 }
 
 /* ----------------------------- activity ----------------------------- */
+
+/* Safety net for TV remotes: any button press no screen element handled lands here,
+ * so the player can always react — menus can never become unreachable. */
+object PlayerKeys {
+    var handler: ((Int) -> Boolean)? = null
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -162,6 +173,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent?): Boolean {
+        if (PlayerKeys.handler?.invoke(keyCode) == true) return true
+        return super.onKeyDown(keyCode, event)
     }
 }
 
@@ -188,7 +204,7 @@ fun App() {
 
     LaunchedEffect(Unit) {
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            DownloadStore.cleanup(prefs)
+            DownloadStore.cleanup(context, prefs)
             ScheduleStore.cleanup(prefs)
         }
     }
@@ -212,15 +228,34 @@ fun App() {
         playlists.getOrNull(activeIdx)?.let { buildSource(it) }
     }
 
+    val cacheKey = remember(playlists, activeIdx) {
+        playlists.getOrNull(activeIdx)?.let { DataCache.keyFor(it) }
+    }
+
     LaunchedEffect(source, reload) {
         data = null
         loadError = null
         EpgStore.clear()
         if (source != null) {
+            // 1) Open INSTANTLY with the saved copy from last time (if we have one).
+            if (cacheKey != null) {
+                val cached = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    DataCache.load(context, cacheKey)
+                }
+                if (cached != null) data = cached
+            }
+            // 2) Then quietly refresh from the provider in the background.
             try {
-                data = source.loadAll()
+                val fresh = source.loadAll()
+                data = fresh
+                if (cacheKey != null) {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        DataCache.save(context, cacheKey, fresh)
+                    }
+                }
             } catch (e: Exception) {
-                loadError = e.message ?: "error"
+                // Only show an error if we had nothing cached to fall back on.
+                if (data == null) loadError = e.message ?: "error"
             }
         }
     }
@@ -524,6 +559,26 @@ fun HomeScreen(
     // Remote's Back button climbs out one level instead of leaving the app.
     BackHandler(enabled = depth == 1) { onBackToRoot() }
 
+    // At the main menu, Back asks before actually closing the app —
+    // no more accidental exits from one extra button press.
+    val activity = LocalContext.current as? android.app.Activity
+    var showExit by remember { mutableStateOf(false) }
+    BackHandler(enabled = depth == 0) { showExit = true }
+    if (showExit) {
+        AlertDialog(
+            onDismissRequest = { showExit = false },
+            containerColor = SurfaceCol,
+            title = { Text("Leave Easy IPTV?", color = Ink) },
+            text = { Text("Are you sure you want to exit the app?", color = Muted, fontSize = 13.sp) },
+            confirmButton = {
+                TextButton(onClick = { activity?.finish() }) { Text("Exit", color = Accent) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showExit = false }) { Text("Stay", color = Muted) }
+            }
+        )
+    }
+
     Column(Modifier.fillMaxSize()) {
         // header
         Row(
@@ -540,7 +595,17 @@ fun HomeScreen(
             }
             if (Recorder.activeName.value != null) {
                 Icon(Icons.Filled.FiberManualRecord, contentDescription = "Recording", tint = Live)
+                Spacer(Modifier.width(8.dp))
             }
+            var clock by remember { mutableStateOf("") }
+            LaunchedEffect(Unit) {
+                val f = SimpleDateFormat("h:mm a", Locale.getDefault())
+                while (true) {
+                    clock = f.format(Date())
+                    kotlinx.coroutines.delay(15_000)
+                }
+            }
+            Text(clock, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Ink)
         }
 
         when {
@@ -747,7 +812,20 @@ fun LivePane(
         }
     }
 
-    Column(Modifier.fillMaxSize()) {
+    // Xfinity-style preview: as the remote highlights channels, the highlighted
+    // one starts playing small in the upper right. Debounced so quickly scrolling
+    // past channels doesn't open a stream for each one.
+    val previewEnabled = remember { prefs.getBoolean("guide_preview", true) }
+    var focusedCh by remember { mutableStateOf<LiveChannel?>(null) }
+    var previewCh by remember { mutableStateOf<LiveChannel?>(null) }
+    LaunchedEffect(focusedCh) {
+        val ch = focusedCh ?: return@LaunchedEffect
+        kotlinx.coroutines.delay(700)
+        previewCh = ch
+    }
+
+    Row(Modifier.fillMaxSize()) {
+    Column(Modifier.weight(1f).fillMaxHeight()) {
         if (guideLoading) {
             Text(
                 "Downloading TV guide… this can take a minute or two.",
@@ -779,8 +857,9 @@ fun LivePane(
                         Modifier
                             .fillMaxWidth()
                             .tvFocus()
+                            .onFocusChanged { st -> if (st.isFocused) focusedCh = ch }
                             .background(SurfaceCol, RoundedCornerShape(14.dp))
-                            .clickable { onPlay(livePlayable(ch)) }
+                            .clickable { onPlay(livePlayable(prefs, ch)) }
                             .padding(10.dp)
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -801,7 +880,7 @@ fun LivePane(
                                 }
                             }
                             if (schedule.isNotEmpty()) {
-                                IconButton(onClick = {
+                                IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = {
                                     expandedId = if (expandedId == ch.id) null else ch.id
                                 }) {
                                     Icon(
@@ -811,7 +890,7 @@ fun LivePane(
                                     )
                                 }
                             }
-                            IconButton(onClick = { toggleFav(ch.id) }) {
+                            IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = { toggleFav(ch.id) }) {
                                 Icon(
                                     if (favs.contains(ch.id)) Icons.Filled.Star else Icons.Filled.StarBorder,
                                     contentDescription = "Favorite",
@@ -844,7 +923,7 @@ fun LivePane(
                                     )
                                     if (ch.url.endsWith(".ts")) {
                                         IconButton(
-                                            modifier = Modifier.size(32.dp),
+                                            modifier = Modifier.size(32.dp).tvFocus(RoundedCornerShape(16.dp)),
                                             onClick = {
                                                 if (isNow) {
                                                     Recorder.start(context, ch.url, "${e.title} (${ch.name})", e.endMs + 2 * 60 * 1000)
@@ -869,16 +948,115 @@ fun LivePane(
             }
         }
     }
+    // Upper-right preview panel (Xfinity-style)
+    if (previewEnabled && previewCh != null) {
+        val pch = previewCh!!
+        Column(
+            Modifier
+                .width(236.dp)
+                .fillMaxHeight()
+                .padding(start = 4.dp, end = 10.dp, top = 6.dp)
+        ) {
+            ChannelPreview(liveStreamUrl(prefs, pch.url))
+            Spacer(Modifier.height(8.dp))
+            Text(
+                pch.name,
+                color = Ink, fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
+            if (guideReady) {
+                val sched = EpgStore.guide(pch.epgId, pch.name)
+                val nowMs = System.currentTimeMillis()
+                val nowShow = sched.firstOrNull { nowMs in it.startMs until it.endMs }
+                val nextShow = sched.firstOrNull { it.startMs > nowMs }
+                if (nowShow != null) {
+                    Text(
+                        "Now: ${nowShow.title}",
+                        color = Accent, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (nextShow != null) {
+                    Text(
+                        "Next at ${fmt.format(Date(nextShow.startMs))}: ${nextShow.title}",
+                        color = Muted, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Text("Press OK to watch full screen.", color = Muted, fontSize = 10.sp)
+        }
+    }
+    }
 }
 
-private fun livePlayable(ch: LiveChannel) = Playable(
-    name = ch.name,
-    url = ch.url,
-    isLive = true,
-    epgId = ch.id,
-    guideKey = ch.epgId,
-    canRecord = ch.url.endsWith(".ts")
-)
+/* Small always-on player for the guide's corner preview. Lean buffer so it
+ * starts fast; released the moment you leave Live TV or open a full stream. */
+@OptIn(UnstableApi::class)
+@Composable
+private fun ChannelPreview(url: String) {
+    val context = LocalContext.current
+    val exo = remember {
+        val renderers = DefaultRenderersFactory(context)
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+            .setEnableDecoderFallback(true)
+        ExoPlayer.Builder(context, renderers)
+            .setLoadControl(
+                DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(2_000, 15_000, 500, 1_000)
+                    .build()
+            )
+            .build()
+    }
+    LaunchedEffect(url) {
+        exo.setMediaItem(MediaItem.fromUri(url))
+        exo.prepare()
+        exo.playWhenReady = true
+    }
+    DisposableEffect(Unit) { onDispose { exo.release() } }
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .aspectRatio(16f / 9f)
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color.Black)
+    ) {
+        AndroidView(
+            factory = { ctx ->
+                PlayerView(ctx).apply {
+                    player = exo
+                    useController = false
+                    isFocusable = false
+                    isFocusableInTouchMode = false
+                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                }
+            },
+            update = { it.player = exo },
+            modifier = Modifier.fillMaxSize()
+        )
+    }
+}
+
+/* Live channels can be pulled from Xtream providers two ways:
+ *  - Standard (.ts): one continuous stream. Required for recording.
+ *  - Smooth (HLS .m3u8): chopped into small chunks like YouTube/Prime use —
+ *    recovers from hiccups better, and if the provider offers several quality
+ *    levels the player auto-switches to match the connection. */
+private fun liveStreamUrl(prefs: SharedPreferences, url: String): String =
+    if (prefs.getString("live_format", "ts") == "hls" && url.endsWith(".ts"))
+        url.removeSuffix(".ts") + ".m3u8"
+    else url
+
+private fun livePlayable(prefs: SharedPreferences, ch: LiveChannel): Playable {
+    val u = liveStreamUrl(prefs, ch.url)
+    return Playable(
+        name = ch.name,
+        url = u,
+        isLive = true,
+        epgId = ch.id,
+        guideKey = ch.epgId,
+        canRecord = u.endsWith(".ts")
+    )
+}
 
 /* ----------------------------- movies pane ----------------------------- */
 @Composable
@@ -911,11 +1089,11 @@ fun MoviesPane(
     ) {
         items(filtered) { m ->
             MediaRow(
-                name = m.name,
+                name = (if (WatchStore.isWatched(prefs, m.url)) "✓  " else "") + m.name,
                 icon = m.icon,
                 onClick = { onPlay(Playable(m.name, m.url, isLive = false)) },
                 trailing = {
-                    IconButton(onClick = {
+                    IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = {
                         toast(context, DownloadStore.start(context, prefs, m.name, m.url))
                     }) {
                         Icon(Icons.Filled.Download, contentDescription = "Download for offline", tint = Muted)
@@ -968,24 +1146,56 @@ fun SeriesPane(
 /* ----------------------------- settings pane ----------------------------- */
 @Composable
 fun SettingsPane(prefs: SharedPreferences) {
-    var bufferSec by remember { mutableIntStateOf(prefs.getInt("buffer_sec", 20)) }
+    var bufferSec by remember { mutableIntStateOf(prefs.getInt("buffer_sec", 30)) }
+    var guidePreview by remember { mutableStateOf(prefs.getBoolean("guide_preview", true)) }
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Text("Stream buffer", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
         Text(
-            "A bigger buffer smooths out choppy streams. Recommended: 20 seconds.",
+            "The app stores video ahead of what you're watching so a shaky connection doesn't cause stutter. Bigger = smoother on bad internet. Recommended: 30 seconds.",
             fontSize = 12.sp, color = Muted
         )
         Spacer(Modifier.height(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Chip("Small (5s)", bufferSec == 5) { bufferSec = 5; prefs.edit().putInt("buffer_sec", 5).apply() }
-            Chip("Normal (20s)", bufferSec == 20) { bufferSec = 20; prefs.edit().putInt("buffer_sec", 20).apply() }
-            Chip("Big (40s)", bufferSec == 40) { bufferSec = 40; prefs.edit().putInt("buffer_sec", 40).apply() }
+            Chip("Small (10s)", bufferSec == 10) { bufferSec = 10; prefs.edit().putInt("buffer_sec", 10).apply() }
+            Chip("Normal (30s)", bufferSec == 30) { bufferSec = 30; prefs.edit().putInt("buffer_sec", 30).apply() }
+            Chip("Big (60s)", bufferSec == 60) { bufferSec = 60; prefs.edit().putInt("buffer_sec", 60).apply() }
+        }
+
+        Spacer(Modifier.height(20.dp))
+        Text("Live stream format", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Smooth (HLS) delivers live TV in small chunks — the same way YouTube and Prime do — which recovers from internet hiccups better. Try it if channels stutter. Note: the record button while watching only works in Standard.",
+            fontSize = 12.sp, color = Muted
+        )
+        Spacer(Modifier.height(10.dp))
+        var liveFormat by remember { mutableStateOf(prefs.getString("live_format", "ts") ?: "ts") }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Chip("Standard", liveFormat == "ts") {
+                liveFormat = "ts"; prefs.edit().putString("live_format", "ts").apply()
+            }
+            Chip("Smooth (HLS)", liveFormat == "hls") {
+                liveFormat = "hls"; prefs.edit().putString("live_format", "hls").apply()
+            }
+        }
+
+        Spacer(Modifier.height(20.dp))
+        Text("Guide preview", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Plays the highlighted channel in the corner while you browse Live TV, like cable boxes do.",
+            fontSize = 12.sp, color = Muted
+        )
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Chip("On", guidePreview) { guidePreview = true; prefs.edit().putBoolean("guide_preview", true).apply() }
+            Chip("Off", !guidePreview) { guidePreview = false; prefs.edit().putBoolean("guide_preview", false).apply() }
         }
 
         Spacer(Modifier.height(24.dp))
-        Text("Easy IPTV 3.0 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
+        Text("Easy IPTV 3.4 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
     }
 }
 
@@ -1119,7 +1329,7 @@ fun SearchTab(
             if (liveHits.isNotEmpty()) {
                 item { SectionHeader("Live TV") }
                 items(liveHits) { ch ->
-                    MediaRow(ch.name, ch.icon, onClick = { saveRecent(q); onPlay(livePlayable(ch)) }, trailing = {})
+                    MediaRow(ch.name, ch.icon, onClick = { saveRecent(q); onPlay(livePlayable(prefs, ch)) }, trailing = {})
                 }
             }
             if (movieHits.isNotEmpty()) {
@@ -1150,7 +1360,7 @@ fun SearchTab(
                                 if (ch == null) return@clickable
                                 saveRecent(q)
                                 if (airingNow) {
-                                    onPlay(livePlayable(ch))
+                                    onPlay(livePlayable(prefs, ch))
                                 } else {
                                     toast(context, ScheduleStore.add(context, prefs, hit.entry.title, ch.name, ch.url, hit.entry.startMs, hit.entry.endMs))
                                 }
@@ -1206,6 +1416,7 @@ fun SeriesDetailScreen(
     val context = LocalContext.current
     var eps by remember { mutableStateOf<Map<Int, List<Episode>>?>(null) }
     var err by remember { mutableStateOf<String?>(null) }
+    var watchTick by remember { mutableIntStateOf(0) }
     BackHandler { onBack() }
 
     LaunchedEffect(s.id, err) {
@@ -1232,14 +1443,26 @@ fun SeriesDetailScreen(
             modifier = Modifier.fillMaxWidth().padding(start = 4.dp, end = 8.dp, top = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = onBack) {
+            IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = onBack) {
                 Icon(Icons.Filled.ArrowBack, contentDescription = "Back", tint = Muted)
             }
             Text(
                 s.name,
                 fontWeight = FontWeight.ExtraBold, fontSize = 17.sp, color = Ink,
-                maxLines = 1, overflow = TextOverflow.Ellipsis
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
             )
+            if (eps != null && eps!!.isNotEmpty()) {
+                TextButton(
+                    modifier = Modifier.tvFocus(RoundedCornerShape(20.dp)),
+                    onClick = {
+                        val urls = eps!!.values.flatten().map { it.url }
+                        WatchStore.clearAll(prefs, urls)
+                        watchTick++
+                        toast(context, "Watched history cleared for ${s.name}.")
+                    }
+                ) { Text("Reset watched", color = Muted, fontSize = 12.sp) }
+            }
         }
         when {
             err != null -> ErrorBox(err!!) { err = null }
@@ -1255,10 +1478,17 @@ fun SeriesDetailScreen(
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                val wt = watchTick   // reading this refreshes labels after a reset
                 eps!!.forEach { (season, list) ->
                     item { SectionHeader("Season $season") }
                     items(list) { ep ->
-                        val label = "E${ep.episodeNum}  ${ep.title}"
+                        val w = WatchStore.get(prefs, ep.url)
+                        val mark = when {
+                            w?.watched == true -> "✓  "
+                            (w?.pos ?: 0L) > 30_000 -> "▶  "
+                            else -> ""
+                        }
+                        val label = "${mark}E${ep.episodeNum}  ${ep.title}"
                         val epName = "${s.name} S${season}E${ep.episodeNum}"
                         MediaRow(
                             name = label,
@@ -1268,7 +1498,7 @@ fun SeriesDetailScreen(
                                 onPlayQueue(queue, idx)
                             },
                             trailing = {
-                                IconButton(onClick = {
+                                IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = {
                                     toast(
                                         context,
                                         DownloadStore.start(context, prefs, epName, ep.url)
@@ -1292,7 +1522,7 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
 
     Column(Modifier.fillMaxSize()) {
         Text(
-            "Saved for offline watching. Each download is kept for 7 days, then removed automatically.",
+            "Saved for offline watching. Each download is kept for 14 days, then removed automatically.",
             fontSize = 12.sp, color = Muted,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
         )
@@ -1340,7 +1570,7 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
                                 color = Muted, fontSize = 12.sp
                             )
                         }
-                        IconButton(onClick = {
+                        IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = {
                             DownloadStore.remove(prefs, d)
                             items = DownloadStore.load(prefs)
                         }) {
@@ -1389,7 +1619,7 @@ fun RecordingsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
                             color = Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
                         )
                     }
-                    IconButton(onClick = {
+                    IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = {
                         ScheduleStore.cancel(context, prefs, s.id)
                         scheds = ScheduleStore.load(prefs)
                     }) {
@@ -1462,7 +1692,7 @@ fun RecordingsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
                             )
                             Text("$mb MB", color = Muted, fontSize = 12.sp)
                         }
-                        IconButton(onClick = {
+                        IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = {
                             f.delete()
                             files = Recorder.recordingsDir(context).listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList()
                         }) {
@@ -1522,7 +1752,7 @@ fun PlaylistsPane(
                         Text("Active", color = Accent, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                         Spacer(Modifier.width(4.dp))
                     }
-                    IconButton(onClick = { onDelete(i) }) {
+                    IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = { onDelete(i) }) {
                         Icon(Icons.Filled.Delete, contentDescription = "Remove", tint = Muted)
                     }
                 }
@@ -1633,21 +1863,34 @@ fun PlayerScreen(
         return
     }
     val context = LocalContext.current
-    val bufferSec = remember { prefs.getInt("buffer_sec", 20) }
+    val bufferSec = remember { prefs.getInt("buffer_sec", 30) }
     var resizeMode by remember {
         mutableIntStateOf(prefs.getInt("resize_mode", AspectRatioFrameLayout.RESIZE_MODE_FIT))
     }
     var currentIdx by remember { mutableIntStateOf(start.coerceIn(0, queue.size - 1)) }
     val current = queue[currentIdx.coerceIn(0, queue.size - 1)]
     var nowNext by remember { mutableStateOf<List<EpgEntry>>(emptyList()) }
-    // Our top bar follows the player's own controls, plus a timer of our own so it
-    // ALWAYS hides after 5 seconds — even on Fire TV where control behavior differs.
+    // Our top bar shows and hides in lockstep with the player's own controls.
     var overlayVisible by remember { mutableStateOf(true) }
     var showRecordChoice by remember { mutableStateOf(false) }
-    LaunchedEffect(overlayVisible, currentIdx) {
+    // Resume support: if there's a saved spot for the starting item, hold playback
+    // and ask Resume / Start over.
+    val startItem = queue[start.coerceIn(0, queue.size - 1)]
+    val resumeAt = remember {
+        if (startItem.isLive) null
+        else WatchStore.get(prefs, startItem.url)?.let { w ->
+            if (w.pos > 30_000 && (w.dur <= 0 || w.pos < (w.dur * 0.95).toLong())) w.pos else null
+        }
+    }
+    var pendingResume by remember { mutableStateOf(resumeAt) }
+    var pvRef by remember { mutableStateOf<PlayerView?>(null) }
+    val titleFocus = remember { FocusRequester() }
+    // Whenever the menus appear, park the remote on the show title —
+    // OK there closes the menus, arrows reach the other buttons.
+    LaunchedEffect(overlayVisible) {
         if (overlayVisible) {
-            kotlinx.coroutines.delay(5000)
-            overlayVisible = false
+            kotlinx.coroutines.delay(150)
+            runCatching { titleFocus.requestFocus() }
         }
     }
     val fmt = remember { SimpleDateFormat("h:mm a", Locale.getDefault()) }
@@ -1661,14 +1904,20 @@ fun PlayerScreen(
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
             // If a decoder fails mid-stream, quietly try the next one instead of erroring.
             .setEnableDecoderFallback(true)
-        // Big buffer: hold up to bufferSec of video so shaky connections don't stutter.
+        // Amazon/YouTube-style buffering: start playing after just ~1.5s of video,
+        // then keep filling a DEEP buffer (up to 2 minutes) behind the scenes.
+        // A shaky connection eats into that stored-up video instead of stuttering.
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                bufferSec * 1000,
-                (bufferSec * 1000 * 3).coerceAtLeast(60_000),
-                2_500,
-                5_000
+                bufferSec * 1000,                                    // always try to keep at least this much
+                (bufferSec * 1000 * 4).coerceAtLeast(120_000),       // ...and stockpile up to 2+ minutes
+                1_500,                                               // start playback after ~1.5s (fast start)
+                4_000                                                // after a stall, resume once 4s is stored
             )
+            // Hit the time targets even if it means using more memory.
+            .setPrioritizeTimeOverSizeThresholds(true)
+            // Keep the last 30s behind us so instant-rewind works without re-downloading.
+            .setBackBuffer(30_000, true)
             .build()
         val mediaItems = queue.map { pl ->
             val uri = if (pl.url.startsWith("/")) Uri.fromFile(File(pl.url)) else Uri.parse(pl.url)
@@ -1683,6 +1932,11 @@ fun PlayerScreen(
             .setConstantBitrateSeekingEnabled(true)
             .setConstantBitrateSeekingAlwaysEnabled(true)
         val mediaSources = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(context, extractors)
+            // Crappy internet: retry each failed chunk up to 8 times before giving up,
+            // instead of erroring out on the first hiccup.
+            .setLoadErrorHandlingPolicy(
+                androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy(8)
+            )
         ExoPlayer.Builder(context, renderersFactory)
             .setMediaSourceFactory(mediaSources)
             .setSeekBackIncrementMs(10_000)
@@ -1691,16 +1945,76 @@ fun PlayerScreen(
             .build().apply {
                 setMediaItems(mediaItems, start.coerceIn(0, queue.size - 1), C.TIME_UNSET)
                 addListener(object : Player.Listener {
+                    // If the connection fully drops, quietly rejoin the stream instead of
+                    // showing an error — up to 6 tries, waiting a bit longer each time.
+                    private var retries = 0
+
+                    override fun onPlaybackStateChanged(playbackState: Int) {
+                        if (playbackState == Player.STATE_READY) retries = 0
+                    }
+
+                    override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                        if (retries >= 6) return
+                        retries++
+                        val wait = (1_000L * retries).coerceAtMost(5_000L)
+                        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                            runCatching {
+                                val idx = currentMediaItemIndex
+                                // If Smooth (HLS) keeps failing on this channel, the provider
+                                // probably doesn't support it — quietly switch this session
+                                // back to the standard stream and keep going.
+                                if (retries >= 3 && queue.size == 1 &&
+                                    idx in queue.indices && queue[idx].isLive
+                                ) {
+                                    val u = currentMediaItem?.localConfiguration?.uri?.toString()
+                                    if (u != null && u.endsWith(".m3u8")) {
+                                        setMediaItem(
+                                            MediaItem.Builder()
+                                                .setUri(u.removeSuffix(".m3u8") + ".ts")
+                                                .setMediaMetadata(
+                                                    MediaMetadata.Builder()
+                                                        .setTitle(queue[idx].name).build()
+                                                )
+                                                .build()
+                                        )
+                                    }
+                                }
+                                // Live TV: jump back to the "live edge" when rejoining.
+                                if (idx in queue.indices && queue[idx].isLive) seekToDefaultPosition()
+                                prepare()
+                                play()
+                            }
+                        }, wait)
+                    }
+
                     override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                        val prev = currentIdx
                         currentIdx = currentMediaItemIndex
+                        // Rolling into the next episode = the last one is watched.
+                        if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO &&
+                            prev in queue.indices && !queue[prev].isLive
+                        ) {
+                            WatchStore.markWatched(prefs, queue[prev].url)
+                        }
                     }
                 })
                 prepare()
-                playWhenReady = true
+                playWhenReady = resumeAt == null
             }
     }
     DisposableEffect(Unit) {
-        onDispose { exo.release() }
+        onDispose {
+            runCatching {
+                val i = exo.currentMediaItemIndex
+                if (i in queue.indices && !queue[i].isLive && exo.currentPosition > 10_000) {
+                    WatchStore.setProgress(
+                        prefs, queue[i].url, exo.currentPosition,
+                        if (exo.duration > 0) exo.duration else 0L
+                    )
+                }
+            }
+            exo.release()
+        }
     }
     // If the person presses Home / switches apps, pause — no ghost audio in the background.
     val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
@@ -1711,7 +2025,54 @@ fun PlayerScreen(
         lifecycleOwner.lifecycle.addObserver(obs)
         onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
     }
-    BackHandler { onBack() }
+    BackHandler {
+        if (overlayVisible) {
+            pvRef?.hideController()
+            overlayVisible = false
+        } else {
+            onBack()
+        }
+    }
+
+    // The catch-all: presses nothing else handled. Media keys control playback
+    // directly; any other press brings the menus back. Works every time.
+    DisposableEffect(Unit) {
+        PlayerKeys.handler = { key ->
+            when (key) {
+                android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
+                    exo.playWhenReady = !exo.playWhenReady; true
+                }
+                android.view.KeyEvent.KEYCODE_MEDIA_PLAY -> { exo.playWhenReady = true; true }
+                android.view.KeyEvent.KEYCODE_MEDIA_PAUSE -> { exo.playWhenReady = false; true }
+                android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { exo.seekForward(); true }
+                android.view.KeyEvent.KEYCODE_MEDIA_REWIND -> { exo.seekBack(); true }
+                android.view.KeyEvent.KEYCODE_DPAD_CENTER,
+                android.view.KeyEvent.KEYCODE_ENTER,
+                android.view.KeyEvent.KEYCODE_DPAD_UP,
+                android.view.KeyEvent.KEYCODE_DPAD_DOWN,
+                android.view.KeyEvent.KEYCODE_DPAD_LEFT,
+                android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                    pvRef?.showController(); true
+                }
+                else -> false
+            }
+        }
+        onDispose { PlayerKeys.handler = null }
+    }
+
+    // Remember where they are, a few times a minute.
+    LaunchedEffect(currentIdx) {
+        val item = queue[currentIdx.coerceIn(0, queue.size - 1)]
+        if (item.isLive) return@LaunchedEffect
+        while (true) {
+            kotlinx.coroutines.delay(5000)
+            val pos = exo.currentPosition
+            val dur = exo.duration
+            if (pos > 10_000) {
+                WatchStore.setProgress(prefs, item.url, pos, if (dur > 0) dur else 0L)
+            }
+        }
+    }
 
     LaunchedEffect(current.epgId, EpgStore.loaded.value) {
         if (!current.isLive) return@LaunchedEffect
@@ -1744,15 +2105,24 @@ fun PlayerScreen(
                     controllerShowTimeoutMs = 5000
                     setShowNextButton(queue.size > 1)
                     setShowPreviousButton(queue.size > 1)
-                    // Show/hide our top bar together with the player's controls.
+                    // Show/hide our top bar together with the player's controls, and
+                    // when they hide, pull remote focus back onto the video view so
+                    // the next press is never lost.
+                    val pv = this
                     setControllerVisibilityListener(
                         PlayerView.ControllerVisibilityListener { vis ->
                             overlayVisible = vis == android.view.View.VISIBLE
+                            if (vis != android.view.View.VISIBLE) {
+                                pv.post { pv.requestFocus() }
+                            }
                         }
                     )
                 }
             },
-            update = { view -> view.resizeMode = resizeMode },
+            update = { view ->
+                view.resizeMode = resizeMode
+                pvRef = view
+            },
             modifier = Modifier.fillMaxSize()
         )
         if (overlayVisible) Column(
@@ -1762,10 +2132,20 @@ fun PlayerScreen(
                 .padding(8.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onBack) {
+                IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = onBack) {
                     Icon(Icons.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
                 }
-                Column(Modifier.weight(1f)) {
+                Column(
+                    Modifier
+                        .weight(1f)
+                        .focusRequester(titleFocus)
+                        .tvFocus(RoundedCornerShape(8.dp))
+                        .clickable {
+                            pvRef?.hideController()
+                            overlayVisible = false
+                        }
+                        .padding(4.dp)
+                ) {
                     Text(
                         current.name,
                         color = Color.White,
@@ -1844,6 +2224,38 @@ fun PlayerScreen(
                     )
                 }
             }
+        }
+
+        if (pendingResume != null) {
+            val mins = (pendingResume!! / 60000).toInt()
+            val secs = ((pendingResume!! % 60000) / 1000).toInt()
+            AlertDialog(
+                onDismissRequest = { },
+                containerColor = SurfaceCol,
+                title = { Text("Resume ${current.name}?", color = Ink) },
+                text = {
+                    Text(
+                        "You left off at %d:%02d.".format(mins, secs),
+                        color = Muted, fontSize = 13.sp
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        val p = pendingResume!!
+                        pendingResume = null
+                        exo.seekTo(p)
+                        exo.playWhenReady = true
+                    }) { Text("Resume", color = Accent) }
+                },
+                dismissButton = {
+                    TextButton(onClick = {
+                        pendingResume = null
+                        WatchStore.clear(prefs, current.url)
+                        exo.seekTo(0)
+                        exo.playWhenReady = true
+                    }) { Text("Start over", color = Muted) }
+                }
+            )
         }
 
         if (showRecordChoice) {
