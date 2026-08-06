@@ -92,6 +92,10 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.TransferListener
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
@@ -99,6 +103,7 @@ import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import kotlinx.coroutines.launch
+import okhttp3.Request
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -1120,18 +1125,12 @@ fun LivePane(
     }
 }
 
-/* Live channels come from providers in two forms. The modern chunked form
- * (HLS) is what YouTube/Prime use — smoother on weak internet. The classic
- * form (.ts) is one continuous stream — needed for recording. The app tries
- * the smooth form first and, if the provider doesn't support it, remembers
- * that and uses the classic form from then on. Fully automatic, no setting. */
+/* The timeshift DVR records the classic (.ts) live stream — the one every
+ * provider supports and the only one that can be recorded. */
 private fun tsUrl(url: String): String =
     if (url.endsWith(".m3u8")) url.removeSuffix(".m3u8") + ".ts" else url
 
-private fun liveAutoUrl(prefs: SharedPreferences, url: String): String =
-    if (url.endsWith(".ts") && prefs.getString("hls_state", "unknown") != "bad")
-        url.removeSuffix(".ts") + ".m3u8"
-    else url
+private fun liveAutoUrl(prefs: SharedPreferences, url: String): String = url
 
 private fun livePlayable(prefs: SharedPreferences, ch: LiveChannel): Playable {
     return Playable(
@@ -1142,6 +1141,141 @@ private fun livePlayable(prefs: SharedPreferences, ch: LiveChannel): Playable {
         guideKey = ch.epgId,
         canRecord = ch.url.endsWith(".ts")
     )
+}
+
+/* ---------------------------------------------------------------------------
+ * TIMESHIFT — real DVR pause for live TV.
+ * While you watch a live channel, this engine continuously records the incoming
+ * stream to a file on the device, and the player watches FROM THE FILE — never
+ * straight from the internet. So:
+ *  - Pause for the bathroom → the recorder keeps recording → play resumes at
+ *    the exact same spot, now safely behind live.
+ *  - Internet hiccup → it only hits the recorder; as long as you're behind
+ *    live at all, the picture never stutters. The recorder even quietly
+ *    reconnects on its own if the provider drops it.
+ * The file lives in the app's cache and is wiped on channel change and exit.
+ * ------------------------------------------------------------------------- */
+private object Timeshift {
+    @Volatile var bytesWritten: Long = 0L
+    @Volatile var active: Boolean = false
+    @Volatile var file: File? = null
+
+    private var gen = 0L
+    private const val CAP_BYTES = 1_000_000_000L   // ~1 GB safety cap (a long pause's worth)
+
+    @Synchronized
+    fun start(context: Context, url: String) {
+        stopInternal()
+        val f = File(context.cacheDir, "timeshift.ts")
+        runCatching { f.delete() }
+        file = f
+        bytesWritten = 0L
+        active = true
+        val myGen = ++gen
+        Thread {
+            while (active && gen == myGen && bytesWritten < CAP_BYTES) {
+                try {
+                    val req = Request.Builder().url(url).header("User-Agent", Net.UA).build()
+                    Net.streamClient.newCall(req).execute().use { resp ->
+                        val inp = resp.body?.byteStream()
+                        if (inp != null) {
+                            java.io.FileOutputStream(f, true).use { out ->
+                                val buf = ByteArray(64 * 1024)
+                                while (active && gen == myGen && bytesWritten < CAP_BYTES) {
+                                    val n = inp.read(buf)
+                                    if (n < 0) break
+                                    out.write(buf, 0, n)
+                                    bytesWritten += n
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    // Connection dropped — fall through and reconnect below.
+                }
+                if (active && gen == myGen) {
+                    try { Thread.sleep(1_000) } catch (e: InterruptedException) { break }
+                }
+            }
+            if (gen == myGen) active = false
+        }.apply { isDaemon = true; name = "timeshift-writer" }.start()
+    }
+
+    @Synchronized
+    fun stop() {
+        stopInternal()
+        runCatching { file?.delete() }
+        file = null
+    }
+
+    private fun stopInternal() {
+        active = false
+        gen++
+        bytesWritten = 0L
+    }
+}
+
+/* Reads the timeshift file WHILE it's still being written — like following a
+ * live log. When playback reaches the end of what's recorded so far, it waits
+ * for more instead of stopping. Non-timeshift URLs pass through untouched. */
+@OptIn(UnstableApi::class)
+private class TimeshiftDataSource(private val upstream: DataSource) : DataSource {
+    private var raf: java.io.RandomAccessFile? = null
+    private var tail = false
+    private var pos = 0L
+    private var currentUri: Uri? = null
+
+    override fun addTransferListener(transferListener: TransferListener) {
+        upstream.addTransferListener(transferListener)
+    }
+
+    override fun open(dataSpec: DataSpec): Long {
+        currentUri = dataSpec.uri
+        if (dataSpec.uri.scheme == "tshift") {
+            tail = true
+            val f = Timeshift.file ?: throw java.io.IOException("timeshift not running")
+            raf = java.io.RandomAccessFile(f, "r")
+            pos = dataSpec.position
+            raf!!.seek(pos)
+            return C.LENGTH_UNSET.toLong()
+        }
+        tail = false
+        return upstream.open(dataSpec)
+    }
+
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        if (!tail) return upstream.read(buffer, offset, length)
+        while (true) {
+            val avail = Timeshift.bytesWritten - pos
+            if (avail > 0) {
+                val want = if (length.toLong() < avail) length else avail.toInt()
+                val n = raf!!.read(buffer, offset, want)
+                if (n > 0) {
+                    pos += n
+                    return n
+                }
+            } else if (!Timeshift.active) {
+                return C.RESULT_END_OF_INPUT
+            }
+            try {
+                Thread.sleep(50)   // wait for the recorder to write more
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw java.io.InterruptedIOException()
+            }
+        }
+    }
+
+    override fun getUri(): Uri? = currentUri
+
+    override fun close() {
+        if (tail) {
+            runCatching { raf?.close() }
+            raf = null
+        } else {
+            upstream.close()
+        }
+    }
 }
 
 /* ---------------------------------------------------------------------------
@@ -1158,6 +1292,12 @@ object Playback {
         private set
     var queue: List<Playable> = emptyList()
         private set
+    /** True when live TV is playing through the timeshift DVR file. */
+    var liveMode: Boolean = false
+        private set
+
+    private var appContext: Context? = null
+    private var prefsRef: SharedPreferences? = null
 
     // Compose-observable playback state, shared by every screen.
     val currentIdxC = androidx.compose.runtime.mutableIntStateOf(0)
@@ -1175,6 +1315,8 @@ object Playback {
     }
 
     private fun ensurePlayer(context: Context, prefs: SharedPreferences): ExoPlayer {
+        appContext = context.applicationContext
+        prefsRef = prefs
         player?.let { return it }
         val bufferSec = prefs.getInt("buffer_sec", 30)
         val renderersFactory = DefaultRenderersFactory(context)
@@ -1182,21 +1324,29 @@ object Playback {
             // Dolby support but play silence. Video stays on hardware (4K needs it).
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
             .setEnableDecoderFallback(true)
-        // Smooth-playback buffering, sized for small devices like Fire Sticks:
-        // fast ~1.5s start, then fill ahead up to ~90s.
+        // LIVE TV REALITY: providers send live video at exactly real-time speed,
+        // so a live buffer can never stockpile much — the only cushion you get
+        // is what you collect BEFORE playing. Start with ~4s in the tank, and
+        // after any stall rebuild ~8s before resuming, so every stall comes back
+        // more protected than before. (The old 1.5s "fast start" drained on the
+        // first network dip and caused a stall loop.)
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
                 (bufferSec * 1000).coerceAtMost(60_000),
                 (bufferSec * 1000 * 3).coerceIn(60_000, 90_000),
-                1_500,
-                4_000
+                4_000,    // collect a real cushion before starting
+                8_000     // after a stall, come back with double protection
             )
             .setBackBuffer(10_000, false)
             .build()
         val extractors = androidx.media3.extractor.DefaultExtractorsFactory()
             .setConstantBitrateSeekingEnabled(true)
             .setConstantBitrateSeekingAlwaysEnabled(true)
-        val mediaSources = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(context, extractors)
+        // All playback goes through the timeshift-aware source: live channels
+        // read the DVR file; movies/episodes/downloads pass straight through.
+        val upstreamFactory = DefaultDataSource.Factory(context)
+        val dsFactory = DataSource.Factory { TimeshiftDataSource(upstreamFactory.createDataSource()) }
+        val mediaSources = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(dsFactory, extractors)
             .setLoadErrorHandlingPolicy(
                 androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy(8)
             )
@@ -1216,42 +1366,10 @@ object Playback {
                     retries = 0
                     streamDeadC.value = false
                     everReadyC.value = true
-                    // The smooth (HLS) form played — remember the provider supports it.
-                    val u = p.currentMediaItem?.localConfiguration?.uri?.toString()
-                    if (u != null && u.endsWith(".m3u8") &&
-                        prefs.getString("hls_state", "unknown") != "good"
-                    ) {
-                        prefs.edit().putString("hls_state", "good").apply()
-                    }
                 }
-            }
-
-            /** Provider doesn't do HLS: switch the whole lineup to the classic
-             *  form in one move, and remember so future launches skip HLS. */
-            private fun fallBackToClassic() {
-                prefs.edit().putString("hls_state", "bad").apply()
-                val q = queue
-                if (q.isEmpty()) return
-                val idx = p.currentMediaItemIndex.coerceIn(0, q.size - 1)
-                p.setMediaItems(q.map { mediaItemFor(it, forceClassic = true) }, idx, C.TIME_UNSET)
-                p.prepare()
-                p.play()
             }
 
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                val q = queue
-                val idx = p.currentMediaItemIndex
-                val liveNow = idx in q.indices && q[idx].isLive
-                val u = p.currentMediaItem?.localConfiguration?.uri?.toString()
-
-                // HLS not confirmed working and it just failed? Drop to classic now.
-                if (liveNow && u != null && u.endsWith(".m3u8") &&
-                    prefs.getString("hls_state", "unknown") != "good"
-                ) {
-                    runCatching { fallBackToClassic() }
-                    return
-                }
-
                 if (retries >= 6) {
                     streamDeadC.value = true
                     return
@@ -1260,38 +1378,127 @@ object Playback {
                 val wait = (1_000L * retries).coerceAtMost(5_000L)
                 android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                     runCatching {
-                        if (liveNow) p.seekToDefaultPosition()
-                        p.prepare()
-                        p.play()
+                        if (liveMode) {
+                            // Restart the DVR feed fresh at the live broadcast.
+                            zapTo(currentIdxC.intValue)
+                        } else {
+                            p.prepare()
+                            p.play()
+                        }
                     }
                 }, wait)
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                if (liveMode) return   // live channel changes are driven by zapTo()
                 val q = queue
                 val prev = prevIdx
                 prevIdx = p.currentMediaItemIndex
                 currentIdxC.intValue = p.currentMediaItemIndex
-                everReadyC.value = false   // fresh channel = fresh "locking in" message
+                everReadyC.value = false
+                p.setPlaybackSpeed(1.0f)
                 if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO &&
                     prev in q.indices && !q[prev].isLive
                 ) {
                     WatchStore.markWatched(prefs, q[prev].url)
                 }
-                // Remember the current live channel for next app start.
-                val cur = q.getOrNull(p.currentMediaItemIndex)
-                if (cur?.isLive == true) {
-                    prefs.edit()
-                        .putString("last_live_name", cur.name)
-                        .putString("last_live_url", cur.url)
-                        .putString("last_live_epg", cur.epgId ?: "")
-                        .putString("last_live_guide", cur.guideKey ?: "")
-                        .apply()
-                }
             }
         })
         player = p
         return p
+    }
+
+    // -----------------------------------------------------------------------
+    // THE CATCH-UP GOVERNOR — the fix for "it keeps catching up to the buffer."
+    // Live video arrives at exactly 1.0x real-time. If we also PLAY at exactly
+    // 1.0x, the cushion can only ever shrink — every network dip stalls it.
+    // So: whenever the cushion gets thin, play at 0.95x (5% slower — nobody can
+    // see or hear it) so the cushion refills WHILE you watch. Once it's healthy
+    // again, back to full speed. Playback can never "catch up to the buffer."
+    // -----------------------------------------------------------------------
+    private val governor = android.os.Handler(android.os.Looper.getMainLooper())
+    private var governorRunning = false
+    private var lastBytesSeen = -1L
+    private var lastBytesAt = 0L
+    private val governorTick = object : Runnable {
+        override fun run() {
+            val p = player
+            if (p == null) { governorRunning = false; return }
+            runCatching {
+                if (liveMode) {
+                    // Speed governor: refill the cushion while watching.
+                    if (p.isPlaying) {
+                        val cushion = p.totalBufferedDuration
+                        val speed = p.playbackParameters.speed
+                        when {
+                            cushion < 4_000 && speed > 0.96f -> p.setPlaybackSpeed(0.95f)
+                            cushion > 10_000 && speed < 1.0f -> p.setPlaybackSpeed(1.0f)
+                        }
+                    }
+                    // Dead-feed watchdog: if the DVR recorder hasn't received a
+                    // single byte in 20s while we're stuck waiting, the channel
+                    // is down at the provider — say so instead of spinning forever.
+                    val b = Timeshift.bytesWritten
+                    val now = System.currentTimeMillis()
+                    if (b != lastBytesSeen) {
+                        lastBytesSeen = b
+                        lastBytesAt = now
+                    } else if (now - lastBytesAt > 20_000 &&
+                        playStateC.intValue == Player.STATE_BUFFERING
+                    ) {
+                        streamDeadC.value = true
+                    }
+                } else if (p.playbackParameters.speed != 1.0f) {
+                    // Movies/episodes always play at full speed.
+                    p.setPlaybackSpeed(1.0f)
+                }
+            }
+            governor.postDelayed(this, 2_000)
+        }
+    }
+
+    private fun startGovernor() {
+        if (governorRunning) return
+        governorRunning = true
+        governor.postDelayed(governorTick, 2_000)
+    }
+
+    private fun stopGovernor() {
+        governorRunning = false
+        governor.removeCallbacks(governorTick)
+    }
+
+    /** Change live channel: point the DVR recorder at the new channel and play
+     *  its growing file. Wraps around the lineup like a cable box. */
+    fun zapTo(idx: Int) {
+        val p = player ?: return
+        val ctx = appContext ?: return
+        val q = queue
+        if (q.isEmpty()) return
+        val i = ((idx % q.size) + q.size) % q.size
+        val ch = q[i]
+        currentIdxC.intValue = i
+        everReadyC.value = false
+        streamDeadC.value = false
+        lastBytesSeen = -1L
+        lastBytesAt = System.currentTimeMillis()
+        p.setPlaybackSpeed(1.0f)
+        Timeshift.start(ctx, tsUrl(ch.url))
+        p.setMediaItem(
+            MediaItem.Builder()
+                .setUri(Uri.parse("tshift://live/" + System.nanoTime()))
+                .setMediaMetadata(MediaMetadata.Builder().setTitle(ch.name).build())
+                .build()
+        )
+        p.prepare()
+        p.playWhenReady = true
+        // Remember this channel for next app start.
+        prefsRef?.edit()
+            ?.putString("last_live_name", ch.name)
+            ?.putString("last_live_url", ch.url)
+            ?.putString("last_live_epg", ch.epgId ?: "")
+            ?.putString("last_live_guide", ch.guideKey ?: "")
+            ?.apply()
     }
 
     /**
@@ -1307,23 +1514,37 @@ object Playback {
         attachOnly: Boolean
     ): ExoPlayer {
         val p = ensurePlayer(context, prefs)
+        startGovernor()
         if (attachOnly && queue.isNotEmpty()) return p
         queue = newQueue
         val s = start.coerceIn(0, (newQueue.size - 1).coerceAtLeast(0))
-        currentIdxC.intValue = s
-        everReadyC.value = false
-        streamDeadC.value = false
-        p.setMediaItems(newQueue.map { mediaItemFor(it, forceClassic = false) }, s, startAtMs ?: C.TIME_UNSET)
-        p.prepare()
-        p.playWhenReady = true
+        if (newQueue.getOrNull(s)?.isLive == true) {
+            // LIVE: everything flows through the timeshift DVR.
+            liveMode = true
+            zapTo(s)
+        } else {
+            // Movies / episodes / downloads / recordings: normal playlist.
+            liveMode = false
+            Timeshift.stop()
+            currentIdxC.intValue = s
+            everReadyC.value = false
+            streamDeadC.value = false
+            p.setPlaybackSpeed(1.0f)
+            p.setMediaItems(newQueue.map { mediaItemFor(it, forceClassic = false) }, s, startAtMs ?: C.TIME_UNSET)
+            p.prepare()
+            p.playWhenReady = true
+        }
         return p
     }
 
-    /** Full stop: close the one stream and free the decoders. */
+    /** Full stop: close the one stream, stop the DVR recorder, free the decoders. */
     fun releaseAll() {
+        stopGovernor()
+        Timeshift.stop()
         runCatching { player?.release() }
         player = null
         queue = emptyList()
+        liveMode = false
         playStateC.intValue = Player.STATE_IDLE
         streamDeadC.value = false
         everReadyC.value = false
@@ -1454,7 +1675,7 @@ fun SettingsPane(prefs: SharedPreferences) {
         }
 
         Spacer(Modifier.height(24.dp))
-        Text("Easy IPTV 3.8 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
+        Text("Easy IPTV 4.0 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
     }
 }
 
@@ -2238,19 +2459,16 @@ fun PlayerScreen(
     // ONE press of Back = out to the channel list (the show keeps playing in
     // the corner). Another press there = main menu. Simple, like a cable box.
     BackHandler {
-        onBack(exo.currentMediaItemIndex, exo.currentPosition.coerceAtLeast(0L))
+        onBack(Playback.currentIdxC.intValue, exo.currentPosition.coerceAtLeast(0L))
     }
 
     // Channel surfing: +1 / −1 through the category, wrapping at the ends —
-    // exactly like the channel up/down buttons on a cable remote.
+    // exactly like the channel up/down buttons on a cable remote. All channel
+    // changes go through the DVR engine (one stream, one recorder).
     fun zapReady(): Boolean =
-        queue.size > 1 && queue.getOrNull(exo.currentMediaItemIndex)?.isLive == true
+        queue.size > 1 && queue.getOrNull(Playback.currentIdxC.intValue)?.isLive == true
     fun zap(dir: Int) {
-        streamDead.value = false
-        val next = (exo.currentMediaItemIndex + dir + queue.size) % queue.size
-        exo.seekTo(next, C.TIME_UNSET)
-        exo.prepare()          // also recovers if the last channel had errored out
-        exo.playWhenReady = true
+        Playback.zapTo(Playback.currentIdxC.intValue + dir)
         // Flash the channel name so they see where they landed.
         pvRef?.showController()
     }
@@ -2435,9 +2653,12 @@ fun PlayerScreen(
                     onClick = {
                         streamDead.value = false
                         runCatching {
-                            if (current.isLive) exo.seekToDefaultPosition()
-                            exo.prepare()
-                            exo.play()
+                            if (current.isLive) {
+                                Playback.zapTo(Playback.currentIdxC.intValue)   // fresh DVR feed
+                            } else {
+                                exo.prepare()
+                                exo.play()
+                            }
                         }
                     }
                 ) { Text("Try again") }
@@ -2451,7 +2672,7 @@ fun PlayerScreen(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = {
-                    onBack(exo.currentMediaItemIndex, exo.currentPosition.coerceAtLeast(0L))
+                    onBack(Playback.currentIdxC.intValue, exo.currentPosition.coerceAtLeast(0L))
                 }) {
                     Icon(Icons.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
                 }
