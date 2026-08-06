@@ -80,6 +80,7 @@ import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -136,6 +137,43 @@ private val AppColors = darkColorScheme(
 /** The remote's highlighter: hot pink, thick, with a soft glow behind it —
  *  you can always tell exactly where you are, even against busy backgrounds. */
 private val FocusPink = Color(0xFFFF2FB9)
+
+/** Walks the player's own control panel (play/pause, FF, RW, sound, settings,
+ *  progress bar) and gives every button the same hot-pink focus glow as the
+ *  rest of the app, plus paints the "buffered ahead" part of the progress bar
+ *  in bright cyan so you can SEE how much smooth video is stored up. */
+@OptIn(UnstableApi::class)
+private fun tintPlayerControls(root: android.view.View) {
+    val pink = 0xFFFF2FB9.toInt()
+    fun walk(v: android.view.View) {
+        if (v is android.view.ViewGroup) {
+            for (i in 0 until v.childCount) walk(v.getChildAt(i))
+        }
+        when (v) {
+            is androidx.media3.ui.DefaultTimeBar -> {
+                v.setPlayedColor(0xFFF5B944.toInt())      // watched: gold
+                v.setBufferedColor(0xFF33E1FF.toInt())    // stored ahead: bright cyan
+                v.setUnplayedColor(0x55FFFFFF)            // rest: faint white
+                v.setScrubberColor(pink)                  // the grab handle: pink
+            }
+            is android.widget.ImageButton, is android.widget.Button -> {
+                val glow = android.graphics.drawable.StateListDrawable().apply {
+                    addState(
+                        intArrayOf(android.R.attr.state_focused),
+                        android.graphics.drawable.GradientDrawable().apply {
+                            setColor(0x40FF2FB9)
+                            cornerRadius = 28f
+                            setStroke(5, pink)
+                        }
+                    )
+                    addState(intArrayOf(), android.graphics.drawable.ColorDrawable(0x00000000))
+                }
+                v.background = glow
+            }
+        }
+    }
+    walk(root)
+}
 
 private fun Modifier.tvFocus(shape: RoundedCornerShape = RoundedCornerShape(14.dp)): Modifier =
     composed {
@@ -1206,6 +1244,7 @@ internal object Timeshift {
     @Volatile var file: File? = null
 
     @Volatile private var gen = 0L
+    @Volatile private var currentCall: okhttp3.Call? = null
     private const val CAP_BYTES = 1_000_000_000L   // ~1 GB safety cap (a long pause's worth)
 
     @Synchronized
@@ -1221,7 +1260,9 @@ internal object Timeshift {
             while (active && gen == myGen && bytesWritten < CAP_BYTES) {
                 try {
                     val req = Request.Builder().url(url).header("User-Agent", Net.UA).build()
-                    Net.streamClient.newCall(req).execute().use { resp ->
+                    val c = Net.streamClient.newCall(req)
+                    currentCall = c
+                    c.execute().use { resp ->
                         val inp = resp.body?.byteStream()
                         if (inp != null) {
                             java.io.FileOutputStream(f, true).use { out ->
@@ -1253,7 +1294,7 @@ internal object Timeshift {
                         }
                     }
                 } catch (e: Exception) {
-                    // Connection dropped — fall through and reconnect below.
+                    // Connection dropped or cancelled — fall through.
                 }
                 if (active && gen == myGen) {
                     try { Thread.sleep(1_000) } catch (e: InterruptedException) { break }
@@ -1274,6 +1315,13 @@ internal object Timeshift {
         active = false
         gen++
         bytesWritten = 0L
+        // Sever the old provider connection IMMEDIATELY. Without this, a stale
+        // downloader could sit on a dead provider socket for minutes — the
+        // provider then sees ghost connections stack up and throttles the
+        // account, which is why playback used to get worse the longer you
+        // channel-surfed. Cancel = connection closed, thread exits, all clean.
+        runCatching { currentCall?.cancel() }
+        currentCall = null
     }
 }
 
@@ -1326,6 +1374,7 @@ private object TimeshiftServer {
             java.io.RandomAccessFile(myFile, "r").use { raf ->
                 var pos = 0L
                 val buf = ByteArray(64 * 1024)
+                var idleTicks = 0
                 while (true) {
                     if (Timeshift.file !== myFile) break   // channel changed
                     // Trust the REAL file size, never just the counter — armor
@@ -1333,6 +1382,7 @@ private object TimeshiftServer {
                     val real = minOf(Timeshift.bytesWritten, raf.length())
                     val avail = real - pos
                     if (avail > 0) {
+                        idleTicks = 0
                         raf.seek(pos)
                         val want = if (buf.size.toLong() < avail) buf.size else avail.toInt()
                         val n = raf.read(buf, 0, want)
@@ -1347,6 +1397,21 @@ private object TimeshiftServer {
                         break
                     } else {
                         Thread.sleep(50)   // wait for the recorder to write more
+                        // Every ~2s of idling, check whether the player already
+                        // hung up — otherwise an abandoned serving thread would
+                        // spin forever and slowly bog down the whole device.
+                        if (++idleTicks >= 40) {
+                            idleTicks = 0
+                            val gone = try {
+                                sock.soTimeout = 1
+                                sock.getInputStream().read() == -1
+                            } catch (t: java.net.SocketTimeoutException) {
+                                false   // still connected, just quiet
+                            } catch (e: Exception) {
+                                true
+                            }
+                            if (gone) break
+                        }
                     }
                 }
             }
@@ -1406,6 +1471,10 @@ object Playback {
         prefsRef = prefs
         player?.let { return it }
         val bufferSec = prefs.getInt("buffer_sec", 30)
+        // How much video to collect before showing the picture (and 2x that
+        // after a stall). Bigger = slower channel changes but steadier playback
+        // on weak channels. Settings › "Channel lock-in cushion".
+        val lockMs = prefs.getInt("live_start_ms", 4_000).coerceIn(2_000, 12_000)
         val renderersFactory = DefaultRenderersFactory(context)
             // PREFER the bundled FFmpeg software audio decoders — many TVs claim
             // Dolby support but play silence. Video stays on hardware (4K needs it).
@@ -1421,8 +1490,8 @@ object Playback {
             .setBufferDurationsMs(
                 (bufferSec * 1000).coerceAtMost(60_000),
                 (bufferSec * 1000 * 3).coerceIn(60_000, 90_000),
-                4_000,    // collect a real cushion before starting
-                8_000     // after a stall, come back with double protection
+                lockMs,                                    // collect the chosen cushion before starting
+                (lockMs * 2).coerceAtLeast(6_000)          // after a stall, come back with double protection
             )
             .setBackBuffer(10_000, false)
             .build()
@@ -1832,6 +1901,27 @@ fun SettingsPane(prefs: SharedPreferences) {
         }
 
         Spacer(Modifier.height(20.dp))
+        Text("Channel lock-in cushion", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "How much video EZTV collects before showing a live channel. Bigger cushion = steadier picture on weak channels, but changing channels takes longer. If certain channels keep re-buffering, bump this up.",
+            fontSize = 12.sp, color = Muted
+        )
+        Spacer(Modifier.height(10.dp))
+        var lockSec by remember { mutableIntStateOf(prefs.getInt("live_start_ms", 4000) / 1000) }
+        fun setLock(sec: Int) {
+            lockSec = sec
+            prefs.edit().putInt("live_start_ms", sec * 1000).apply()
+            Playback.releaseAll()   // applies to the very next channel you play
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Chip("Fast (3s)", lockSec == 3) { setLock(3) }
+            Chip("Normal (4s)", lockSec == 4) { setLock(4) }
+            Chip("Steady (6s)", lockSec == 6) { setLock(6) }
+            Chip("Max (10s)", lockSec == 10) { setLock(10) }
+        }
+
+        Spacer(Modifier.height(20.dp))
         Text("Clock while watching", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
         Text(
@@ -1846,7 +1936,7 @@ fun SettingsPane(prefs: SharedPreferences) {
         }
 
         Spacer(Modifier.height(24.dp))
-        Text("EZTV 4.3 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
+        Text("EZTV 4.4 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
     }
 }
 
@@ -2403,9 +2493,11 @@ fun RecordingsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
             ) {
                 items(files) { f ->
                     val mb = f.length() / (1024 * 1024)
+                    val trashFocus = remember { FocusRequester() }
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .focusProperties { right = trashFocus }
                             .tvFocus()
                             .background(SurfaceCol, RoundedCornerShape(14.dp))
                             .clickable { onPlay(Playable(f.nameWithoutExtension, f.absolutePath, isLive = false)) }
@@ -2422,10 +2514,13 @@ fun RecordingsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
                             )
                             Text("$mb MB", color = Muted, fontSize = 12.sp)
                         }
-                        IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = {
-                            f.delete()
-                            files = Recorder.recordingsDir(context).listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList()
-                        }) {
+                        IconButton(
+                            modifier = Modifier.focusRequester(trashFocus).tvFocus(RoundedCornerShape(24.dp)),
+                            onClick = {
+                                f.delete()
+                                files = Recorder.recordingsDir(context).listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList()
+                            }
+                        ) {
                             Icon(Icons.Filled.Delete, contentDescription = "Delete", tint = Muted)
                         }
                     }
@@ -2602,6 +2697,10 @@ fun PlayerScreen(
     var resizeMode by remember {
         mutableIntStateOf(prefs.getInt("resize_mode", AspectRatioFrameLayout.RESIZE_MODE_FIT))
     }
+    // "Full screen" mode: an extra 34% blow-up on top of Stretch — beats even
+    // black bars that are baked INTO the channel's picture. Old-school
+    // customers want edge-to-edge, and this delivers it on any channel.
+    var superStretch by remember { mutableStateOf(prefs.getBoolean("resize_super", false)) }
     // Playback state lives in the shared one-stream engine.
     val currentIdx by Playback.currentIdxC
     val current = queue[currentIdx.coerceIn(0, queue.size - 1)]
@@ -2667,6 +2766,58 @@ fun PlayerScreen(
                 }
             }
             pvRef?.player = null
+        }
+    }
+    // When a DVR recording finishes playing, offer to clean it up — keeps the
+    // 16 GB Fire Stick healthy without anyone thinking about storage.
+    var askDeleteRecording by remember { mutableStateOf(false) }
+    LaunchedEffect(playState.intValue) {
+        if (playState.intValue == Player.STATE_ENDED &&
+            current.url.startsWith("/") && current.url.contains("/recordings/")
+        ) {
+            askDeleteRecording = true
+        }
+    }
+    if (askDeleteRecording) {
+        AlertDialog(
+            onDismissRequest = { askDeleteRecording = false },
+            containerColor = SurfaceCol,
+            title = { Text("Finished watching", color = Ink) },
+            text = {
+                Text(
+                    "Delete this recording to free up space? (${File(current.url).length() / (1024 * 1024)} MB)",
+                    color = Muted, fontSize = 13.sp
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    askDeleteRecording = false
+                    runCatching { File(current.url).delete() }
+                    toast(context, "Recording deleted.")
+                    onBack(Playback.currentIdxC.intValue, 0L)
+                }) { Text("Delete it", color = Accent) }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    askDeleteRecording = false
+                    onBack(Playback.currentIdxC.intValue, 0L)
+                }) { Text("Keep it", color = Muted) }
+            }
+        )
+    }
+    // Live percentage for the locking-in / buffering message — people will
+    // wait when they can SEE progress, and a channel frozen at 0% tells them
+    // it's off the air (game-day channels, etc.) without any guesswork.
+    var bufPct by remember { mutableIntStateOf(0) }
+    val lockTargetMs = remember { prefs.getInt("live_start_ms", 4_000).coerceIn(2_000, 12_000).toFloat() }
+    LaunchedEffect(playState.intValue) {
+        if (playState.intValue == Player.STATE_BUFFERING) {
+            bufPct = 0
+            while (true) {
+                val targetMs = if (!everReady.value) lockTargetMs else lockTargetMs * 2f
+                bufPct = ((exo.totalBufferedDuration / targetMs) * 100f).toInt().coerceIn(0, 99)
+                kotlinx.coroutines.delay(350)
+            }
         }
     }
     // ONE press of Back = out to the channel list (the show keeps playing in
@@ -2802,6 +2953,10 @@ fun PlayerScreen(
                     controllerShowTimeoutMs = 5000
                     setShowNextButton(queue.size > 1)
                     setShowPreviousButton(queue.size > 1)
+                    // Hot-pink highlight on the play/pause/FF/RW/settings buttons
+                    // (so you can tell where you are), and a colored "buffered
+                    // ahead" section on the progress bar.
+                    post { tintPlayerControls(this) }
                     // Show/hide our top bar together with the player's controls, and
                     // when they hide, pull remote focus back onto the video view so
                     // the next press is never lost.
@@ -2820,7 +2975,15 @@ fun PlayerScreen(
                 view.resizeMode = resizeMode
                 pvRef = view
             },
-            modifier = Modifier.fillMaxSize()
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer(
+                    // FULL SCREEN mode: blow the picture up 34% past the edges —
+                    // wipes out black bars even when they're part of the channel's
+                    // own picture. Old-school edge-to-edge TV.
+                    scaleX = if (superStretch) 1.34f else 1f,
+                    scaleY = if (superStretch) 1.34f else 1f
+                )
         )
         // Cable-box clock (Settings › Clock while watching).
         if (showClock && clockText.isNotEmpty()) {
@@ -2849,7 +3012,12 @@ fun PlayerScreen(
                     color = Accent, strokeWidth = 3.dp,
                     modifier = Modifier.size(22.dp)
                 )
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "$bufPct%",
+                    color = Ink, fontSize = 22.sp, fontWeight = FontWeight.Bold
+                )
+                Spacer(Modifier.height(4.dp))
                 Text(
                     if (!everReady.value)
                         "Locking in ${current.name}… a few seconds gets you a clean, steady picture."
@@ -2857,6 +3025,12 @@ fun PlayerScreen(
                         "Buffering ahead to keep your video smooth — hang tight…",
                     color = Ink, fontSize = 12.sp
                 )
+                if (!everReady.value) {
+                    Text(
+                        "Stuck at 0%? This channel may be off the air right now (some only broadcast during games or events).",
+                        color = Muted, fontSize = 10.sp
+                    )
+                }
             }
         }
         // Channel gave up after every reconnect attempt — tell them plainly.
@@ -2927,18 +3101,31 @@ fun PlayerScreen(
                 IconButton(
                     modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)),
                     onClick = {
-                        val next = when (resizeMode) {
-                            AspectRatioFrameLayout.RESIZE_MODE_FIT -> AspectRatioFrameLayout.RESIZE_MODE_FILL
-                            AspectRatioFrameLayout.RESIZE_MODE_FILL -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                            else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+                        // Cycle: Fit -> Stretch -> Zoom -> FULL SCREEN -> Fit
+                        val label: String
+                        if (superStretch) {
+                            superStretch = false
+                            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                            label = "Fit — whole picture, may have black bars"
+                        } else when (resizeMode) {
+                            AspectRatioFrameLayout.RESIZE_MODE_FIT -> {
+                                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
+                                label = "Stretch — fills the screen"
+                            }
+                            AspectRatioFrameLayout.RESIZE_MODE_FILL -> {
+                                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                                label = "Zoom — crops the edges"
+                            }
+                            else -> {
+                                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
+                                superStretch = true
+                                label = "FULL SCREEN — edge to edge, even over built-in bars"
+                            }
                         }
-                        resizeMode = next
-                        prefs.edit().putInt("resize_mode", next).apply()
-                        val label = when (next) {
-                            AspectRatioFrameLayout.RESIZE_MODE_FILL -> "Stretch — fills the whole screen"
-                            AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> "Zoom — crops the edges"
-                            else -> "Fit — whole picture, may have black bars"
-                        }
+                        prefs.edit()
+                            .putInt("resize_mode", resizeMode)
+                            .putBoolean("resize_super", superStretch)
+                            .apply()
                         toast(context, label)
                     }
                 ) {
