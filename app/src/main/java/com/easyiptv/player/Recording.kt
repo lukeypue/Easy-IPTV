@@ -42,12 +42,43 @@ object Recorder {
     fun recordingsDir(context: Context): File =
         File(context.getExternalFilesDir(null), "recordings").apply { mkdirs() }
 
-    /** Start recording now. stopAtMs = auto-stop time (null = record until stopped). */
-    fun start(context: Context, url: String, name: String, stopAtMs: Long? = null) {
+    /**
+     * Storage check before recording. Returns null when fine, a BLOCKING
+     * message when there's no safe room, or a WARNING message (prefixed
+     * "WARN:") when it can start but might stop early.
+     */
+    fun spaceCheck(context: Context): String? {
+        val free = try {
+            android.os.StatFs(recordingsDir(context).absolutePath).availableBytes
+        } catch (e: Exception) { return null }
+        val gb = String.format(Locale.US, "%.1f", free / 1_073_741_824.0)
+        return when {
+            free < 2_500_000_000L ->
+                "No room to record — only $gb GB free. Delete a download or recording first, then try again."
+            free < 4_500_000_000L ->
+                "WARN:Heads up — only $gb GB free. A long recording may stop early to protect the device."
+            else -> null
+        }
+    }
+
+    /**
+     * Start recording now. stopAtMs = auto-stop time (null = record until stopped).
+     * teeFromTimeshift = true when recording the channel currently being watched:
+     * the recording copies from the DVR file instead of opening a SECOND provider
+     * connection — which single-stream accounts would kill after ~20 seconds.
+     */
+    fun start(
+        context: Context,
+        url: String,
+        name: String,
+        stopAtMs: Long? = null,
+        teeFromTimeshift: Boolean = false
+    ) {
         val i = Intent(context, RecordingService::class.java).apply {
             action = RecordingService.ACTION_START
             putExtra("url", url)
             putExtra("name", name)
+            putExtra("tee", teeFromTimeshift)
             if (stopAtMs != null) putExtra("stopAt", stopAtMs)
         }
         ContextCompat.startForegroundService(context, i)
@@ -105,8 +136,9 @@ class RecordingService : Service() {
                 val url = intent.getStringExtra("url") ?: return START_NOT_STICKY.also { stopSelf() }
                 val name = intent.getStringExtra("name") ?: "channel"
                 val stopAt = if (intent.hasExtra("stopAt")) intent.getLongExtra("stopAt", 0L) else null
+                val tee = intent.getBooleanExtra("tee", false)
                 startForeground(NOTIF_ID, notification(name))
-                beginRecording(url, name, stopAt)
+                beginRecording(url, name, stopAt, tee)
             }
             ACTION_STOP -> {
                 job?.cancel()
@@ -117,7 +149,51 @@ class RecordingService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun beginRecording(url: String, name: String, stopAt: Long?) {
+    /** Copy the live DVR (timeshift) file into the recording as it grows —
+     *  recording the watched channel WITHOUT a second provider connection.
+     *  Returns true if it ended because the DVR feed changed/stopped (channel
+     *  change) — the caller then finishes via a direct connection if needed. */
+    private fun teeFromTimeshift(out: FileOutputStream, stopAt: Long?, isActive: () -> Boolean): Boolean {
+        val src = Timeshift.file ?: return true
+        return try {
+            java.io.RandomAccessFile(src, "r").use { raf ->
+                // Start from "now" — the live edge of the DVR file.
+                var pos = Timeshift.bytesWritten
+                val buf = ByteArray(64 * 1024)
+                var sinceCheck = 0L
+                while (isActive() && (stopAt == null || System.currentTimeMillis() < stopAt)) {
+                    if (Timeshift.file !== src) return true   // channel changed
+                    val avail = minOf(Timeshift.bytesWritten, raf.length()) - pos
+                    if (avail > 0) {
+                        raf.seek(pos)
+                        val want = if (buf.size.toLong() < avail) buf.size else avail.toInt()
+                        val n = raf.read(buf, 0, want)
+                        if (n > 0) {
+                            out.write(buf, 0, n)
+                            pos += n
+                            sinceCheck += n
+                            if (sinceCheck > 32_000_000) {
+                                sinceCheck = 0
+                                val freeNow = runCatching {
+                                    android.os.StatFs(Recorder.recordingsDir(this).absolutePath).availableBytes
+                                }.getOrDefault(Long.MAX_VALUE)
+                                if (freeNow < 2_000_000_000L) return false
+                            }
+                        }
+                    } else if (!Timeshift.active) {
+                        return true   // DVR feed stopped
+                    } else {
+                        Thread.sleep(50)
+                    }
+                }
+            }
+            false
+        } catch (e: Exception) {
+            true
+        }
+    }
+
+    private fun beginRecording(url: String, name: String, stopAt: Long?, tee: Boolean) {
         job?.cancel()
         Recorder.activeName.value = name
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -128,31 +204,43 @@ class RecordingService : Service() {
         val dir = Recorder.recordingsDir(this)
         job = scope.launch {
             try {
-                val req = Request.Builder().url(url).header("User-Agent", Net.UA).build()
-                Net.streamClient.newCall(req).execute().use { resp ->
-                    val body = resp.body ?: return@use
-                    val stamp = SimpleDateFormat("MMM-d_h-mm-ss_a", Locale.US).format(Date())
-                    val safe = name.replace(Regex("[^A-Za-z0-9 _-]"), "").trim()
-                        .replace(' ', '_').take(40).ifBlank { "channel" }
-                    val f = File(dir, "REC_${safe}_$stamp.ts")
-                    body.byteStream().use { inp ->
-                        FileOutputStream(f).use { out ->
-                            val buf = ByteArray(64 * 1024)
-                            var sinceCheck = 0L
-                            while (isActive && (stopAt == null || System.currentTimeMillis() < stopAt)) {
-                                val n = inp.read(buf)
-                                if (n < 0) break
-                                out.write(buf, 0, n)
-                                // Storage guard: Fire Sticks corrupt themselves when
-                                // storage fills. Stop the recording gracefully while
-                                // there's still 2 GB of breathing room.
-                                sinceCheck += n
-                                if (sinceCheck > 32_000_000) {
-                                    sinceCheck = 0
-                                    val free = runCatching {
-                                        android.os.StatFs(dir.absolutePath).availableBytes
-                                    }.getOrDefault(Long.MAX_VALUE)
-                                    if (free < 2_000_000_000L) break
+                val stamp = SimpleDateFormat("MMM-d_h-mm-ss_a", Locale.US).format(Date())
+                val safe = name.replace(Regex("[^A-Za-z0-9 _-]"), "").trim()
+                    .replace(' ', '_').take(40).ifBlank { "channel" }
+                val f = File(dir, "REC_${safe}_$stamp.ts")
+                FileOutputStream(f).use { out ->
+                    var needNetwork = !tee
+                    if (tee) {
+                        // ONE-CONNECTION recording: copy from the live DVR file.
+                        needNetwork = teeFromTimeshift(out) { isActive } &&
+                            isActive && (stopAt == null || System.currentTimeMillis() < stopAt)
+                    }
+                    if (needNetwork) {
+                        // Direct connection (scheduled recordings, or the DVR
+                        // feed ended mid-recording, e.g. a channel change).
+                        val req = Request.Builder().url(url).header("User-Agent", Net.UA).build()
+                        Net.streamClient.newCall(req).execute().use { resp ->
+                            val body = resp.body
+                            if (body != null) {
+                                body.byteStream().use { inp ->
+                                    val buf = ByteArray(64 * 1024)
+                                    var sinceCheck = 0L
+                                    while (isActive && (stopAt == null || System.currentTimeMillis() < stopAt)) {
+                                        val n = inp.read(buf)
+                                        if (n < 0) break
+                                        out.write(buf, 0, n)
+                                        // Storage guard: Fire Sticks corrupt themselves when
+                                        // storage fills. Stop the recording gracefully while
+                                        // there's still 2 GB of breathing room.
+                                        sinceCheck += n
+                                        if (sinceCheck > 32_000_000) {
+                                            sinceCheck = 0
+                                            val free = runCatching {
+                                                android.os.StatFs(dir.absolutePath).availableBytes
+                                            }.getOrDefault(Long.MAX_VALUE)
+                                            if (free < 2_000_000_000L) break
+                                        }
+                                    }
                                 }
                             }
                         }

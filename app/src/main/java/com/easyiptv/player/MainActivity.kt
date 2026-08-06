@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -75,6 +76,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
@@ -131,14 +133,22 @@ private val AppColors = darkColorScheme(
 )
 
 /* Fire TV remote: draw a gold outline around whatever the D-pad has focused. */
+/** The remote's highlighter: hot pink, thick, with a soft glow behind it —
+ *  you can always tell exactly where you are, even against busy backgrounds. */
+private val FocusPink = Color(0xFFFF2FB9)
+
 private fun Modifier.tvFocus(shape: RoundedCornerShape = RoundedCornerShape(14.dp)): Modifier =
     composed {
         var focused by remember { mutableStateOf(false) }
         this
             .onFocusChanged { focused = it.isFocused }
+            .background(
+                color = if (focused) FocusPink.copy(alpha = 0.18f) else Color.Transparent,
+                shape = shape
+            )
             .border(
-                width = if (focused) 2.dp else 0.dp,
-                color = if (focused) Accent else Color.Transparent,
+                width = if (focused) 3.dp else 0.dp,
+                color = if (focused) FocusPink else Color.Transparent,
                 shape = shape
             )
     }
@@ -1004,6 +1014,22 @@ fun LivePane(
         selectedCat, saver = androidx.compose.foundation.lazy.LazyListState.Saver
     ) { androidx.compose.foundation.lazy.LazyListState() }
 
+    // Cable-box behavior: opening the guide puts the highlighter ON the channel
+    // you're currently watching, scrolled into view.
+    val currentUrl = remember { prefs.getString("last_live_url", null) }
+    val currentIdxInList = remember(filtered, currentUrl) {
+        if (currentUrl == null) -1 else filtered.indexOfFirst { it.url == currentUrl }
+    }
+    val currentRowFocus = remember { FocusRequester() }
+    LaunchedEffect(selectedCat) {
+        if (currentIdxInList >= 0) {
+            kotlinx.coroutines.delay(120)
+            runCatching { listState.scrollToItem(currentIdxInList) }
+            kotlinx.coroutines.delay(120)
+            runCatching { currentRowFocus.requestFocus() }
+        }
+    }
+
     Column(Modifier.fillMaxSize()) {
         if (guideLoading) {
             Text(
@@ -1029,13 +1055,17 @@ fun LivePane(
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(filtered) { ch ->
+                itemsIndexed(filtered) { chIdx, ch ->
                     val schedule = if (guideReady) EpgStore.guide(ch.epgId, ch.name) else emptyList()
                     val now = System.currentTimeMillis()
                     val current = schedule.firstOrNull { now in it.startMs until it.endMs }
                     Column(
                         Modifier
                             .fillMaxWidth()
+                            .then(
+                                if (chIdx == currentIdxInList) Modifier.focusRequester(currentRowFocus)
+                                else Modifier
+                            )
                             .tvFocus()
                             .background(SurfaceCol, RoundedCornerShape(14.dp))
                             .clickable {
@@ -1110,8 +1140,14 @@ fun LivePane(
                                             modifier = Modifier.size(32.dp).tvFocus(RoundedCornerShape(16.dp)),
                                             onClick = {
                                                 if (isNow) {
-                                                    Recorder.start(context, ch.url, "${e.title} (${ch.name})", e.endMs + 2 * 60 * 1000)
-                                                    toast(context, "Recording \"${e.title}\" until it ends.")
+                                                    val spaceMsg = Recorder.spaceCheck(context)
+                                                    if (spaceMsg != null && !spaceMsg.startsWith("WARN:")) {
+                                                        toast(context, spaceMsg)
+                                                    } else {
+                                                        if (spaceMsg != null) toast(context, spaceMsg.removePrefix("WARN:"))
+                                                        Recorder.start(context, ch.url, "${e.title} (${ch.name})", e.endMs + 2 * 60 * 1000)
+                                                        toast(context, "Recording \"${e.title}\" until it ends.")
+                                                    }
                                                 } else {
                                                     toast(context, ScheduleStore.add(context, prefs, e.title, ch.name, ch.url, e.startMs, e.endMs))
                                                 }
@@ -1164,12 +1200,12 @@ private fun livePlayable(prefs: SharedPreferences, ch: LiveChannel): Playable {
  *    reconnects on its own if the provider drops it.
  * The file lives in the app's cache and is wiped on channel change and exit.
  * ------------------------------------------------------------------------- */
-private object Timeshift {
+internal object Timeshift {
     @Volatile var bytesWritten: Long = 0L
     @Volatile var active: Boolean = false
     @Volatile var file: File? = null
 
-    private var gen = 0L
+    @Volatile private var gen = 0L
     private const val CAP_BYTES = 1_000_000_000L   // ~1 GB safety cap (a long pause's worth)
 
     @Synchronized
@@ -1194,6 +1230,13 @@ private object Timeshift {
                                 while (active && gen == myGen && bytesWritten < CAP_BYTES) {
                                     val n = inp.read(buf)
                                     if (n < 0) break
+                                    // CRITICAL re-check AFTER the blocking network
+                                    // read: if the channel changed while we were
+                                    // waiting for data, this session is dead — a
+                                    // stale writer must NEVER touch the counter,
+                                    // or the new channel's playback wedges on
+                                    // "Locking in…" forever.
+                                    if (!active || gen != myGen) break
                                     out.write(buf, 0, n)
                                     bytesWritten += n
                                     // Storage floor: never squeeze the device.
@@ -1285,7 +1328,10 @@ private object TimeshiftServer {
                 val buf = ByteArray(64 * 1024)
                 while (true) {
                     if (Timeshift.file !== myFile) break   // channel changed
-                    val avail = Timeshift.bytesWritten - pos
+                    // Trust the REAL file size, never just the counter — armor
+                    // against any counter drift ever wedging playback.
+                    val real = minOf(Timeshift.bytesWritten, raf.length())
+                    val avail = real - pos
                     if (avail > 0) {
                         raf.seek(pos)
                         val want = if (buf.size.toLong() < avail) buf.size else avail.toInt()
@@ -1294,6 +1340,8 @@ private object TimeshiftServer {
                             out.write(buf, 0, n)
                             out.flush()
                             pos += n
+                        } else {
+                            Thread.sleep(50)   // transient read miss — wait, don't spin
                         }
                     } else if (!Timeshift.active) {
                         break
@@ -1399,10 +1447,12 @@ object Playback {
 
             override fun onPlaybackStateChanged(playbackState: Int) {
                 playStateC.intValue = playbackState
+                if (playbackState == Player.STATE_BUFFERING) noteBufferingStarted()
                 if (playbackState == Player.STATE_READY) {
                     retriesP = 0
                     streamDeadC.value = false
                     everReadyC.value = true
+                    noteReadyForStall()
                     if (liveMode) noteLiveReady()
                 }
             }
@@ -1460,6 +1510,10 @@ object Playback {
     private var governorRunning = false
     private var lastBytesSeen = -1L
     private var lastBytesAt = 0L
+    private var bufferingSince = 0L
+    private var stallRestarts = 0
+    internal fun noteBufferingStarted() { if (bufferingSince == 0L) bufferingSince = System.currentTimeMillis() }
+    internal fun noteReadyForStall() { bufferingSince = 0L; stallRestarts = 0 }
     private val governorTick = object : Runnable {
         override fun run() {
             val p = player
@@ -1475,12 +1529,27 @@ object Playback {
                             cushion > 10_000 && speed < 1.0f -> p.setPlaybackSpeed(1.0f)
                         }
                     }
+                    val now = System.currentTimeMillis()
+                    // Un-wedger: data IS arriving but the player has been stuck
+                    // "Buffering" for 12+ seconds — do the change-channel-and-back
+                    // trick automatically. Three strikes, then the dead message.
+                    if (playStateC.intValue == Player.STATE_BUFFERING &&
+                        bufferingSince > 0 && now - bufferingSince > 12_000 &&
+                        (directLive || Timeshift.bytesWritten > 0)
+                    ) {
+                        if (stallRestarts >= 3) {
+                            streamDeadC.value = true
+                        } else {
+                            stallRestarts++
+                            bufferingSince = 0L
+                            zapTo(currentIdxC.intValue)
+                        }
+                    }
                     // Dead-feed watchdog (timeshift mode only): if the DVR
                     // recorder hasn't received a single byte in 20s while we're
                     // stuck waiting, the channel is down at the provider.
                     if (!directLive) {
                         val b = Timeshift.bytesWritten
-                        val now = System.currentTimeMillis()
                         if (b != lastBytesSeen) {
                             lastBytesSeen = b
                             lastBytesAt = now
@@ -1557,6 +1626,7 @@ object Playback {
         everReadyC.value = false
         streamDeadC.value = false
         retriesP = 0
+        bufferingSince = 0L
         lastBytesSeen = -1L
         lastBytesAt = System.currentTimeMillis()
         p.setPlaybackSpeed(1.0f)
@@ -1672,8 +1742,8 @@ fun MoviesPane(
                 name = (if (WatchStore.isWatched(prefs, m.url)) "✓  " else "") + m.name,
                 icon = m.icon,
                 onClick = { onPlay(Playable(m.name, m.url, isLive = false)) },
-                trailing = {
-                    IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = {
+                trailing = { fm ->
+                    IconButton(modifier = fm.then(Modifier.tvFocus(RoundedCornerShape(24.dp))), onClick = {
                         toast(context, DownloadStore.start(context, prefs, m.name, m.url))
                     }) {
                         Icon(Icons.Filled.Download, contentDescription = "Download for offline", tint = Muted)
@@ -1718,7 +1788,7 @@ fun SeriesPane(
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         items(filtered) { s ->
-            MediaRow(name = s.name, icon = s.icon, onClick = { onSeries(s) }, trailing = {})
+            MediaRow(name = s.name, icon = s.icon, onClick = { onSeries(s) })
         }
     }
 }
@@ -1776,7 +1846,7 @@ fun SettingsPane(prefs: SharedPreferences) {
         }
 
         Spacer(Modifier.height(24.dp))
-        Text("EZTV 4.1 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
+        Text("EZTV 4.3 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
     }
 }
 
@@ -1910,19 +1980,19 @@ fun SearchTab(
             if (liveHits.isNotEmpty()) {
                 item { SectionHeader("Live TV") }
                 items(liveHits) { ch ->
-                    MediaRow(ch.name, ch.icon, onClick = { saveRecent(q); onPlay(livePlayable(prefs, ch)) }, trailing = {})
+                    MediaRow(ch.name, ch.icon, onClick = { saveRecent(q); onPlay(livePlayable(prefs, ch)) })
                 }
             }
             if (movieHits.isNotEmpty()) {
                 item { SectionHeader("Movies") }
                 items(movieHits) { m ->
-                    MediaRow(m.name, m.icon, onClick = { saveRecent(q); onPlay(Playable(m.name, m.url, isLive = false)) }, trailing = {})
+                    MediaRow(m.name, m.icon, onClick = { saveRecent(q); onPlay(Playable(m.name, m.url, isLive = false)) })
                 }
             }
             if (seriesHits.isNotEmpty()) {
                 item { SectionHeader("Series") }
                 items(seriesHits) { s ->
-                    MediaRow(s.name, s.icon, onClick = { saveRecent(q); onSeries(s) }, trailing = {})
+                    MediaRow(s.name, s.icon, onClick = { saveRecent(q); onSeries(s) })
                 }
             }
             if (guideHits.isNotEmpty()) {
@@ -2078,8 +2148,8 @@ fun SeriesDetailScreen(
                                 val idx = queue.indexOfFirst { it.url == ep.url }.coerceAtLeast(0)
                                 onPlayQueue(queue, idx)
                             },
-                            trailing = {
-                                IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = {
+                            trailing = { fm ->
+                                IconButton(modifier = fm.then(Modifier.tvFocus(RoundedCornerShape(24.dp))), onClick = {
                                     toast(
                                         context,
                                         DownloadStore.start(context, prefs, epName, ep.url)
@@ -2125,7 +2195,7 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
         val free = remember(items) { DownloadStore.freeBytes(context) }
         if (free >= 0) {
             Text(
-                "Device storage: ${String.format(java.util.Locale.US, "%.1f", free / 1_073_741_824.0)} GB free" +
+                "Device storage: ${String.format(java.util.Locale.US, "%.1f", free / 1_073_741_824.0)} GB free (shared by downloads & recordings)" +
                     if (free < 3_000_000_000L) "  •  Too low to start new downloads — free up 3 GB" else "",
                 fontSize = 12.sp,
                 color = if (free < 3_000_000_000L) Live else Accent,
@@ -2158,9 +2228,11 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
                     val ready = f.exists() && f.length() > 0
                     val daysLeft = ((d.expires - System.currentTimeMillis()) / 86_400_000L).coerceAtLeast(0)
                     val prog = progressMap[d.id]
+                    val btnFocus = remember { FocusRequester() }
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .focusProperties { right = btnFocus }
                             .tvFocus()
                             .background(SurfaceCol, RoundedCornerShape(14.dp))
                             .clickable(enabled = ready) { onPlay(Playable(d.title, d.path, isLive = false)) }
@@ -2210,10 +2282,13 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
                                 }
                             }
                         }
-                        IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = {
-                            DownloadStore.stopAndRemove(context, prefs, d)
-                            items = DownloadStore.load(prefs)
-                        }) {
+                        IconButton(
+                            modifier = Modifier.focusRequester(btnFocus).tvFocus(RoundedCornerShape(24.dp)),
+                            onClick = {
+                                DownloadStore.stopAndRemove(context, prefs, d)
+                                items = DownloadStore.load(prefs)
+                            }
+                        ) {
                             Icon(
                                 if (ready) Icons.Filled.Delete else Icons.Filled.Stop,
                                 contentDescription = if (ready) "Delete" else "Stop download",
@@ -2240,6 +2315,17 @@ fun RecordingsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
     val schedFmt = remember { SimpleDateFormat("EEE, MMM d  h:mm a", Locale.getDefault()) }
 
     Column(Modifier.fillMaxSize()) {
+        val free = remember(files) { DownloadStore.freeBytes(context) }
+        if (free >= 0) {
+            Text(
+                "Device storage: ${String.format(java.util.Locale.US, "%.1f", free / 1_073_741_824.0)} GB free (shared by recordings & downloads)" +
+                    if (free < 2_500_000_000L) "  •  Too low to record safely" else "",
+                fontSize = 12.sp,
+                color = if (free < 2_500_000_000L) Live else Accent,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp)
+            )
+        }
         if (scheds.isNotEmpty()) {
             Text(
                 "Scheduled",
@@ -2465,11 +2551,15 @@ private fun MediaRow(
     name: String,
     icon: String?,
     onClick: () -> Unit,
-    trailing: @Composable () -> Unit
+    trailing: (@Composable (Modifier) -> Unit)? = null
 ) {
+    // Arrow RIGHT from the row lands directly on the trailing button
+    // (download / delete) — no long-press gymnastics needed.
+    val trailingFocus = remember { FocusRequester() }
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .focusProperties { if (trailing != null) right = trailingFocus }
             .tvFocus()
             .background(SurfaceCol, RoundedCornerShape(14.dp))
             .clickable { onClick() }
@@ -2487,7 +2577,7 @@ private fun MediaRow(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
-        trailing()
+        if (trailing != null) trailing(Modifier.focusRequester(trailingFocus))
     }
 }
 
@@ -2671,7 +2761,9 @@ fun PlayerScreen(
         }
     }
 
-    val recordingThis = Recorder.activeName.value == current.name
+    val recordingThis = Recorder.activeName.value.let { a ->
+        a != null && (a == current.name || a.endsWith("(${current.name})"))
+    }
 
     Box(
         Modifier
@@ -2957,12 +3049,22 @@ fun PlayerScreen(
                 confirmButton = {
                     TextButton(onClick = {
                         showRecordChoice = false
-                        if (nowShow != null) {
-                            Recorder.start(context, tsUrl(current.url), "${nowShow.title} (${current.name})", nowShow.endMs + 2 * 60 * 1000)
-                            toast(context, "Recording until this show ends.")
+                        val spaceMsg = Recorder.spaceCheck(context)
+                        if (spaceMsg != null && !spaceMsg.startsWith("WARN:")) {
+                            toast(context, spaceMsg)
                         } else {
-                            Recorder.start(context, tsUrl(current.url), current.name)
-                            toast(context, "Recording started. Tap the red button again to stop.")
+                            if (spaceMsg != null) toast(context, spaceMsg.removePrefix("WARN:"))
+                            // Recording the channel being WATCHED copies from the
+                            // DVR file — no second provider connection, so the
+                            // picture no longer pauses when you press record.
+                            val tee = Playback.liveMode
+                            if (nowShow != null) {
+                                Recorder.start(context, tsUrl(current.url), "${nowShow.title} (${current.name})", nowShow.endMs + 2 * 60 * 1000, teeFromTimeshift = tee)
+                                toast(context, "Recording until this show ends.")
+                            } else {
+                                Recorder.start(context, tsUrl(current.url), current.name, teeFromTimeshift = tee)
+                                toast(context, "Recording started. Tap the red button again to stop.")
+                            }
                         }
                     }) {
                         Text(if (nowShow != null) "Record this show" else "Start recording", color = Accent)
@@ -2972,8 +3074,14 @@ fun PlayerScreen(
                     if (nowShow != null) {
                         TextButton(onClick = {
                             showRecordChoice = false
-                            Recorder.start(context, tsUrl(current.url), current.name)
-                            toast(context, "Recording until you stop it.")
+                            val spaceMsg2 = Recorder.spaceCheck(context)
+                            if (spaceMsg2 != null && !spaceMsg2.startsWith("WARN:")) {
+                                toast(context, spaceMsg2)
+                            } else {
+                                if (spaceMsg2 != null) toast(context, spaceMsg2.removePrefix("WARN:"))
+                                Recorder.start(context, tsUrl(current.url), current.name, teeFromTimeshift = Playback.liveMode)
+                                toast(context, "Recording until you stop it.")
+                            }
                         }) {
                             Text("Record until I stop", color = Muted)
                         }
