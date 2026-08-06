@@ -84,12 +84,18 @@ class RecordingService : Service() {
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE
         )
+        val stop = PendingIntent.getService(
+            this, 1,
+            Intent(this, RecordingService::class.java).apply { action = ACTION_STOP },
+            PendingIntent.FLAG_IMMUTABLE
+        )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle("Recording: $name")
-            .setContentText("Easy IPTV is recording. Open the app to stop.")
+            .setContentText("Easy IPTV is recording in the background.")
             .setOngoing(true)
             .setContentIntent(open)
+            .addAction(android.R.drawable.ic_media_pause, "Stop recording", stop)
             .build()
     }
 

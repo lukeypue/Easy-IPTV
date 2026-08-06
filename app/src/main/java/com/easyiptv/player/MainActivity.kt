@@ -12,6 +12,7 @@ import androidx.annotation.OptIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.aspectRatio
@@ -49,6 +50,7 @@ import androidx.compose.material.icons.filled.Today
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -74,6 +76,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -150,10 +153,18 @@ data class Playable(
 
 sealed class Nav {
     object Home : Nav()
-    data class Play(val queue: List<Playable>, val start: Int = 0, val from: Nav = Home) : Nav()
+    data class Play(
+        val queue: List<Playable>,
+        val start: Int = 0,
+        val from: Nav = Home,
+        val startAtMs: Long? = null   // jump straight to this spot (mini-player resume)
+    ) : Nav()
     data class Series(val s: SeriesItem) : Nav()
     object AddPlaylist : Nav()
 }
+
+/** What keeps playing in the corner after you back out of full screen. */
+data class MiniState(val queue: List<Playable>, val index: Int, val posMs: Long)
 
 /* ----------------------------- activity ----------------------------- */
 
@@ -161,6 +172,10 @@ sealed class Nav {
  * so the player can always react — menus can never become unreachable. */
 object PlayerKeys {
     var handler: ((Int) -> Boolean)? = null
+
+    /** Checked BEFORE the on-screen views get the press — used for channel
+     *  up/down zapping, which must win over the video view's own key handling. */
+    var priority: ((Int) -> Boolean)? = null
 }
 
 class MainActivity : ComponentActivity() {
@@ -173,6 +188,13 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        if (event.action == android.view.KeyEvent.ACTION_DOWN &&
+            PlayerKeys.priority?.invoke(event.keyCode) == true
+        ) return true
+        return super.dispatchKeyEvent(event)
     }
 
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent?): Boolean {
@@ -201,6 +223,25 @@ fun App() {
     var movieCat by remember(activeIdx) { mutableStateOf("all") }
     var seriesCat by remember(activeIdx) { mutableStateOf("all") }
     var searchQuery by remember { mutableStateOf("") }
+
+    // The corner mini player: whatever you backed out of keeps playing here.
+    var mini by remember { mutableStateOf<MiniState?>(null) }
+    // Only auto-tune to the last channel once per app start.
+    var autoTuned by remember { mutableStateOf(false) }
+
+    fun openPlay(p: Nav.Play) {
+        mini = null           // full screen takes over — never two streams at once
+        if (p.queue.getOrNull(p.start)?.isLive == true) {
+            val ch = p.queue[p.start]
+            prefs.edit()
+                .putString("last_live_name", ch.name)
+                .putString("last_live_url", ch.url)
+                .putString("last_live_epg", ch.epgId ?: "")
+                .putString("last_live_guide", ch.guideKey ?: "")
+                .apply()
+        }
+        nav = p
+    }
 
     LaunchedEffect(Unit) {
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -268,6 +309,27 @@ fun App() {
         }
     }
 
+    // Cable-box behavior: the app opens straight onto the channel you were
+    // last watching (Settings › "Start on last channel" turns this off).
+    LaunchedEffect(data) {
+        if (autoTuned || data == null || nav !is Nav.Home) return@LaunchedEffect
+        autoTuned = true
+        if (!prefs.getBoolean("autoplay_last", true)) return@LaunchedEffect
+        val url = prefs.getString("last_live_url", null) ?: return@LaunchedEffect
+        // Build the full channel lineup and start on the saved channel — so
+        // channel up/down works the moment the app opens, like a cable box.
+        val channels = data?.live ?: return@LaunchedEffect
+        val idx = channels.indexOfFirst { it.url == url || liveStreamUrl(prefs, it.url) == url }
+        if (idx < 0) return@LaunchedEffect   // channel no longer in this playlist
+        openPlay(
+            Nav.Play(
+                channels.map { livePlayable(prefs, it) },
+                idx,
+                from = Nav.Home
+            )
+        )
+    }
+
     fun addPlaylist(p: Playlist) {
         val next = playlists + p
         playlists = next
@@ -285,9 +347,15 @@ fun App() {
             PlayerScreen(
                 queue = pl.queue,
                 start = pl.start,
+                startAtMs = pl.startAtMs,
                 source = source,
                 prefs = prefs,
-                onBack = { nav = pl.from }
+                onBack = { idx, posMs ->
+                    // Back doesn't stop the show — it shrinks into the corner
+                    // so you can keep browsing while it plays.
+                    mini = MiniState(pl.queue, idx, posMs)
+                    nav = pl.from
+                }
             )
         }
         nav is Nav.Series && source != null -> {
@@ -296,7 +364,7 @@ fun App() {
                 source = source,
                 s = cur.s,
                 prefs = prefs,
-                onPlayQueue = { q, i -> nav = Nav.Play(q, i, from = cur) },
+                onPlayQueue = { q, i -> openPlay(Nav.Play(q, i, from = cur)) },
                 onBack = { nav = Nav.Home }
             )
         }
@@ -309,6 +377,17 @@ fun App() {
             activeIdx = activeIdx,
             section = railSection,
             depth = railDepth,
+            mini = mini,
+            onResumeMini = {
+                val m = mini ?: return@HomeScreen
+                openPlay(
+                    Nav.Play(
+                        m.queue, m.index, from = Nav.Home,
+                        startAtMs = if (m.queue.getOrNull(m.index)?.isLive == false) m.posMs else null
+                    )
+                )
+            },
+            onCloseMini = { mini = null },
             onRoot = { id ->
                 railSection = id
                 railDepth = if (id == "live" || id == "movies" || id == "series") 1 else 0
@@ -336,7 +415,8 @@ fun App() {
             },
             onAddPlaylist = { nav = Nav.AddPlaylist },
             onRetry = { reload++ },
-            onPlay = { nav = Nav.Play(listOf(it), from = Nav.Home) },
+            onPlay = { openPlay(Nav.Play(listOf(it), from = Nav.Home)) },
+            onPlayLive = { q, i -> openPlay(Nav.Play(q, i, from = Nav.Home)) },
             onSeries = { nav = Nav.Series(it) }
         )
     }
@@ -542,6 +622,9 @@ fun HomeScreen(
     activeIdx: Int,
     section: String,
     depth: Int,
+    mini: MiniState?,
+    onResumeMini: () -> Unit,
+    onCloseMini: () -> Unit,
     onRoot: (String) -> Unit,
     onBackToRoot: () -> Unit,
     liveCat: String, onLiveCat: (String) -> Unit,
@@ -554,6 +637,7 @@ fun HomeScreen(
     onAddPlaylist: () -> Unit,
     onRetry: () -> Unit,
     onPlay: (Playable) -> Unit,
+    onPlayLive: (List<Playable>, Int) -> Unit,
     onSeries: (SeriesItem) -> Unit
 ) {
     // Remote's Back button climbs out one level instead of leaving the app.
@@ -569,7 +653,12 @@ fun HomeScreen(
             onDismissRequest = { showExit = false },
             containerColor = SurfaceCol,
             title = { Text("Leave Easy IPTV?", color = Ink) },
-            text = { Text("Are you sure you want to exit the app?", color = Muted, fontSize = 13.sp) },
+            text = {
+                Text(
+                    "Downloads in progress and scheduled DVR recordings keep working in the background even after you exit — the device just needs to stay powered on.",
+                    color = Muted, fontSize = 13.sp
+                )
+            },
             confirmButton = {
                 TextButton(onClick = { activity?.finish() }) { Text("Exit", color = Accent) }
             },
@@ -631,7 +720,7 @@ fun HomeScreen(
                 )
                 Box(Modifier.weight(1f)) {
                     when {
-                        depth == 1 && section == "live" -> LivePane(prefs, activeIdx, data!!, liveCat, onPlay)
+                        depth == 1 && section == "live" -> LivePane(prefs, activeIdx, data!!, liveCat, miniActive = mini != null, onPlayLive)
                         depth == 1 && section == "movies" -> MoviesPane(prefs, data!!, movieCat, onPlay)
                         depth == 1 && section == "series" -> SeriesPane(source, data!!, seriesCat, onSeries)
                         section == "search" -> SearchTab(prefs, data!!, searchQuery, onSearchQuery, onPlay, onSeries)
@@ -645,6 +734,51 @@ fun HomeScreen(
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             Text("Pick a section on the left.", color = Muted, fontSize = 14.sp)
+                        }
+                    }
+                }
+                // What you were watching keeps playing here while you browse.
+                // Highlight it and press OK to go back full screen.
+                if (mini != null) {
+                    val mp = mini.queue.getOrNull(mini.index)
+                    if (mp != null) {
+                        Column(
+                            Modifier
+                                .width(236.dp)
+                                .fillMaxHeight()
+                                .padding(start = 4.dp, end = 10.dp, top = 6.dp)
+                        ) {
+                            Box(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .tvFocus(RoundedCornerShape(10.dp))
+                                    .clickable { onResumeMini() }
+                            ) {
+                                MiniVideo(
+                                    url = mp.url,
+                                    startMs = if (mp.isLive) 0L else mini.posMs
+                                )
+                            }
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                mp.name,
+                                color = Ink, fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                                maxLines = 2, overflow = TextOverflow.Ellipsis
+                            )
+                            Text("Press OK on the picture for full screen.", color = Muted, fontSize = 10.sp)
+                            Spacer(Modifier.height(6.dp))
+                            Row(
+                                Modifier
+                                    .tvFocus(RoundedCornerShape(8.dp))
+                                    .background(Surface2, RoundedCornerShape(8.dp))
+                                    .clickable { onCloseMini() }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Filled.Stop, contentDescription = null, tint = Muted, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Stop playing", color = Muted, fontSize = 11.sp)
+                            }
                         }
                     }
                 }
@@ -787,7 +921,8 @@ fun LivePane(
     activeIdx: Int,
     data: AppData,
     selectedCat: String,
-    onPlay: (Playable) -> Unit
+    miniActive: Boolean,
+    onPlayLive: (List<Playable>, Int) -> Unit
 ) {
     val context = LocalContext.current
     val favKey = "fav_live_$activeIdx"
@@ -812,17 +947,30 @@ fun LivePane(
         }
     }
 
-    // Xfinity-style preview: as the remote highlights channels, the highlighted
-    // one starts playing small in the upper right. Debounced so quickly scrolling
-    // past channels doesn't open a stream for each one.
-    val previewEnabled = remember { prefs.getBoolean("guide_preview", true) }
+    // Xfinity-style preview: the highlighted channel plays small in the upper
+    // right. On remotes, highlighting follows the D-pad; on phones (no D-pad
+    // focus) the preview starts on the first channel of the list. Debounced so
+    // quickly scrolling past channels doesn't open a stream for each one.
+    // When the global mini player is showing (you backed out of something),
+    // that takes the corner instead — never two streams at once.
+    val previewEnabled = remember { prefs.getBoolean("guide_preview", true) } && !miniActive
     var focusedCh by remember { mutableStateOf<LiveChannel?>(null) }
     var previewCh by remember { mutableStateOf<LiveChannel?>(null) }
+    LaunchedEffect(filtered, previewEnabled) {
+        if (previewEnabled && focusedCh == null && filtered.isNotEmpty()) {
+            focusedCh = filtered.first()
+        }
+    }
     LaunchedEffect(focusedCh) {
         val ch = focusedCh ?: return@LaunchedEffect
         kotlinx.coroutines.delay(700)
         previewCh = ch
     }
+
+    // Come back to Live TV and the list is scrolled right where you left it.
+    val listState = androidx.compose.runtime.saveable.rememberSaveable(
+        selectedCat, saver = androidx.compose.foundation.lazy.LazyListState.Saver
+    ) { androidx.compose.foundation.lazy.LazyListState() }
 
     Row(Modifier.fillMaxSize()) {
     Column(Modifier.weight(1f).fillMaxHeight()) {
@@ -846,6 +994,7 @@ fun LivePane(
             }
         } else {
             LazyColumn(
+                state = listState,
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -859,7 +1008,12 @@ fun LivePane(
                             .tvFocus()
                             .onFocusChanged { st -> if (st.isFocused) focusedCh = ch }
                             .background(SurfaceCol, RoundedCornerShape(14.dp))
-                            .clickable { onPlay(livePlayable(prefs, ch)) }
+                            .clickable {
+                                // Hand the player this WHOLE category, starting on this
+                                // channel — that's what makes channel up/down work.
+                                val q = filtered.map { livePlayable(prefs, it) }
+                                onPlayLive(q, filtered.indexOfFirst { it.id == ch.id }.coerceAtLeast(0))
+                            }
                             .padding(10.dp)
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -957,7 +1111,7 @@ fun LivePane(
                 .fillMaxHeight()
                 .padding(start = 4.dp, end = 10.dp, top = 6.dp)
         ) {
-            ChannelPreview(liveStreamUrl(prefs, pch.url))
+            MiniVideo(url = liveStreamUrl(prefs, pch.url), startMs = 0L)
             Spacer(Modifier.height(8.dp))
             Text(
                 pch.name,
@@ -989,11 +1143,12 @@ fun LivePane(
     }
 }
 
-/* Small always-on player for the guide's corner preview. Lean buffer so it
- * starts fast; released the moment you leave Live TV or open a full stream. */
+/* Small always-on player for the corner — used by both the guide preview and
+ * the global mini player. Lean buffer so it starts fast; released the moment
+ * it leaves the screen. Handles streams and downloaded/recorded local files. */
 @OptIn(UnstableApi::class)
 @Composable
-private fun ChannelPreview(url: String) {
+private fun MiniVideo(url: String, startMs: Long) {
     val context = LocalContext.current
     val exo = remember {
         val renderers = DefaultRenderersFactory(context)
@@ -1008,8 +1163,10 @@ private fun ChannelPreview(url: String) {
             .build()
     }
     LaunchedEffect(url) {
-        exo.setMediaItem(MediaItem.fromUri(url))
+        val uri = if (url.startsWith("/")) Uri.fromFile(File(url)) else Uri.parse(url)
+        exo.setMediaItem(MediaItem.fromUri(uri))
         exo.prepare()
+        if (startMs > 0) exo.seekTo(startMs)
         exo.playWhenReady = true
     }
     DisposableEffect(Unit) { onDispose { exo.release() } }
@@ -1148,8 +1305,27 @@ fun SeriesPane(
 fun SettingsPane(prefs: SharedPreferences) {
     var bufferSec by remember { mutableIntStateOf(prefs.getInt("buffer_sec", 30)) }
     var guidePreview by remember { mutableStateOf(prefs.getBoolean("guide_preview", true)) }
+    var autoLast by remember { mutableStateOf(prefs.getBoolean("autoplay_last", true)) }
 
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(androidx.compose.foundation.rememberScrollState())
+            .padding(16.dp)
+    ) {
+        Text("Start on last channel", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Like a cable box: opening the app tunes straight to whatever channel you were last watching.",
+            fontSize = 12.sp, color = Muted
+        )
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Chip("On", autoLast) { autoLast = true; prefs.edit().putBoolean("autoplay_last", true).apply() }
+            Chip("Off", !autoLast) { autoLast = false; prefs.edit().putBoolean("autoplay_last", false).apply() }
+        }
+
+        Spacer(Modifier.height(20.dp))
         Text("Stream buffer", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
         Text(
@@ -1195,7 +1371,7 @@ fun SettingsPane(prefs: SharedPreferences) {
         }
 
         Spacer(Modifier.height(24.dp))
-        Text("Easy IPTV 3.4 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
+        Text("Easy IPTV 3.6 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
     }
 }
 
@@ -1518,11 +1694,31 @@ fun SeriesDetailScreen(
 /* ----------------------------- downloads ----------------------------- */
 @Composable
 fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
+    val context = LocalContext.current
     var items by remember { mutableStateOf(DownloadStore.load(prefs)) }
+    // id -> (bytes so far, total bytes). Refreshed every second while anything is downloading.
+    var progressMap by remember { mutableStateOf<Map<Long, Pair<Long, Long>>>(emptyMap()) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            val inFlight = items.filter { d -> File(d.path).let { !it.exists() || it.length() == 0L } }
+            if (inFlight.isNotEmpty()) {
+                val m = HashMap<Long, Pair<Long, Long>>()
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    inFlight.forEach { d ->
+                        DownloadStore.progress(context, d.id)?.let { m[d.id] = it }
+                    }
+                }
+                progressMap = m
+                items = DownloadStore.load(prefs)   // pick up ones that just finished
+            }
+            kotlinx.coroutines.delay(1_000)
+        }
+    }
 
     Column(Modifier.fillMaxSize()) {
         Text(
-            "Saved for offline watching. Each download is kept for 14 days, then removed automatically.",
+            "Saved for offline watching. Each download is kept for 14 days, then removed automatically. Downloads keep going even if you close the app.",
             fontSize = 12.sp, color = Muted,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
         )
@@ -1545,6 +1741,7 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
                     val f = File(d.path)
                     val ready = f.exists() && f.length() > 0
                     val daysLeft = ((d.expires - System.currentTimeMillis()) / 86_400_000L).coerceAtLeast(0)
+                    val prog = progressMap[d.id]
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1565,16 +1762,47 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
                                 d.title, color = Ink, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis
                             )
-                            Text(
-                                if (ready) "$daysLeft day${if (daysLeft == 1L) "" else "s"} left" else "Downloading…",
-                                color = Muted, fontSize = 12.sp
-                            )
+                            if (ready) {
+                                Text(
+                                    "$daysLeft day${if (daysLeft == 1L) "" else "s"} left",
+                                    color = Muted, fontSize = 12.sp
+                                )
+                            } else {
+                                val done = prog?.first ?: 0L
+                                val total = prog?.second ?: -1L
+                                val pct = if (total > 0) ((done * 100) / total).toInt().coerceIn(0, 100) else null
+                                Text(
+                                    when {
+                                        pct != null -> "Downloading… $pct%  (${done / 1_048_576} MB of ${total / 1_048_576} MB)"
+                                        done > 0 -> "Downloading… ${done / 1_048_576} MB so far"
+                                        else -> "Starting download…"
+                                    },
+                                    color = Muted, fontSize = 12.sp
+                                )
+                                Spacer(Modifier.height(4.dp))
+                                if (pct != null) {
+                                    LinearProgressIndicator(
+                                        progress = { pct / 100f },
+                                        color = Accent, trackColor = Surface2,
+                                        modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp))
+                                    )
+                                } else {
+                                    LinearProgressIndicator(
+                                        color = Accent, trackColor = Surface2,
+                                        modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp))
+                                    )
+                                }
+                            }
                         }
                         IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = {
-                            DownloadStore.remove(prefs, d)
+                            DownloadStore.stopAndRemove(context, prefs, d)
                             items = DownloadStore.load(prefs)
                         }) {
-                            Icon(Icons.Filled.Delete, contentDescription = "Delete", tint = Muted)
+                            Icon(
+                                if (ready) Icons.Filled.Delete else Icons.Filled.Stop,
+                                contentDescription = if (ready) "Delete" else "Stop download",
+                                tint = Muted
+                            )
                         }
                     }
                 }
@@ -1853,13 +2081,14 @@ private fun MediaRow(
 fun PlayerScreen(
     queue: List<Playable>,
     start: Int,
+    startAtMs: Long? = null,
     source: Source?,
     prefs: SharedPreferences,
-    onBack: () -> Unit
+    onBack: (index: Int, posMs: Long) -> Unit
 ) {
     // Safety: never crash on an empty queue — just go back.
     if (queue.isEmpty()) {
-        LaunchedEffect(Unit) { onBack() }
+        LaunchedEffect(Unit) { onBack(0, 0L) }
         return
     }
     val context = LocalContext.current
@@ -1874,15 +2103,18 @@ fun PlayerScreen(
     var overlayVisible by remember { mutableStateOf(true) }
     var showRecordChoice by remember { mutableStateOf(false) }
     // Resume support: if there's a saved spot for the starting item, hold playback
-    // and ask Resume / Start over.
+    // and ask Resume / Start over. (Skipped when arriving from the mini player —
+    // that already knows exactly where you were.)
     val startItem = queue[start.coerceIn(0, queue.size - 1)]
     val resumeAt = remember {
-        if (startItem.isLive) null
+        if (startItem.isLive || startAtMs != null) null
         else WatchStore.get(prefs, startItem.url)?.let { w ->
             if (w.pos > 30_000 && (w.dur <= 0 || w.pos < (w.dur * 0.95).toLong())) w.pos else null
         }
     }
     var pendingResume by remember { mutableStateOf(resumeAt) }
+    // Set when a channel has failed every reconnect attempt — it's down at the provider.
+    val streamDead = remember { mutableStateOf(false) }
     var pvRef by remember { mutableStateOf<PlayerView?>(null) }
     val titleFocus = remember { FocusRequester() }
     // Whenever the menus appear, park the remote on the show title —
@@ -1943,18 +2175,29 @@ fun PlayerScreen(
             .setSeekForwardIncrementMs(30_000)
             .setLoadControl(loadControl)
             .build().apply {
-                setMediaItems(mediaItems, start.coerceIn(0, queue.size - 1), C.TIME_UNSET)
+                setMediaItems(
+                    mediaItems,
+                    start.coerceIn(0, queue.size - 1),
+                    startAtMs ?: C.TIME_UNSET
+                )
                 addListener(object : Player.Listener {
                     // If the connection fully drops, quietly rejoin the stream instead of
                     // showing an error — up to 6 tries, waiting a bit longer each time.
                     private var retries = 0
 
                     override fun onPlaybackStateChanged(playbackState: Int) {
-                        if (playbackState == Player.STATE_READY) retries = 0
+                        if (playbackState == Player.STATE_READY) {
+                            retries = 0
+                            streamDead.value = false
+                        }
                     }
 
                     override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                        if (retries >= 6) return
+                        if (retries >= 6) {
+                            // Everything failed — this one is down at the provider's end.
+                            streamDead.value = true
+                            return
+                        }
                         retries++
                         val wait = (1_000L * retries).coerceAtMost(5_000L)
                         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
@@ -1996,6 +2239,17 @@ fun PlayerScreen(
                         ) {
                             WatchStore.markWatched(prefs, queue[prev].url)
                         }
+                        // Channel-surfed to a new channel: remember it as "last watched"
+                        // so next app start tunes here.
+                        val cur = queue.getOrNull(currentMediaItemIndex)
+                        if (cur?.isLive == true) {
+                            prefs.edit()
+                                .putString("last_live_name", cur.name)
+                                .putString("last_live_url", cur.url)
+                                .putString("last_live_epg", cur.epgId ?: "")
+                                .putString("last_live_guide", cur.guideKey ?: "")
+                                .apply()
+                        }
                     }
                 })
                 prepare()
@@ -2030,13 +2284,46 @@ fun PlayerScreen(
             pvRef?.hideController()
             overlayVisible = false
         } else {
-            onBack()
+            onBack(exo.currentMediaItemIndex, exo.currentPosition.coerceAtLeast(0L))
         }
     }
 
+    // Channel surfing: +1 / −1 through the category, wrapping at the ends —
+    // exactly like the channel up/down buttons on a cable remote.
+    fun zapReady(): Boolean =
+        queue.size > 1 && queue.getOrNull(exo.currentMediaItemIndex)?.isLive == true
+    fun zap(dir: Int) {
+        streamDead.value = false
+        val next = (exo.currentMediaItemIndex + dir + queue.size) % queue.size
+        exo.seekTo(next, C.TIME_UNSET)
+        exo.prepare()          // also recovers if the last channel had errored out
+        exo.playWhenReady = true
+        // Flash the channel name so they see where they landed.
+        pvRef?.showController()
+    }
+
     // The catch-all: presses nothing else handled. Media keys control playback
-    // directly; any other press brings the menus back. Works every time.
+    // directly; channel & D-pad up/down zap channels; anything else brings the
+    // menus back. Works every time.
     DisposableEffect(Unit) {
+        // These must win over the video view's own key handling, so they're
+        // checked before anything on screen sees the press.
+        PlayerKeys.priority = { key ->
+            when (key) {
+                // Real channel buttons (many TV remotes have them): always zap.
+                android.view.KeyEvent.KEYCODE_CHANNEL_UP ->
+                    if (zapReady()) { zap(-1); true } else false
+                android.view.KeyEvent.KEYCODE_CHANNEL_DOWN ->
+                    if (zapReady()) { zap(+1); true } else false
+                // D-pad up/down: with the menus hidden they zap channels;
+                // with the menus showing they navigate the menus as usual.
+                android.view.KeyEvent.KEYCODE_DPAD_UP ->
+                    if (zapReady() && !overlayVisible) { zap(-1); true } else false
+                android.view.KeyEvent.KEYCODE_DPAD_DOWN ->
+                    if (zapReady() && !overlayVisible) { zap(+1); true } else false
+                else -> false
+            }
+        }
         PlayerKeys.handler = { key ->
             when (key) {
                 android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
@@ -2057,7 +2344,10 @@ fun PlayerScreen(
                 else -> false
             }
         }
-        onDispose { PlayerKeys.handler = null }
+        onDispose {
+            PlayerKeys.handler = null
+            PlayerKeys.priority = null
+        }
     }
 
     // Remember where they are, a few times a minute.
@@ -2089,7 +2379,28 @@ fun PlayerScreen(
 
     val recordingThis = Recorder.activeName.value == current.name
 
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            // Phones & tablets: swipe up = previous channel in the list,
+            // swipe down = next. Taps still work normally for the controls.
+            .pointerInput(queue.size) {
+                var totalDrag = 0f
+                androidx.compose.foundation.gestures.detectVerticalDragGestures(
+                    onDragStart = { totalDrag = 0f },
+                    onVerticalDrag = { _, dragAmount -> totalDrag += dragAmount },
+                    onDragEnd = {
+                        if (zapReady()) {
+                            when {
+                                totalDrag < -120f -> zap(+1)   // swiped up
+                                totalDrag > 120f -> zap(-1)    // swiped down
+                            }
+                        }
+                    }
+                )
+            }
+    ) {
         AndroidView(
             factory = { ctx ->
                 PlayerView(ctx).apply {
@@ -2125,6 +2436,35 @@ fun PlayerScreen(
             },
             modifier = Modifier.fillMaxSize()
         )
+        // Channel gave up after every reconnect attempt — tell them plainly.
+        if (streamDead.value) {
+            Column(
+                Modifier
+                    .align(Alignment.Center)
+                    .background(Color(0xCC15181E), RoundedCornerShape(14.dp))
+                    .padding(20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text("This channel isn't answering", color = Ink, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "It's most likely down at your provider right now — not your internet or this device. Try another channel, or try this one again in a bit.",
+                    color = Muted, fontSize = 12.sp
+                )
+                Spacer(Modifier.height(12.dp))
+                Button(
+                    modifier = Modifier.tvFocus(RoundedCornerShape(22.dp)),
+                    onClick = {
+                        streamDead.value = false
+                        runCatching {
+                            if (current.isLive) exo.seekToDefaultPosition()
+                            exo.prepare()
+                            exo.play()
+                        }
+                    }
+                ) { Text("Try again") }
+            }
+        }
         if (overlayVisible) Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -2132,7 +2472,9 @@ fun PlayerScreen(
                 .padding(8.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = onBack) {
+                IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = {
+                    onBack(exo.currentMediaItemIndex, exo.currentPosition.coerceAtLeast(0L))
+                }) {
                     Icon(Icons.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
                 }
                 Column(
@@ -2156,7 +2498,10 @@ fun PlayerScreen(
                     )
                     if (queue.size > 1) {
                         Text(
-                            "Episode ${currentIdx + 1} of ${queue.size} — next plays automatically",
+                            if (current.isLive)
+                                "Channel ${currentIdx + 1} of ${queue.size} — ↑/↓ or CH buttons change channels"
+                            else
+                                "Episode ${currentIdx + 1} of ${queue.size} — next plays automatically",
                             color = Color(0xFFB9BDC7), fontSize = 11.sp,
                             maxLines = 1, overflow = TextOverflow.Ellipsis
                         )

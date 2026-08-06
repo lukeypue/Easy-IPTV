@@ -108,6 +108,30 @@ object DownloadStore {
         save(prefs, load(prefs).filterNot { it.path == item.path })
     }
 
+    /** Stop an in-progress download AND remove it (also works on finished ones). */
+    fun stopAndRemove(context: Context, prefs: SharedPreferences, item: Item) {
+        runCatching {
+            val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+            dm.remove(item.id)   // cancels if running, deletes the partial file
+        }
+        remove(prefs, item)
+    }
+
+    /** (bytes so far, total bytes or -1 if unknown), or null if the system has no record. */
+    fun progress(context: Context, id: Long): Pair<Long, Long>? {
+        return try {
+            val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+            dm.query(DownloadManager.Query().setFilterById(id)).use { c ->
+                if (!c.moveToFirst()) return null
+                val done = c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))
+                val total = c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
+                done to total
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     private fun safeName(title: String): String =
         title.replace(Regex("[^A-Za-z0-9 _.-]"), "").trim().replace(' ', '_').take(48)
             .ifBlank { "video" }
