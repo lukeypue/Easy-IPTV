@@ -212,7 +212,7 @@ class RecordingService : Service() {
                     var needNetwork = !tee
                     if (tee) {
                         // ONE-CONNECTION recording: copy from the live DVR file.
-                        needNetwork = teeFromTimeshift(out) { isActive } &&
+                        needNetwork = teeFromTimeshift(out, stopAt) { isActive } &&
                             isActive && (stopAt == null || System.currentTimeMillis() < stopAt)
                     }
                     if (needNetwork) {
