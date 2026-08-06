@@ -12,6 +12,7 @@ import androidx.annotation.OptIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -2387,7 +2388,7 @@ fun PlayerScreen(
             // swipe down = next. Taps still work normally for the controls.
             .pointerInput(queue.size) {
                 var totalDrag = 0f
-                androidx.compose.foundation.gestures.detectVerticalDragGestures(
+                detectVerticalDragGestures(
                     onDragStart = { totalDrag = 0f },
                     onVerticalDrag = { _, dragAmount -> totalDrag += dragAmount },
                     onDragEnd = {
