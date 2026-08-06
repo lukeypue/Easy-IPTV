@@ -158,7 +158,8 @@ sealed class Nav {
         val queue: List<Playable>,
         val start: Int = 0,
         val from: Nav = Home,
-        val startAtMs: Long? = null   // jump straight to this spot (mini-player resume)
+        val startAtMs: Long? = null,   // jump straight to this spot
+        val attach: Boolean = false    // corner → full screen: SAME stream, no reload
     ) : Nav()
     data class Series(val s: SeriesItem) : Nav()
     object AddPlaylist : Nav()
@@ -201,6 +202,24 @@ class MainActivity : ComponentActivity() {
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent?): Boolean {
         if (PlayerKeys.handler?.invoke(keyCode) == true) return true
         return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // Coming back to the app: if something was playing, pick it right back up.
+        if (Playback.queue.isNotEmpty()) Playback.player?.play()
+    }
+
+    override fun onStop() {
+        // App hidden (Home button / another app): pause the one stream —
+        // no ghost audio, and no connection held open for nothing.
+        Playback.player?.pause()
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        Playback.releaseAll()
+        super.onDestroy()
     }
 }
 
@@ -320,7 +339,7 @@ fun App() {
         // Build the full channel lineup and start on the saved channel — so
         // channel up/down works the moment the app opens, like a cable box.
         val channels = data?.live ?: return@LaunchedEffect
-        val idx = channels.indexOfFirst { it.url == url || liveStreamUrl(prefs, it.url) == url }
+        val idx = channels.indexOfFirst { it.url == url || it.url == tsUrl(url) || liveAutoUrl(prefs, it.url) == url }
         if (idx < 0) return@LaunchedEffect   // channel no longer in this playlist
         openPlay(
             Nav.Play(
@@ -349,11 +368,12 @@ fun App() {
                 queue = pl.queue,
                 start = pl.start,
                 startAtMs = pl.startAtMs,
+                attach = pl.attach,
                 source = source,
                 prefs = prefs,
                 onBack = { idx, posMs ->
-                    // Back doesn't stop the show — it shrinks into the corner
-                    // so you can keep browsing while it plays.
+                    // Back doesn't stop or reconnect anything — the SAME stream
+                    // just moves to the corner while you browse.
                     mini = MiniState(pl.queue, idx, posMs)
                     nav = pl.from
                 }
@@ -381,14 +401,13 @@ fun App() {
             mini = mini,
             onResumeMini = {
                 val m = mini ?: return@HomeScreen
-                openPlay(
-                    Nav.Play(
-                        m.queue, m.index, from = Nav.Home,
-                        startAtMs = if (m.queue.getOrNull(m.index)?.isLive == false) m.posMs else null
-                    )
-                )
+                // SAME stream — attach only, nothing reloads or reconnects.
+                openPlay(Nav.Play(m.queue, m.index, from = Nav.Home, attach = true))
             },
-            onCloseMini = { mini = null },
+            onCloseMini = {
+                mini = null
+                Playback.releaseAll()   // truly stop: close the one stream
+            },
             onRoot = { id ->
                 railSection = id
                 railDepth = if (id == "live" || id == "movies" || id == "series") 1 else 0
@@ -721,7 +740,7 @@ fun HomeScreen(
                 )
                 Box(Modifier.weight(1f)) {
                     when {
-                        depth == 1 && section == "live" -> LivePane(prefs, activeIdx, data!!, liveCat, miniActive = mini != null, onPlayLive)
+                        depth == 1 && section == "live" -> LivePane(prefs, activeIdx, data!!, liveCat, onPlayLive)
                         depth == 1 && section == "movies" -> MoviesPane(prefs, data!!, movieCat, onPlay)
                         depth == 1 && section == "series" -> SeriesPane(source, data!!, seriesCat, onSeries)
                         section == "search" -> SearchTab(prefs, data!!, searchQuery, onSearchQuery, onPlay, onSeries)
@@ -738,10 +757,12 @@ fun HomeScreen(
                         }
                     }
                 }
-                // What you were watching keeps playing here while you browse.
-                // Highlight it and press OK to go back full screen.
-                if (mini != null) {
-                    val mp = mini.queue.getOrNull(mini.index)
+                // The SAME stream you were watching, showing in the corner while
+                // you browse. Highlight it and press OK to go back full screen —
+                // nothing reloads, because it's one continuous stream.
+                if (mini != null && Playback.player != null) {
+                    val mp = mini.queue.getOrNull(Playback.currentIdxC.intValue)
+                        ?: mini.queue.getOrNull(mini.index)
                     if (mp != null) {
                         Column(
                             Modifier
@@ -755,10 +776,27 @@ fun HomeScreen(
                                     .tvFocus(RoundedCornerShape(10.dp))
                                     .clickable { onResumeMini() }
                             ) {
-                                MiniVideo(
-                                    url = mp.url,
-                                    startMs = if (mp.isLive) 0L else mini.posMs
-                                )
+                                Box(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .aspectRatio(16f / 9f)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(Color.Black)
+                                ) {
+                                    AndroidView(
+                                        factory = { ctx ->
+                                            PlayerView(ctx).apply {
+                                                player = Playback.player
+                                                useController = false
+                                                isFocusable = false
+                                                isFocusableInTouchMode = false
+                                                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                                            }
+                                        },
+                                        update = { it.player = Playback.player },
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                }
                             }
                             Spacer(Modifier.height(8.dp))
                             Text(
@@ -922,7 +960,6 @@ fun LivePane(
     activeIdx: Int,
     data: AppData,
     selectedCat: String,
-    miniActive: Boolean,
     onPlayLive: (List<Playable>, Int) -> Unit
 ) {
     val context = LocalContext.current
@@ -948,33 +985,12 @@ fun LivePane(
         }
     }
 
-    // Xfinity-style preview: the highlighted channel plays small in the upper
-    // right. On remotes, highlighting follows the D-pad; on phones (no D-pad
-    // focus) the preview starts on the first channel of the list. Debounced so
-    // quickly scrolling past channels doesn't open a stream for each one.
-    // When the global mini player is showing (you backed out of something),
-    // that takes the corner instead — never two streams at once.
-    val previewEnabled = remember { prefs.getBoolean("guide_preview", true) } && !miniActive
-    var focusedCh by remember { mutableStateOf<LiveChannel?>(null) }
-    var previewCh by remember { mutableStateOf<LiveChannel?>(null) }
-    LaunchedEffect(filtered, previewEnabled) {
-        if (previewEnabled && focusedCh == null && filtered.isNotEmpty()) {
-            focusedCh = filtered.first()
-        }
-    }
-    LaunchedEffect(focusedCh) {
-        val ch = focusedCh ?: return@LaunchedEffect
-        kotlinx.coroutines.delay(700)
-        previewCh = ch
-    }
-
     // Come back to Live TV and the list is scrolled right where you left it.
     val listState = androidx.compose.runtime.saveable.rememberSaveable(
         selectedCat, saver = androidx.compose.foundation.lazy.LazyListState.Saver
     ) { androidx.compose.foundation.lazy.LazyListState() }
 
-    Row(Modifier.fillMaxSize()) {
-    Column(Modifier.weight(1f).fillMaxHeight()) {
+    Column(Modifier.fillMaxSize()) {
         if (guideLoading) {
             Text(
                 "Downloading TV guide… this can take a minute or two.",
@@ -1007,7 +1023,6 @@ fun LivePane(
                         Modifier
                             .fillMaxWidth()
                             .tvFocus()
-                            .onFocusChanged { st -> if (st.isFocused) focusedCh = ch }
                             .background(SurfaceCol, RoundedCornerShape(14.dp))
                             .clickable {
                                 // Hand the player this WHOLE category, starting on this
@@ -1103,117 +1118,216 @@ fun LivePane(
             }
         }
     }
-    // Upper-right preview panel (Xfinity-style)
-    if (previewEnabled && previewCh != null) {
-        val pch = previewCh!!
-        Column(
-            Modifier
-                .width(236.dp)
-                .fillMaxHeight()
-                .padding(start = 4.dp, end = 10.dp, top = 6.dp)
-        ) {
-            MiniVideo(url = liveStreamUrl(prefs, pch.url), startMs = 0L)
-            Spacer(Modifier.height(8.dp))
-            Text(
-                pch.name,
-                color = Ink, fontSize = 14.sp, fontWeight = FontWeight.Bold,
-                maxLines = 1, overflow = TextOverflow.Ellipsis
-            )
-            if (guideReady) {
-                val sched = EpgStore.guide(pch.epgId, pch.name)
-                val nowMs = System.currentTimeMillis()
-                val nowShow = sched.firstOrNull { nowMs in it.startMs until it.endMs }
-                val nextShow = sched.firstOrNull { it.startMs > nowMs }
-                if (nowShow != null) {
-                    Text(
-                        "Now: ${nowShow.title}",
-                        color = Accent, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis
-                    )
-                }
-                if (nextShow != null) {
-                    Text(
-                        "Next at ${fmt.format(Date(nextShow.startMs))}: ${nextShow.title}",
-                        color = Muted, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
-            Spacer(Modifier.height(6.dp))
-            Text("Press OK to watch full screen.", color = Muted, fontSize = 10.sp)
-        }
-    }
-    }
 }
 
-/* Small always-on player for the corner — used by both the guide preview and
- * the global mini player. Lean buffer so it starts fast; released the moment
- * it leaves the screen. Handles streams and downloaded/recorded local files. */
-@OptIn(UnstableApi::class)
-@Composable
-private fun MiniVideo(url: String, startMs: Long) {
-    val context = LocalContext.current
-    val exo = remember {
-        val renderers = DefaultRenderersFactory(context)
-            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
-            .setEnableDecoderFallback(true)
-        ExoPlayer.Builder(context, renderers)
-            .setLoadControl(
-                DefaultLoadControl.Builder()
-                    .setBufferDurationsMs(2_000, 15_000, 500, 1_000)
-                    .build()
-            )
-            .build()
-    }
-    LaunchedEffect(url) {
-        val uri = if (url.startsWith("/")) Uri.fromFile(File(url)) else Uri.parse(url)
-        exo.setMediaItem(MediaItem.fromUri(uri))
-        exo.prepare()
-        if (startMs > 0) exo.seekTo(startMs)
-        exo.playWhenReady = true
-    }
-    DisposableEffect(Unit) { onDispose { exo.release() } }
-    Box(
-        Modifier
-            .fillMaxWidth()
-            .aspectRatio(16f / 9f)
-            .clip(RoundedCornerShape(10.dp))
-            .background(Color.Black)
-    ) {
-        AndroidView(
-            factory = { ctx ->
-                PlayerView(ctx).apply {
-                    player = exo
-                    useController = false
-                    isFocusable = false
-                    isFocusableInTouchMode = false
-                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                }
-            },
-            update = { it.player = exo },
-            modifier = Modifier.fillMaxSize()
-        )
-    }
-}
+/* Live channels come from providers in two forms. The modern chunked form
+ * (HLS) is what YouTube/Prime use — smoother on weak internet. The classic
+ * form (.ts) is one continuous stream — needed for recording. The app tries
+ * the smooth form first and, if the provider doesn't support it, remembers
+ * that and uses the classic form from then on. Fully automatic, no setting. */
+private fun tsUrl(url: String): String =
+    if (url.endsWith(".m3u8")) url.removeSuffix(".m3u8") + ".ts" else url
 
-/* Live channels can be pulled from Xtream providers two ways:
- *  - Standard (.ts): one continuous stream. Required for recording.
- *  - Smooth (HLS .m3u8): chopped into small chunks like YouTube/Prime use —
- *    recovers from hiccups better, and if the provider offers several quality
- *    levels the player auto-switches to match the connection. */
-private fun liveStreamUrl(prefs: SharedPreferences, url: String): String =
-    if (prefs.getString("live_format", "ts") == "hls" && url.endsWith(".ts"))
+private fun liveAutoUrl(prefs: SharedPreferences, url: String): String =
+    if (url.endsWith(".ts") && prefs.getString("hls_state", "unknown") != "bad")
         url.removeSuffix(".ts") + ".m3u8"
     else url
 
 private fun livePlayable(prefs: SharedPreferences, ch: LiveChannel): Playable {
-    val u = liveStreamUrl(prefs, ch.url)
     return Playable(
         name = ch.name,
-        url = u,
+        url = liveAutoUrl(prefs, ch.url),
         isLive = true,
         epgId = ch.id,
         guideKey = ch.epgId,
-        canRecord = u.endsWith(".ts")
+        canRecord = ch.url.endsWith(".ts")
     )
+}
+
+/* ---------------------------------------------------------------------------
+ * THE ONE STREAM RULE.
+ * This app holds exactly ONE player with ONE provider connection, ever.
+ * The full-screen view and the corner mini view are two windows onto the SAME
+ * stream — backing out of full screen doesn't reconnect anything, and tapping
+ * the corner doesn't reconnect anything. Picking a different channel switches
+ * this one stream to the new channel. The provider never sees two connections.
+ * ------------------------------------------------------------------------- */
+@OptIn(UnstableApi::class)
+object Playback {
+    var player: ExoPlayer? = null
+        private set
+    var queue: List<Playable> = emptyList()
+        private set
+
+    // Compose-observable playback state, shared by every screen.
+    val currentIdxC = androidx.compose.runtime.mutableIntStateOf(0)
+    val playStateC = androidx.compose.runtime.mutableIntStateOf(Player.STATE_IDLE)
+    val streamDeadC = androidx.compose.runtime.mutableStateOf(false)
+    val everReadyC = androidx.compose.runtime.mutableStateOf(false)
+
+    private fun mediaItemFor(pl: Playable, forceClassic: Boolean): MediaItem {
+        val u = if (forceClassic && pl.isLive) tsUrl(pl.url) else pl.url
+        val uri = if (u.startsWith("/")) Uri.fromFile(File(u)) else Uri.parse(u)
+        return MediaItem.Builder()
+            .setUri(uri)
+            .setMediaMetadata(MediaMetadata.Builder().setTitle(pl.name).build())
+            .build()
+    }
+
+    private fun ensurePlayer(context: Context, prefs: SharedPreferences): ExoPlayer {
+        player?.let { return it }
+        val bufferSec = prefs.getInt("buffer_sec", 30)
+        val renderersFactory = DefaultRenderersFactory(context)
+            // PREFER the bundled FFmpeg software audio decoders — many TVs claim
+            // Dolby support but play silence. Video stays on hardware (4K needs it).
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+            .setEnableDecoderFallback(true)
+        // Smooth-playback buffering, sized for small devices like Fire Sticks:
+        // fast ~1.5s start, then fill ahead up to ~90s.
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                (bufferSec * 1000).coerceAtMost(60_000),
+                (bufferSec * 1000 * 3).coerceIn(60_000, 90_000),
+                1_500,
+                4_000
+            )
+            .setBackBuffer(10_000, false)
+            .build()
+        val extractors = androidx.media3.extractor.DefaultExtractorsFactory()
+            .setConstantBitrateSeekingEnabled(true)
+            .setConstantBitrateSeekingAlwaysEnabled(true)
+        val mediaSources = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(context, extractors)
+            .setLoadErrorHandlingPolicy(
+                androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy(8)
+            )
+        val p = ExoPlayer.Builder(context, renderersFactory)
+            .setMediaSourceFactory(mediaSources)
+            .setSeekBackIncrementMs(10_000)
+            .setSeekForwardIncrementMs(30_000)
+            .setLoadControl(loadControl)
+            .build()
+        p.addListener(object : Player.Listener {
+            private var retries = 0
+            private var prevIdx = 0
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                playStateC.intValue = playbackState
+                if (playbackState == Player.STATE_READY) {
+                    retries = 0
+                    streamDeadC.value = false
+                    everReadyC.value = true
+                    // The smooth (HLS) form played — remember the provider supports it.
+                    val u = p.currentMediaItem?.localConfiguration?.uri?.toString()
+                    if (u != null && u.endsWith(".m3u8") &&
+                        prefs.getString("hls_state", "unknown") != "good"
+                    ) {
+                        prefs.edit().putString("hls_state", "good").apply()
+                    }
+                }
+            }
+
+            /** Provider doesn't do HLS: switch the whole lineup to the classic
+             *  form in one move, and remember so future launches skip HLS. */
+            private fun fallBackToClassic() {
+                prefs.edit().putString("hls_state", "bad").apply()
+                val q = queue
+                if (q.isEmpty()) return
+                val idx = p.currentMediaItemIndex.coerceIn(0, q.size - 1)
+                p.setMediaItems(q.map { mediaItemFor(it, forceClassic = true) }, idx, C.TIME_UNSET)
+                p.prepare()
+                p.play()
+            }
+
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                val q = queue
+                val idx = p.currentMediaItemIndex
+                val liveNow = idx in q.indices && q[idx].isLive
+                val u = p.currentMediaItem?.localConfiguration?.uri?.toString()
+
+                // HLS not confirmed working and it just failed? Drop to classic now.
+                if (liveNow && u != null && u.endsWith(".m3u8") &&
+                    prefs.getString("hls_state", "unknown") != "good"
+                ) {
+                    runCatching { fallBackToClassic() }
+                    return
+                }
+
+                if (retries >= 6) {
+                    streamDeadC.value = true
+                    return
+                }
+                retries++
+                val wait = (1_000L * retries).coerceAtMost(5_000L)
+                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    runCatching {
+                        if (liveNow) p.seekToDefaultPosition()
+                        p.prepare()
+                        p.play()
+                    }
+                }, wait)
+            }
+
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                val q = queue
+                val prev = prevIdx
+                prevIdx = p.currentMediaItemIndex
+                currentIdxC.intValue = p.currentMediaItemIndex
+                everReadyC.value = false   // fresh channel = fresh "locking in" message
+                if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO &&
+                    prev in q.indices && !q[prev].isLive
+                ) {
+                    WatchStore.markWatched(prefs, q[prev].url)
+                }
+                // Remember the current live channel for next app start.
+                val cur = q.getOrNull(p.currentMediaItemIndex)
+                if (cur?.isLive == true) {
+                    prefs.edit()
+                        .putString("last_live_name", cur.name)
+                        .putString("last_live_url", cur.url)
+                        .putString("last_live_epg", cur.epgId ?: "")
+                        .putString("last_live_guide", cur.guideKey ?: "")
+                        .apply()
+                }
+            }
+        })
+        player = p
+        return p
+    }
+
+    /**
+     * Open playback. attachOnly = true means "same stream, just show it to me"
+     * (corner → full screen): nothing is reloaded, nothing reconnects.
+     */
+    fun open(
+        context: Context,
+        prefs: SharedPreferences,
+        newQueue: List<Playable>,
+        start: Int,
+        startAtMs: Long?,
+        attachOnly: Boolean
+    ): ExoPlayer {
+        val p = ensurePlayer(context, prefs)
+        if (attachOnly && queue.isNotEmpty()) return p
+        queue = newQueue
+        val s = start.coerceIn(0, (newQueue.size - 1).coerceAtLeast(0))
+        currentIdxC.intValue = s
+        everReadyC.value = false
+        streamDeadC.value = false
+        p.setMediaItems(newQueue.map { mediaItemFor(it, forceClassic = false) }, s, startAtMs ?: C.TIME_UNSET)
+        p.prepare()
+        p.playWhenReady = true
+        return p
+    }
+
+    /** Full stop: close the one stream and free the decoders. */
+    fun releaseAll() {
+        runCatching { player?.release() }
+        player = null
+        queue = emptyList()
+        playStateC.intValue = Player.STATE_IDLE
+        streamDeadC.value = false
+        everReadyC.value = false
+    }
 }
 
 /* ----------------------------- movies pane ----------------------------- */
@@ -1305,7 +1419,6 @@ fun SeriesPane(
 @Composable
 fun SettingsPane(prefs: SharedPreferences) {
     var bufferSec by remember { mutableIntStateOf(prefs.getInt("buffer_sec", 30)) }
-    var guidePreview by remember { mutableStateOf(prefs.getBoolean("guide_preview", true)) }
     var autoLast by remember { mutableStateOf(prefs.getBoolean("autoplay_last", true)) }
 
     Column(
@@ -1340,39 +1453,8 @@ fun SettingsPane(prefs: SharedPreferences) {
             Chip("Big (60s)", bufferSec == 60) { bufferSec = 60; prefs.edit().putInt("buffer_sec", 60).apply() }
         }
 
-        Spacer(Modifier.height(20.dp))
-        Text("Live stream format", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
-        Spacer(Modifier.height(4.dp))
-        Text(
-            "Smooth (HLS) delivers live TV in small chunks — the same way YouTube and Prime do — which recovers from internet hiccups better. Try it if channels stutter. Note: the record button while watching only works in Standard.",
-            fontSize = 12.sp, color = Muted
-        )
-        Spacer(Modifier.height(10.dp))
-        var liveFormat by remember { mutableStateOf(prefs.getString("live_format", "ts") ?: "ts") }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Chip("Standard", liveFormat == "ts") {
-                liveFormat = "ts"; prefs.edit().putString("live_format", "ts").apply()
-            }
-            Chip("Smooth (HLS)", liveFormat == "hls") {
-                liveFormat = "hls"; prefs.edit().putString("live_format", "hls").apply()
-            }
-        }
-
-        Spacer(Modifier.height(20.dp))
-        Text("Guide preview", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
-        Spacer(Modifier.height(4.dp))
-        Text(
-            "Plays the highlighted channel in the corner while you browse Live TV, like cable boxes do.",
-            fontSize = 12.sp, color = Muted
-        )
-        Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Chip("On", guidePreview) { guidePreview = true; prefs.edit().putBoolean("guide_preview", true).apply() }
-            Chip("Off", !guidePreview) { guidePreview = false; prefs.edit().putBoolean("guide_preview", false).apply() }
-        }
-
         Spacer(Modifier.height(24.dp))
-        Text("Easy IPTV 3.6 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
+        Text("Easy IPTV 3.8 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
     }
 }
 
@@ -2083,6 +2165,7 @@ fun PlayerScreen(
     queue: List<Playable>,
     start: Int,
     startAtMs: Long? = null,
+    attach: Boolean = false,
     source: Source?,
     prefs: SharedPreferences,
     onBack: (index: Int, posMs: Long) -> Unit
@@ -2093,29 +2176,30 @@ fun PlayerScreen(
         return
     }
     val context = LocalContext.current
-    val bufferSec = remember { prefs.getInt("buffer_sec", 30) }
     var resizeMode by remember {
         mutableIntStateOf(prefs.getInt("resize_mode", AspectRatioFrameLayout.RESIZE_MODE_FIT))
     }
-    var currentIdx by remember { mutableIntStateOf(start.coerceIn(0, queue.size - 1)) }
+    // Playback state lives in the shared one-stream engine.
+    val currentIdx by Playback.currentIdxC
     val current = queue[currentIdx.coerceIn(0, queue.size - 1)]
     var nowNext by remember { mutableStateOf<List<EpgEntry>>(emptyList()) }
     // Our top bar shows and hides in lockstep with the player's own controls.
     var overlayVisible by remember { mutableStateOf(true) }
     var showRecordChoice by remember { mutableStateOf(false) }
     // Resume support: if there's a saved spot for the starting item, hold playback
-    // and ask Resume / Start over. (Skipped when arriving from the mini player —
-    // that already knows exactly where you were.)
+    // and ask Resume / Start over. (Skipped when re-attaching to the running
+    // stream from the corner — nothing should interrupt it.)
     val startItem = queue[start.coerceIn(0, queue.size - 1)]
     val resumeAt = remember {
-        if (startItem.isLive || startAtMs != null) null
+        if (startItem.isLive || startAtMs != null || attach) null
         else WatchStore.get(prefs, startItem.url)?.let { w ->
             if (w.pos > 30_000 && (w.dur <= 0 || w.pos < (w.dur * 0.95).toLong())) w.pos else null
         }
     }
     var pendingResume by remember { mutableStateOf(resumeAt) }
-    // Set when a channel has failed every reconnect attempt — it's down at the provider.
-    val streamDead = remember { mutableStateOf(false) }
+    val streamDead = Playback.streamDeadC
+    val playState = Playback.playStateC
+    val everReady = Playback.everReadyC
     var pvRef by remember { mutableStateOf<PlayerView?>(null) }
     val titleFocus = remember { FocusRequester() }
     // Whenever the menus appear, park the remote on the show title —
@@ -2128,137 +2212,17 @@ fun PlayerScreen(
     }
     val fmt = remember { SimpleDateFormat("h:mm a", Locale.getDefault()) }
 
+    // THE one player. attach=true means the stream is already running (it was
+    // in the corner) — we just show it, nothing reloads or reconnects.
     val exo = remember {
-        val renderersFactory = DefaultRenderersFactory(context)
-            // PREFER the bundled FFmpeg software audio decoders (AC-3, E-AC-3, DTS,
-            // TrueHD, MP2, etc). Many TVs and sticks *claim* they can decode Dolby
-            // audio but play silence — software decoding always produces sound.
-            // Video still uses the device's hardware decoder (needed for 4K).
-            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
-            // If a decoder fails mid-stream, quietly try the next one instead of erroring.
-            .setEnableDecoderFallback(true)
-        // Amazon/YouTube-style buffering: start playing after just ~1.5s of video,
-        // then keep filling a DEEP buffer (up to 2 minutes) behind the scenes.
-        // A shaky connection eats into that stored-up video instead of stuttering.
-        val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(
-                bufferSec * 1000,                                    // always try to keep at least this much
-                (bufferSec * 1000 * 4).coerceAtLeast(120_000),       // ...and stockpile up to 2+ minutes
-                1_500,                                               // start playback after ~1.5s (fast start)
-                4_000                                                // after a stall, resume once 4s is stored
-            )
-            // Hit the time targets even if it means using more memory.
-            .setPrioritizeTimeOverSizeThresholds(true)
-            // Keep the last 30s behind us so instant-rewind works without re-downloading.
-            .setBackBuffer(30_000, true)
-            .build()
-        val mediaItems = queue.map { pl ->
-            val uri = if (pl.url.startsWith("/")) Uri.fromFile(File(pl.url)) else Uri.parse(pl.url)
-            MediaItem.Builder()
-                .setUri(uri)
-                .setMediaMetadata(MediaMetadata.Builder().setTitle(pl.name).build())
-                .build()
+        Playback.open(context, prefs, queue, start, startAtMs, attachOnly = attach).also { p ->
+            if (!attach && resumeAt != null) p.playWhenReady = false
         }
-        // Many IPTV servers stream movies without a seek index. Constant-bitrate
-        // seeking lets the player estimate positions so fast-forward/rewind work anyway.
-        val extractors = androidx.media3.extractor.DefaultExtractorsFactory()
-            .setConstantBitrateSeekingEnabled(true)
-            .setConstantBitrateSeekingAlwaysEnabled(true)
-        val mediaSources = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(context, extractors)
-            // Crappy internet: retry each failed chunk up to 8 times before giving up,
-            // instead of erroring out on the first hiccup.
-            .setLoadErrorHandlingPolicy(
-                androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy(8)
-            )
-        ExoPlayer.Builder(context, renderersFactory)
-            .setMediaSourceFactory(mediaSources)
-            .setSeekBackIncrementMs(10_000)
-            .setSeekForwardIncrementMs(30_000)
-            .setLoadControl(loadControl)
-            .build().apply {
-                setMediaItems(
-                    mediaItems,
-                    start.coerceIn(0, queue.size - 1),
-                    startAtMs ?: C.TIME_UNSET
-                )
-                addListener(object : Player.Listener {
-                    // If the connection fully drops, quietly rejoin the stream instead of
-                    // showing an error — up to 6 tries, waiting a bit longer each time.
-                    private var retries = 0
-
-                    override fun onPlaybackStateChanged(playbackState: Int) {
-                        if (playbackState == Player.STATE_READY) {
-                            retries = 0
-                            streamDead.value = false
-                        }
-                    }
-
-                    override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                        if (retries >= 6) {
-                            // Everything failed — this one is down at the provider's end.
-                            streamDead.value = true
-                            return
-                        }
-                        retries++
-                        val wait = (1_000L * retries).coerceAtMost(5_000L)
-                        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                            runCatching {
-                                val idx = currentMediaItemIndex
-                                // If Smooth (HLS) keeps failing on this channel, the provider
-                                // probably doesn't support it — quietly switch this session
-                                // back to the standard stream and keep going.
-                                if (retries >= 3 && queue.size == 1 &&
-                                    idx in queue.indices && queue[idx].isLive
-                                ) {
-                                    val u = currentMediaItem?.localConfiguration?.uri?.toString()
-                                    if (u != null && u.endsWith(".m3u8")) {
-                                        setMediaItem(
-                                            MediaItem.Builder()
-                                                .setUri(u.removeSuffix(".m3u8") + ".ts")
-                                                .setMediaMetadata(
-                                                    MediaMetadata.Builder()
-                                                        .setTitle(queue[idx].name).build()
-                                                )
-                                                .build()
-                                        )
-                                    }
-                                }
-                                // Live TV: jump back to the "live edge" when rejoining.
-                                if (idx in queue.indices && queue[idx].isLive) seekToDefaultPosition()
-                                prepare()
-                                play()
-                            }
-                        }, wait)
-                    }
-
-                    override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                        val prev = currentIdx
-                        currentIdx = currentMediaItemIndex
-                        // Rolling into the next episode = the last one is watched.
-                        if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO &&
-                            prev in queue.indices && !queue[prev].isLive
-                        ) {
-                            WatchStore.markWatched(prefs, queue[prev].url)
-                        }
-                        // Channel-surfed to a new channel: remember it as "last watched"
-                        // so next app start tunes here.
-                        val cur = queue.getOrNull(currentMediaItemIndex)
-                        if (cur?.isLive == true) {
-                            prefs.edit()
-                                .putString("last_live_name", cur.name)
-                                .putString("last_live_url", cur.url)
-                                .putString("last_live_epg", cur.epgId ?: "")
-                                .putString("last_live_guide", cur.guideKey ?: "")
-                                .apply()
-                        }
-                    }
-                })
-                prepare()
-                playWhenReady = resumeAt == null
-            }
     }
     DisposableEffect(Unit) {
         onDispose {
+            // The stream KEEPS PLAYING (it moves to the corner). Just remember
+            // where we are in movies/episodes, and detach this screen's view.
             runCatching {
                 val i = exo.currentMediaItemIndex
                 if (i in queue.indices && !queue[i].isLive && exo.currentPosition > 10_000) {
@@ -2268,25 +2232,13 @@ fun PlayerScreen(
                     )
                 }
             }
-            exo.release()
+            pvRef?.player = null
         }
     }
-    // If the person presses Home / switches apps, pause — no ghost audio in the background.
-    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner) {
-        val obs = androidx.lifecycle.LifecycleEventObserver { _, event ->
-            if (event == androidx.lifecycle.Lifecycle.Event.ON_STOP) exo.pause()
-        }
-        lifecycleOwner.lifecycle.addObserver(obs)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
-    }
+    // ONE press of Back = out to the channel list (the show keeps playing in
+    // the corner). Another press there = main menu. Simple, like a cable box.
     BackHandler {
-        if (overlayVisible) {
-            pvRef?.hideController()
-            overlayVisible = false
-        } else {
-            onBack(exo.currentMediaItemIndex, exo.currentPosition.coerceAtLeast(0L))
-        }
+        onBack(exo.currentMediaItemIndex, exo.currentPosition.coerceAtLeast(0L))
     }
 
     // Channel surfing: +1 / −1 through the category, wrapping at the ends —
@@ -2437,6 +2389,31 @@ fun PlayerScreen(
             },
             modifier = Modifier.fillMaxSize()
         )
+        // Friendly status while the stream settles — so the customer knows the
+        // wait is on purpose, not broken.
+        if (!streamDead.value && playState.value == Player.STATE_BUFFERING) {
+            Column(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 90.dp)
+                    .background(Color(0xB315181E), RoundedCornerShape(12.dp))
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                CircularProgressIndicator(
+                    color = Accent, strokeWidth = 3.dp,
+                    modifier = Modifier.size(22.dp)
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    if (!everReady.value)
+                        "Locking in ${current.name}… a few seconds gets you a clean, steady picture."
+                    else
+                        "Buffering ahead to keep your video smooth — hang tight…",
+                    color = Ink, fontSize = 12.sp
+                )
+            }
+        }
         // Channel gave up after every reconnect attempt — tell them plainly.
         if (streamDead.value) {
             Column(
@@ -2446,10 +2423,10 @@ fun PlayerScreen(
                     .padding(20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text("This channel isn't answering", color = Ink, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                Text("This channel isn't coming in", color = Ink, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "It's most likely down at your provider right now — not your internet or this device. Try another channel, or try this one again in a bit.",
+                    "We tried several times. This is on your IPTV service's end — not your internet or this device. Try another channel, or ask your IPTV service about this one.",
                     color = Muted, fontSize = 12.sp
                 )
                 Spacer(Modifier.height(12.dp))
@@ -2623,10 +2600,10 @@ fun PlayerScreen(
                     TextButton(onClick = {
                         showRecordChoice = false
                         if (nowShow != null) {
-                            Recorder.start(context, current.url, "${nowShow.title} (${current.name})", nowShow.endMs + 2 * 60 * 1000)
+                            Recorder.start(context, tsUrl(current.url), "${nowShow.title} (${current.name})", nowShow.endMs + 2 * 60 * 1000)
                             toast(context, "Recording until this show ends.")
                         } else {
-                            Recorder.start(context, current.url, current.name)
+                            Recorder.start(context, tsUrl(current.url), current.name)
                             toast(context, "Recording started. Tap the red button again to stop.")
                         }
                     }) {
@@ -2637,7 +2614,7 @@ fun PlayerScreen(
                     if (nowShow != null) {
                         TextButton(onClick = {
                             showRecordChoice = false
-                            Recorder.start(context, current.url, current.name)
+                            Recorder.start(context, tsUrl(current.url), current.name)
                             toast(context, "Recording until you stop it.")
                         }) {
                             Text("Record until I stop", color = Muted)
