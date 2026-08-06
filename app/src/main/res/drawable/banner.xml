@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Fire TV banner: gradient, play badge, and bold EZTV lettering. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:aapt="http://schemas.android.com/aapt"
     android:width="320dp" android:height="180dp"
@@ -17,6 +18,17 @@
     <path android:fillColor="#33FFFFFF" android:pathData="M0,150h320v30h-320z"/>
     <path android:fillColor="#FFFFFF" android:pathData="M62,90m-36,0a36,36 0 1,1 72,0a36,36 0 1,1 -72,0"/>
     <path android:fillColor="#8A1FA8" android:pathData="M50,68l40,22l-40,22z"/>
-    <path android:fillColor="#FFFFFF" android:pathData="M112,66h5v5h-5zM117,66h5v5h-5zM122,66h5v5h-5zM112,71h5v5h-5zM112,76h5v5h-5zM117,76h5v5h-5zM122,76h5v5h-5zM112,81h5v5h-5zM112,86h5v5h-5zM117,86h5v5h-5zM122,86h5v5h-5zM133,66h5v5h-5zM138,66h5v5h-5zM143,66h5v5h-5zM133,71h5v5h-5zM143,71h5v5h-5zM133,76h5v5h-5zM138,76h5v5h-5zM143,76h5v5h-5zM133,81h5v5h-5zM143,81h5v5h-5zM133,86h5v5h-5zM143,86h5v5h-5zM154,66h5v5h-5zM159,66h5v5h-5zM164,66h5v5h-5zM154,71h5v5h-5zM154,76h5v5h-5zM159,76h5v5h-5zM164,76h5v5h-5zM164,81h5v5h-5zM154,86h5v5h-5zM159,86h5v5h-5zM164,86h5v5h-5zM175,66h5v5h-5zM185,66h5v5h-5zM175,71h5v5h-5zM185,71h5v5h-5zM175,76h5v5h-5zM180,76h5v5h-5zM185,76h5v5h-5zM180,81h5v5h-5zM180,86h5v5h-5zM217,66h5v5h-5zM222,66h5v5h-5zM227,66h5v5h-5zM222,71h5v5h-5zM222,76h5v5h-5zM222,81h5v5h-5zM217,86h5v5h-5zM222,86h5v5h-5zM227,86h5v5h-5zM238,66h5v5h-5zM243,66h5v5h-5zM248,66h5v5h-5zM238,71h5v5h-5zM248,71h5v5h-5zM238,76h5v5h-5zM243,76h5v5h-5zM248,76h5v5h-5zM238,81h5v5h-5zM238,86h5v5h-5zM259,66h5v5h-5zM264,66h5v5h-5zM269,66h5v5h-5zM264,71h5v5h-5zM264,76h5v5h-5zM264,81h5v5h-5zM264,86h5v5h-5zM280,66h5v5h-5zM290,66h5v5h-5zM280,71h5v5h-5zM290,71h5v5h-5zM280,76h5v5h-5zM290,76h5v5h-5zM280,81h5v5h-5zM290,81h5v5h-5zM285,86h5v5h-5z"/>
-    <path android:fillColor="#CCFFFFFF" android:pathData="M112,104h186v4h-186z"/>
+    <!-- E -->
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M115,70 h26 v9 h-17 v6.5 h14 v9 h-14 v6.5 h17 v9 h-26 Z"/>
+    <!-- Z -->
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M148,70 h26 v8 l-15,23 h15 v9 h-26 v-8 l15,-23 h-15 Z"/>
+    <!-- T -->
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M181,70 h26 v9 h-8.5 v31 h-9 v-31 h-8.5 Z"/>
+    <!-- V -->
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M212,70 h9.5 l6.5,27 l6.5,-27 h9.5 l-11,40 h-10 Z"/>
+    <path android:fillColor="#FFD9B8" android:pathData="M115,116h129v4h-129z"/>
 </vector>

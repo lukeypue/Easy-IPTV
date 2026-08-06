@@ -92,10 +92,6 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.datasource.DataSource
-import androidx.media3.datasource.DataSpec
-import androidx.media3.datasource.DefaultDataSource
-import androidx.media3.datasource.TransferListener
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
@@ -508,7 +504,7 @@ fun AddPlaylistScreen(first: Boolean, onSaved: (Playlist) -> Unit, onBack: (() -
             }
             Spacer(Modifier.width(10.dp))
             Column {
-                Text("Easy IPTV", fontWeight = FontWeight.ExtraBold, fontSize = 19.sp, color = Ink)
+                Text("EZTV", fontWeight = FontWeight.ExtraBold, fontSize = 19.sp, color = Ink)
                 Text("TV made simple", fontSize = 12.sp, color = Muted)
             }
         }
@@ -677,7 +673,7 @@ fun HomeScreen(
         AlertDialog(
             onDismissRequest = { showExit = false },
             containerColor = SurfaceCol,
-            title = { Text("Leave Easy IPTV?", color = Ink) },
+            title = { Text("Leave EZTV?", color = Ink) },
             text = {
                 Text(
                     "Downloads in progress and scheduled DVR recordings keep working in the background even after you exit — the device just needs to stay powered on.",
@@ -700,7 +696,7 @@ fun HomeScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(Modifier.weight(1f)) {
-                Text("Easy IPTV", fontWeight = FontWeight.ExtraBold, fontSize = 17.sp, color = Ink)
+                Text("EZTV", fontWeight = FontWeight.ExtraBold, fontSize = 17.sp, color = Ink)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.size(7.dp).background(Accent, CircleShape))
                     Spacer(Modifier.width(6.dp))
@@ -800,6 +796,18 @@ fun HomeScreen(
                                         },
                                         update = { it.player = Playback.player },
                                         modifier = Modifier.fillMaxSize()
+                                    )
+                                    // Phones: the video view eats touches, so this
+                                    // invisible layer catches the tap. (TV remotes
+                                    // use the focus ring + OK on the outer box.)
+                                    Box(
+                                        Modifier
+                                            .matchParentSize()
+                                            .pointerInput(Unit) {
+                                                androidx.compose.foundation.gestures.detectTapGestures {
+                                                    onResumeMini()
+                                                }
+                                            }
                                     )
                                 }
                             }
@@ -1181,11 +1189,21 @@ private object Timeshift {
                         if (inp != null) {
                             java.io.FileOutputStream(f, true).use { out ->
                                 val buf = ByteArray(64 * 1024)
+                                var sinceCheck = 0L
                                 while (active && gen == myGen && bytesWritten < CAP_BYTES) {
                                     val n = inp.read(buf)
                                     if (n < 0) break
                                     out.write(buf, 0, n)
                                     bytesWritten += n
+                                    // Storage floor: never squeeze the device.
+                                    sinceCheck += n
+                                    if (sinceCheck > 32_000_000) {
+                                        sinceCheck = 0
+                                        val free = runCatching {
+                                            android.os.StatFs(f.parentFile!!.absolutePath).availableBytes
+                                        }.getOrDefault(Long.MAX_VALUE)
+                                        if (free < 1_500_000_000L) break
+                                    }
                                 }
                             }
                         }
@@ -1215,66 +1233,86 @@ private object Timeshift {
     }
 }
 
-/* Reads the timeshift file WHILE it's still being written — like following a
- * live log. When playback reaches the end of what's recorded so far, it waits
- * for more instead of stopping. Non-timeshift URLs pass through untouched. */
-@OptIn(UnstableApi::class)
-private class TimeshiftDataSource(private val upstream: DataSource) : DataSource {
-    private var raf: java.io.RandomAccessFile? = null
-    private var tail = false
-    private var pos = 0L
-    private var currentUri: Uri? = null
+/* Serves the growing DVR file to the player as a plain localhost stream —
+ * the exact same kind of stream the player already plays perfectly from
+ * providers. When playback reaches the end of what's recorded so far, the
+ * server simply waits for more before sending it. No custom player internals. */
+private object TimeshiftServer {
+    @Volatile var port = 0
+    private var server: java.net.ServerSocket? = null
 
-    override fun addTransferListener(transferListener: TransferListener) {
-        upstream.addTransferListener(transferListener)
-    }
-
-    override fun open(dataSpec: DataSpec): Long {
-        currentUri = dataSpec.uri
-        if (dataSpec.uri.scheme == "tshift") {
-            tail = true
-            val f = Timeshift.file ?: throw java.io.IOException("timeshift not running")
-            raf = java.io.RandomAccessFile(f, "r")
-            pos = dataSpec.position
-            raf!!.seek(pos)
-            return C.LENGTH_UNSET.toLong()
-        }
-        tail = false
-        return upstream.open(dataSpec)
-    }
-
-    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
-        if (!tail) return upstream.read(buffer, offset, length)
-        while (true) {
-            val avail = Timeshift.bytesWritten - pos
-            if (avail > 0) {
-                val want = if (length.toLong() < avail) length else avail.toInt()
-                val n = raf!!.read(buffer, offset, want)
-                if (n > 0) {
-                    pos += n
-                    return n
-                }
-            } else if (!Timeshift.active) {
-                return C.RESULT_END_OF_INPUT
-            }
+    @Synchronized
+    fun ensureStarted() {
+        if (server != null) return
+        // Android forbids socket work on the main thread — bind on a worker and
+        // wait briefly for the port (binding to localhost is instant).
+        val latch = java.util.concurrent.CountDownLatch(1)
+        Thread {
             try {
-                Thread.sleep(50)   // wait for the recorder to write more
-            } catch (e: InterruptedException) {
-                Thread.currentThread().interrupt()
-                throw java.io.InterruptedIOException()
+                val ss = java.net.ServerSocket(0, 4, java.net.InetAddress.getByName("127.0.0.1"))
+                server = ss
+                port = ss.localPort
+                latch.countDown()
+                while (true) {
+                    val sock = try { ss.accept() } catch (e: Exception) { break }
+                    Thread { handle(sock) }.apply { isDaemon = true }.start()
+                }
+            } catch (e: Exception) {
+                latch.countDown()
             }
+        }.apply { isDaemon = true; name = "tshift-server" }.start()
+        runCatching { latch.await(2, java.util.concurrent.TimeUnit.SECONDS) }
+    }
+
+    private fun handle(sock: java.net.Socket) {
+        try {
+            sock.tcpNoDelay = true
+            // Read and discard the request headers.
+            val reader = java.io.BufferedReader(java.io.InputStreamReader(sock.getInputStream()))
+            while (true) {
+                val line = reader.readLine() ?: break
+                if (line.isEmpty()) break
+            }
+            val out = java.io.BufferedOutputStream(sock.getOutputStream())
+            out.write(
+                ("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nConnection: close\r\n\r\n").toByteArray()
+            )
+            out.flush()
+            val myFile = Timeshift.file ?: return
+            java.io.RandomAccessFile(myFile, "r").use { raf ->
+                var pos = 0L
+                val buf = ByteArray(64 * 1024)
+                while (true) {
+                    if (Timeshift.file !== myFile) break   // channel changed
+                    val avail = Timeshift.bytesWritten - pos
+                    if (avail > 0) {
+                        raf.seek(pos)
+                        val want = if (buf.size.toLong() < avail) buf.size else avail.toInt()
+                        val n = raf.read(buf, 0, want)
+                        if (n > 0) {
+                            out.write(buf, 0, n)
+                            out.flush()
+                            pos += n
+                        }
+                    } else if (!Timeshift.active) {
+                        break
+                    } else {
+                        Thread.sleep(50)   // wait for the recorder to write more
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // Client hung up (channel change / app exit) — normal.
+        } finally {
+            runCatching { sock.close() }
         }
     }
 
-    override fun getUri(): Uri? = currentUri
-
-    override fun close() {
-        if (tail) {
-            runCatching { raf?.close() }
-            raf = null
-        } else {
-            upstream.close()
-        }
+    @Synchronized
+    fun stop() {
+        runCatching { server?.close() }
+        server = null
+        port = 0
     }
 }
 
@@ -1342,11 +1380,10 @@ object Playback {
         val extractors = androidx.media3.extractor.DefaultExtractorsFactory()
             .setConstantBitrateSeekingEnabled(true)
             .setConstantBitrateSeekingAlwaysEnabled(true)
-        // All playback goes through the timeshift-aware source: live channels
-        // read the DVR file; movies/episodes/downloads pass straight through.
-        val upstreamFactory = DefaultDataSource.Factory(context)
-        val dsFactory = DataSource.Factory { TimeshiftDataSource(upstreamFactory.createDataSource()) }
-        val mediaSources = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(dsFactory, extractors)
+        // The standard, proven playback path (same as v3.8). Live channels play
+        // a localhost stream served from the DVR file; the player can't tell
+        // the difference from a provider stream.
+        val mediaSources = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(context, extractors)
             .setLoadErrorHandlingPolicy(
                 androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy(8)
             )
@@ -1357,29 +1394,31 @@ object Playback {
             .setLoadControl(loadControl)
             .build()
         p.addListener(object : Player.Listener {
-            private var retries = 0
             private var prevIdx = 0
 
             override fun onPlaybackStateChanged(playbackState: Int) {
                 playStateC.intValue = playbackState
                 if (playbackState == Player.STATE_READY) {
-                    retries = 0
+                    retriesP = 0
                     streamDeadC.value = false
                     everReadyC.value = true
+                    if (liveMode) noteLiveReady()
                 }
             }
 
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                if (retries >= 6) {
+                if (retriesP >= 6) {
                     streamDeadC.value = true
                     return
                 }
-                retries++
-                val wait = (1_000L * retries).coerceAtMost(5_000L)
+                retriesP++
+                val wait = (1_000L * retriesP).coerceAtMost(5_000L)
                 android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                     runCatching {
                         if (liveMode) {
-                            // Restart the DVR feed fresh at the live broadcast.
+                            // Timeshift trouble? After 3 strikes, flip to direct
+                            // provider playback so video ALWAYS works.
+                            noteLiveFail()
                             zapTo(currentIdxC.intValue)
                         } else {
                             p.prepare()
@@ -1435,18 +1474,20 @@ object Playback {
                             cushion > 10_000 && speed < 1.0f -> p.setPlaybackSpeed(1.0f)
                         }
                     }
-                    // Dead-feed watchdog: if the DVR recorder hasn't received a
-                    // single byte in 20s while we're stuck waiting, the channel
-                    // is down at the provider — say so instead of spinning forever.
-                    val b = Timeshift.bytesWritten
-                    val now = System.currentTimeMillis()
-                    if (b != lastBytesSeen) {
-                        lastBytesSeen = b
-                        lastBytesAt = now
-                    } else if (now - lastBytesAt > 20_000 &&
-                        playStateC.intValue == Player.STATE_BUFFERING
-                    ) {
-                        streamDeadC.value = true
+                    // Dead-feed watchdog (timeshift mode only): if the DVR
+                    // recorder hasn't received a single byte in 20s while we're
+                    // stuck waiting, the channel is down at the provider.
+                    if (!directLive) {
+                        val b = Timeshift.bytesWritten
+                        val now = System.currentTimeMillis()
+                        if (b != lastBytesSeen) {
+                            lastBytesSeen = b
+                            lastBytesAt = now
+                        } else if (now - lastBytesAt > 20_000 &&
+                            playStateC.intValue == Player.STATE_BUFFERING
+                        ) {
+                            streamDeadC.value = true
+                        }
                     }
                 } else if (p.playbackParameters.speed != 1.0f) {
                     // Movies/episodes always play at full speed.
@@ -1468,8 +1509,42 @@ object Playback {
         governor.removeCallbacks(governorTick)
     }
 
+    /** Set when timeshift playback failed repeatedly on this device — the app
+     *  then plays live channels directly from the provider (v3.8 style), so
+     *  there is NEVER a no-video situation. Pause-behind-live is lost in this
+     *  mode, but the picture always works. Resets on app restart. */
+    @Volatile private var directLive = false
+    private var liveFails = 0
+    private var retriesP = 0
+
+    internal fun noteLiveReady() { liveFails = 0 }
+    internal fun noteLiveFail(): Boolean {
+        liveFails++
+        if (liveFails >= 3 && !directLive) {
+            directLive = true
+            return true
+        }
+        return false
+    }
+
+    /** The customer pressed Try Again: reset the strike counters and run the
+     *  full rescue cycle from scratch — a real retry, not a dead click. */
+    fun tryAgain() {
+        retriesP = 0
+        streamDeadC.value = false
+        val p = player ?: return
+        runCatching {
+            if (liveMode) {
+                zapTo(currentIdxC.intValue)
+            } else {
+                p.prepare()
+                p.play()
+            }
+        }
+    }
+
     /** Change live channel: point the DVR recorder at the new channel and play
-     *  its growing file. Wraps around the lineup like a cable box. */
+     *  its growing file via localhost. Wraps around the lineup like a cable box. */
     fun zapTo(idx: Int) {
         val p = player ?: return
         val ctx = appContext ?: return
@@ -1480,13 +1555,23 @@ object Playback {
         currentIdxC.intValue = i
         everReadyC.value = false
         streamDeadC.value = false
+        retriesP = 0
         lastBytesSeen = -1L
         lastBytesAt = System.currentTimeMillis()
         p.setPlaybackSpeed(1.0f)
-        Timeshift.start(ctx, tsUrl(ch.url))
+        val uri: Uri
+        if (directLive) {
+            // Fallback: straight from the provider, the proven simple path.
+            Timeshift.stop()
+            uri = Uri.parse(tsUrl(ch.url))
+        } else {
+            TimeshiftServer.ensureStarted()
+            Timeshift.start(ctx, tsUrl(ch.url))
+            uri = Uri.parse("http://127.0.0.1:" + TimeshiftServer.port + "/live/" + System.nanoTime())
+        }
         p.setMediaItem(
             MediaItem.Builder()
-                .setUri(Uri.parse("tshift://live/" + System.nanoTime()))
+                .setUri(uri)
                 .setMediaMetadata(MediaMetadata.Builder().setTitle(ch.name).build())
                 .build()
         )
@@ -1541,6 +1626,7 @@ object Playback {
     fun releaseAll() {
         stopGovernor()
         Timeshift.stop()
+        TimeshiftServer.stop()
         runCatching { player?.release() }
         player = null
         queue = emptyList()
@@ -1674,8 +1760,22 @@ fun SettingsPane(prefs: SharedPreferences) {
             Chip("Big (60s)", bufferSec == 60) { bufferSec = 60; prefs.edit().putInt("buffer_sec", 60).apply() }
         }
 
+        Spacer(Modifier.height(20.dp))
+        Text("Clock while watching", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Shows the time in the upper right corner during a show, like a cable box.",
+            fontSize = 12.sp, color = Muted
+        )
+        Spacer(Modifier.height(10.dp))
+        var showClock by remember { mutableStateOf(prefs.getBoolean("show_clock", false)) }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Chip("Off", !showClock) { showClock = false; prefs.edit().putBoolean("show_clock", false).apply() }
+            Chip("On", showClock) { showClock = true; prefs.edit().putBoolean("show_clock", true).apply() }
+        }
+
         Spacer(Modifier.height(24.dp))
-        Text("Easy IPTV 4.0 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
+        Text("EZTV 4.1 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
     }
 }
 
@@ -2021,6 +2121,17 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
     }
 
     Column(Modifier.fillMaxSize()) {
+        val free = remember(items) { DownloadStore.freeBytes(context) }
+        if (free >= 0) {
+            Text(
+                "Device storage: ${String.format(java.util.Locale.US, "%.1f", free / 1_073_741_824.0)} GB free" +
+                    if (free < 3_000_000_000L) "  •  Too low to start new downloads — free up 3 GB" else "",
+                fontSize = 12.sp,
+                color = if (free < 3_000_000_000L) Live else Accent,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp)
+            )
+        }
         Text(
             "Saved for offline watching. Each download is kept for 14 days, then removed automatically. Downloads keep going even if you close the app.",
             fontSize = 12.sp, color = Muted,
@@ -2435,6 +2546,17 @@ fun PlayerScreen(
 
     // THE one player. attach=true means the stream is already running (it was
     // in the corner) — we just show it, nothing reloads or reconnects.
+    // Optional cable-box clock in the corner while watching.
+    val showClock = remember { prefs.getBoolean("show_clock", false) }
+    var clockText by remember { mutableStateOf("") }
+    LaunchedEffect(showClock) {
+        if (showClock) {
+            while (true) {
+                clockText = fmt.format(Date())
+                kotlinx.coroutines.delay(20_000)
+            }
+        }
+    }
     val exo = remember {
         Playback.open(context, prefs, queue, start, startAtMs, attachOnly = attach).also { p ->
             if (!attach && resumeAt != null) p.playWhenReady = false
@@ -2607,6 +2729,18 @@ fun PlayerScreen(
             },
             modifier = Modifier.fillMaxSize()
         )
+        // Cable-box clock (Settings › Clock while watching).
+        if (showClock && clockText.isNotEmpty()) {
+            Text(
+                clockText,
+                color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(top = 10.dp, end = 14.dp)
+                    .background(Color(0x66000000), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 8.dp, vertical = 3.dp)
+            )
+        }
         // Friendly status while the stream settles — so the customer knows the
         // wait is on purpose, not broken.
         if (!streamDead.value && playState.value == Player.STATE_BUFFERING) {
@@ -2650,17 +2784,7 @@ fun PlayerScreen(
                 Spacer(Modifier.height(12.dp))
                 Button(
                     modifier = Modifier.tvFocus(RoundedCornerShape(22.dp)),
-                    onClick = {
-                        streamDead.value = false
-                        runCatching {
-                            if (current.isLive) {
-                                Playback.zapTo(Playback.currentIdxC.intValue)   // fresh DVR feed
-                            } else {
-                                exo.prepare()
-                                exo.play()
-                            }
-                        }
-                    }
+                    onClick = { Playback.tryAgain() }
                 ) { Text("Try again") }
             }
         }
@@ -2732,6 +2856,18 @@ fun PlayerScreen(
                     )
                 }
                 if (current.canRecord) {
+                    // While recording, a red REC badge sits right next to the
+                    // button (which becomes a Stop button) — one press stops it.
+                    if (recordingThis) {
+                        Text(
+                            "● REC",
+                            color = Live, fontSize = 12.sp, fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .background(Color(0x66000000), RoundedCornerShape(8.dp))
+                                .padding(horizontal = 8.dp, vertical = 3.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                    }
                     IconButton(
                         modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)),
                         onClick = {

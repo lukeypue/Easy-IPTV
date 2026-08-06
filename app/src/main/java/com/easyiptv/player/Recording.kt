@@ -92,7 +92,7 @@ class RecordingService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle("Recording: $name")
-            .setContentText("Easy IPTV is recording in the background.")
+            .setContentText("EZTV is recording in the background.")
             .setOngoing(true)
             .setContentIntent(open)
             .addAction(android.R.drawable.ic_media_pause, "Stop recording", stop)
@@ -138,10 +138,22 @@ class RecordingService : Service() {
                     body.byteStream().use { inp ->
                         FileOutputStream(f).use { out ->
                             val buf = ByteArray(64 * 1024)
+                            var sinceCheck = 0L
                             while (isActive && (stopAt == null || System.currentTimeMillis() < stopAt)) {
                                 val n = inp.read(buf)
                                 if (n < 0) break
                                 out.write(buf, 0, n)
+                                // Storage guard: Fire Sticks corrupt themselves when
+                                // storage fills. Stop the recording gracefully while
+                                // there's still 2 GB of breathing room.
+                                sinceCheck += n
+                                if (sinceCheck > 32_000_000) {
+                                    sinceCheck = 0
+                                    val free = runCatching {
+                                        android.os.StatFs(dir.absolutePath).availableBytes
+                                    }.getOrDefault(Long.MAX_VALUE)
+                                    if (free < 2_000_000_000L) break
+                                }
                             }
                         }
                     }

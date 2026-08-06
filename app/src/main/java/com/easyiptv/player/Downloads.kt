@@ -136,9 +136,25 @@ object DownloadStore {
         title.replace(Regex("[^A-Za-z0-9 _.-]"), "").trim().replace(' ', '_').take(48)
             .ifBlank { "video" }
 
+    /** Free bytes on the storage that holds downloads, or -1 if unknown. */
+    fun freeBytes(context: Context): Long = try {
+        val dir = context.getExternalFilesDir("downloads") ?: context.filesDir
+        android.os.StatFs(dir.absolutePath).availableBytes
+    } catch (e: Exception) {
+        -1L
+    }
+
     /** Starts a system download. Returns a message to show the user. */
     fun start(context: Context, prefs: SharedPreferences, title: String, url: String): String {
         return try {
+            // Storage guard: Fire Sticks (16 GB) corrupt themselves when storage
+            // fills up. Require 3 GB free before starting — a typical movie is
+            // 1–2 GB, which always leaves breathing room.
+            val free = freeBytes(context)
+            if (free in 0 until 3_000_000_000L) {
+                val gb = String.format(java.util.Locale.US, "%.1f", free / 1_073_741_824.0)
+                return "Not enough storage to download safely — only $gb GB free. EZTV needs 3 GB free to start a download so the device stays healthy. Delete a download or recording first."
+            }
             // Never create a second copy of the same title. If it's already saved
             // or already on its way down, just say so.
             val existing = load(prefs).firstOrNull { it.title.trim().equals(title.trim(), ignoreCase = true) }
