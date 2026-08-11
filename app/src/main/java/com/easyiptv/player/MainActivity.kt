@@ -67,6 +67,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -461,6 +462,9 @@ fun App() {
             onRoot = { id ->
                 railSection = id
                 railDepth = if (id == "live" || id == "movies" || id == "series") 1 else 0
+                // Entering Search starts with an empty box (recent-search list
+                // below stays) — no need to clear last time's text by hand.
+                if (id == "search") searchQuery = ""
             },
             onBackToRoot = { railDepth = 0 },
             liveCat = liveCat, onLiveCat = { liveCat = it },
@@ -1325,6 +1329,14 @@ internal object Timeshift {
         return -1
     }
 
+    /** MPEG-TS packets are 188 bytes, sync byte 0x47. After a reconnect we
+     *  (1) align to a verified packet boundary, then (2) wait for a PAT packet
+     *  (PID 0) before appending a single byte. The PAT is where the decoder
+     *  re-learns the stream layout — starting there instead of mid-GOP is what
+     *  stops the half-screen "digitizing" smear after a provider hiccup. */
+    private fun tsPid(buf: ByteArray, off: Int): Int =
+        ((buf[off + 1].toInt() and 0x1F) shl 8) or (buf[off + 2].toInt() and 0xFF)
+
     @Synchronized
     fun start(context: Context, url: String) {
         stopInternal()
@@ -1357,15 +1369,13 @@ internal object Timeshift {
                             java.io.FileOutputStream(f, true).use { out ->
                                 val buf = ByteArray(64 * 1024)
                                 var sinceCheck = 0L
-                                // Packet alignment for this connection's start.
                                 var aligned = false
+                                var sawPat = (bytesWritten > 0L)   // only need PAT on a true reconnect
                                 var pend = java.io.ByteArrayOutputStream()
+                                val alignStart = System.currentTimeMillis()
                                 while (active && gen == myGen && bytesWritten < CAP_BYTES) {
                                     val n = inp.read(buf)
                                     if (n < 0) break
-                                    // CRITICAL re-check AFTER the blocking network
-                                    // read: a stale writer must NEVER touch the
-                                    // counter, or the new channel wedges forever.
                                     if (!active || gen != myGen) break
                                     if (!aligned) {
                                         pend.write(buf, 0, n)
@@ -1377,10 +1387,40 @@ internal object Timeshift {
                                             aligned = true
                                             pend = java.io.ByteArrayOutputStream()
                                         } else if (pb.size > 8192) {
-                                            // Keep only the tail while hunting for sync.
                                             val keep = pb.copyOfRange(pb.size - 512, pb.size)
                                             pend = java.io.ByteArrayOutputStream()
                                             pend.write(keep)
+                                        }
+                                        continue
+                                    }
+                                    // Aligned but haven't seen a PAT yet on this reconnect:
+                                    // hold data in memory until a PAT packet appears (or a
+                                    // 2s safety timeout), then flush from there.
+                                    if (!sawPat) {
+                                        pend.write(buf, 0, n)
+                                        val pb = pend.toByteArray()
+                                        var patAt = -1
+                                        var k = 0
+                                        while (k + 188 <= pb.size) {
+                                            if (pb[k] == 0x47.toByte() && tsPid(pb, k) == 0) { patAt = k; break }
+                                            k += 188
+                                        }
+                                        val timedOut = System.currentTimeMillis() - alignStart > 2_000
+                                        if (patAt >= 0 || timedOut) {
+                                            val from = if (patAt >= 0) patAt else 0
+                                            out.write(pb, from, pb.size - from)
+                                            bytesWritten += (pb.size - from)
+                                            val nowT = System.currentTimeMillis()
+                                            throughputBps = throughputBps
+                                            lastByteAt = nowT
+                                            sawPat = true
+                                            pend = java.io.ByteArrayOutputStream()
+                                        } else if (pb.size > 400_000) {
+                                            // Don't hoard forever; flush what we have.
+                                            out.write(pb, 0, pb.size)
+                                            bytesWritten += pb.size
+                                            sawPat = true
+                                            pend = java.io.ByteArrayOutputStream()
                                         }
                                         continue
                                     }
@@ -2179,7 +2219,7 @@ fun SettingsPane(prefs: SharedPreferences) {
         }
 
         Spacer(Modifier.height(24.dp))
-        Text("EZTV 4.6 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
+        Text("EZTV 4.7 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
     }
 }
 
@@ -2506,18 +2546,38 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
     var items by remember { mutableStateOf(DownloadStore.load(prefs)) }
     // id -> (bytes so far, total bytes). Refreshed every second while anything is downloading.
     var progressMap by remember { mutableStateOf<Map<Long, Pair<Long, Long>>>(emptyMap()) }
+    // id -> estimated seconds remaining (smoothed), for the "time left" readout.
+    var etaMap by remember { mutableStateOf<Map<Long, Long>>(emptyMap()) }
+    val lastBytes = remember { HashMap<Long, Long>() }
+    val lastRate = remember { HashMap<Long, Double>() }
 
     LaunchedEffect(Unit) {
         while (true) {
             val inFlight = items.filter { d -> File(d.path).let { !it.exists() || it.length() == 0L } }
             if (inFlight.isNotEmpty()) {
                 val m = HashMap<Long, Pair<Long, Long>>()
+                val eta = HashMap<Long, Long>()
                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                     inFlight.forEach { d ->
                         DownloadStore.progress(context, d.id)?.let { m[d.id] = it }
                     }
                 }
+                // Compute smoothed download speed and seconds remaining.
+                m.forEach { (id, p) ->
+                    val done = p.first; val total = p.second
+                    val prev = lastBytes[id]
+                    if (prev != null && done > prev) {
+                        val inst = (done - prev).toDouble()   // bytes per ~1s poll
+                        val smooth = lastRate[id]?.let { it * 0.6 + inst * 0.4 } ?: inst
+                        lastRate[id] = smooth
+                        if (total > 0 && smooth > 1) {
+                            eta[id] = ((total - done) / smooth).toLong().coerceAtLeast(0)
+                        }
+                    }
+                    lastBytes[id] = done
+                }
                 progressMap = m
+                etaMap = eta
                 items = DownloadStore.load(prefs)   // pick up ones that just finished
             }
             kotlinx.coroutines.delay(1_000)
@@ -2592,9 +2652,17 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
                                 val done = prog?.first ?: 0L
                                 val total = prog?.second ?: -1L
                                 val pct = if (total > 0) ((done * 100) / total).toInt().coerceIn(0, 100) else null
+                                val eta = etaMap[d.id]
+                                val etaText = eta?.let { s ->
+                                    when {
+                                        s >= 3600 -> " • ${s / 3600}h ${(s % 3600) / 60}m left"
+                                        s >= 60 -> " • ${s / 60}m ${s % 60}s left"
+                                        else -> " • ${s}s left"
+                                    }
+                                } ?: ""
                                 Text(
                                     when {
-                                        pct != null -> "Downloading… $pct%  (${done / 1_048_576} MB of ${total / 1_048_576} MB)"
+                                        pct != null -> "Downloading… $pct%  (${done / 1_048_576} MB of ${total / 1_048_576} MB)$etaText"
                                         done > 0 -> "Downloading… ${done / 1_048_576} MB so far"
                                         else -> "Starting download…"
                                     },
@@ -2966,6 +3034,22 @@ fun PlayerScreen(
     val playState = Playback.playStateC
     val everReady = Playback.everReadyC
     var pvRef by remember { mutableStateOf<PlayerView?>(null) }
+
+    // ---- X1-style mini guide ----
+    // Press OK on a live channel → a slim strip along the bottom shows the
+    // last few channels you watched plus the next few in the lineup. Your show
+    // keeps playing full-screen the whole time. Arrow to highlight, OK to tune,
+    // OK again (or 4s idle) to tuck it away.
+    var miniGuideOpen by remember { mutableStateOf(false) }
+    // Recent channel indices, most-recent-first, tracked as you surf.
+    val recentIdx = remember { mutableStateListOf<Int>() }
+    LaunchedEffect(currentIdx) {
+        if (current.isLive) {
+            recentIdx.remove(currentIdx)
+            recentIdx.add(0, currentIdx)
+            while (recentIdx.size > 8) recentIdx.removeLast()
+        }
+    }
     val titleFocus = remember { FocusRequester() }
     // Whenever the menus appear, park the remote on the show title —
     // OK there closes the menus, arrows reach the other buttons.
@@ -3066,7 +3150,11 @@ fun PlayerScreen(
     // ONE press of Back = out to the channel list (the show keeps playing in
     // the corner). Another press there = main menu. Simple, like a cable box.
     BackHandler {
-        onBack(Playback.currentIdxC.intValue, exo.currentPosition.coerceAtLeast(0L))
+        if (miniGuideOpen) {
+            miniGuideOpen = false
+        } else {
+            onBack(Playback.currentIdxC.intValue, exo.currentPosition.coerceAtLeast(0L))
+        }
     }
 
     // Channel surfing: +1 / −1 through the category, wrapping at the ends —
@@ -3112,7 +3200,14 @@ fun PlayerScreen(
                 android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { exo.seekForward(); true }
                 android.view.KeyEvent.KEYCODE_MEDIA_REWIND -> { exo.seekBack(); true }
                 android.view.KeyEvent.KEYCODE_DPAD_CENTER,
-                android.view.KeyEvent.KEYCODE_ENTER,
+                android.view.KeyEvent.KEYCODE_ENTER -> {
+                    if (current.isLive && Playback.queue.size > 1 && !overlayVisible) {
+                        miniGuideOpen = !miniGuideOpen
+                        true
+                    } else {
+                        pvRef?.showController(); true
+                    }
+                }
                 android.view.KeyEvent.KEYCODE_DPAD_UP,
                 android.view.KeyEvent.KEYCODE_DPAD_DOWN,
                 android.view.KeyEvent.KEYCODE_DPAD_LEFT,
@@ -3186,6 +3281,12 @@ fun PlayerScreen(
                 PlayerView(ctx).apply {
                     player = exo
                     useController = true
+                    // Hold the last good frame across prepare()/reconnect cycles
+                    // instead of flashing black 3–4 times when a live channel
+                    // starts. Also use a SurfaceView (cheaper on Fire TV) and a
+                    // black shutter so intermediate states never flash through.
+                    setKeepContentOnPlayerReset(true)
+                    setShutterBackgroundColor(android.graphics.Color.BLACK)
                     // Never let the screen saver / sleep kick in while watching.
                     keepScreenOn = true
                     // Grab the remote's key presses so OK re-opens the controls
@@ -3236,6 +3337,24 @@ fun PlayerScreen(
                 )
         )
         // Cable-box clock (Settings › Clock while watching).
+        // ---- X1-style mini guide overlay (live only) ----
+        if (miniGuideOpen && current.isLive) {
+            MiniGuide(
+                queue = queue,
+                currentIdx = currentIdx,
+                recentIdx = recentIdx.toList(),
+                onTune = { idx ->
+                    miniGuideOpen = false
+                    if (idx != currentIdx) Playback.zapTo(idx)
+                },
+                onOpenSettings = {
+                    miniGuideOpen = false
+                    onBack(Playback.currentIdxC.intValue, exo.currentPosition.coerceAtLeast(0L))
+                },
+                onRetry = { Playback.tryAgain() },
+                onClose = { miniGuideOpen = false }
+            )
+        }
         if (showClock && clockText.isNotEmpty()) {
             Text(
                 clockText,
@@ -3531,4 +3650,116 @@ fun PlayerScreen(
             )
         }
     }
+}
+
+/* ---------------------------------------------------------------------------
+ * X1-STYLE MINI GUIDE
+ * A slim strip along the bottom of the live picture. Your show keeps playing
+ * full-screen behind it. Left group = the last few channels you watched;
+ * right group = the next few in the lineup. Arrow to highlight, OK to tune.
+ * A row of buttons (Settings / Refresh) sits above the strip. Auto-hides
+ * after ~5 seconds of no input.
+ * ------------------------------------------------------------------------- */
+@Composable
+private fun MiniGuide(
+    queue: List<Playable>,
+    currentIdx: Int,
+    recentIdx: List<Int>,
+    onTune: (Int) -> Unit,
+    onOpenSettings: () -> Unit,
+    onRetry: () -> Unit,
+    onClose: () -> Unit
+) {
+    // Build the strip: recent channels (excluding current), then current, then
+    // the next few in the lineup — de-duplicated, order preserved.
+    val entries = remember(queue, currentIdx, recentIdx) {
+        val out = LinkedHashSet<Int>()
+        recentIdx.filter { it != currentIdx && it in queue.indices }.take(5).forEach { out.add(it) }
+        out.add(currentIdx)
+        for (k in 1..4) out.add((currentIdx + k) % queue.size)
+        out.filter { it in queue.indices }
+    }
+    val firstFocus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { firstFocus.requestFocus() } }
+    // Auto-hide after 5s of no interaction.
+    var lastTouch by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(lastTouch) {
+        kotlinx.coroutines.delay(5_000)
+        if (System.currentTimeMillis() - lastTouch >= 5_000) onClose()
+    }
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(
+                androidx.compose.ui.graphics.Brush.verticalGradient(
+                    listOf(Color(0x00000000), Color(0xE6000000))
+                )
+            )
+            .padding(top = 40.dp, bottom = 14.dp, start = 12.dp, end = 12.dp)
+    ) {
+        // Action row: Settings + Refresh (reachable here in live AND is how you
+        // reach the gear without leaving the show).
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(bottom = 8.dp, start = 4.dp)
+        ) {
+            MiniGuideChip("\u2699  Settings") { lastTouch = System.currentTimeMillis(); onOpenSettings() }
+            MiniGuideChip("\u21bb  Refresh") { lastTouch = System.currentTimeMillis(); onRetry() }
+            Text(
+                "Recent  \u2022  Up next \u2192",
+                color = Muted, fontSize = 11.sp,
+                modifier = Modifier.padding(start = 6.dp)
+            )
+        }
+        // The channel strip.
+        LazyRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = PaddingValues(horizontal = 4.dp)
+        ) {
+            itemsIndexed(entries) { pos, idx ->
+                val ch = queue[idx]
+                val isCurrent = idx == currentIdx
+                Column(
+                    Modifier
+                        .width(150.dp)
+                        .then(if (pos == 0) Modifier.focusRequester(firstFocus) else Modifier)
+                        .onFocusChanged { if (it.isFocused) lastTouch = System.currentTimeMillis() }
+                        .tvFocus(RoundedCornerShape(10.dp))
+                        .background(
+                            if (isCurrent) Accent.copy(alpha = 0.25f) else Color(0x55202634),
+                            RoundedCornerShape(10.dp)
+                        )
+                        .clickable { lastTouch = System.currentTimeMillis(); onTune(idx) }
+                        .padding(10.dp)
+                ) {
+                    Text(
+                        if (isCurrent) "\u25b6  ${ch.name}" else ch.name,
+                        color = if (isCurrent) Accent else Ink,
+                        fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        if (isCurrent) "Watching now" else "Press OK to watch",
+                        color = Muted, fontSize = 10.sp,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MiniGuideChip(label: String, onClick: () -> Unit) {
+    Text(
+        label,
+        color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+        modifier = Modifier
+            .tvFocus(RoundedCornerShape(20.dp))
+            .background(Color(0x66202634), RoundedCornerShape(20.dp))
+            .clickable { onClick() }
+            .padding(horizontal = 14.dp, vertical = 7.dp)
+    )
 }
