@@ -12,8 +12,8 @@ android {
         applicationId = "com.easyiptv.player"
         minSdk = 26
         targetSdk = 34
-        versionCode = 24
-        versionName = "4.4"
+        versionCode = 26
+        versionName = "4.6"
     }
 
     buildTypes {
