@@ -7,6 +7,8 @@ import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
@@ -46,6 +48,7 @@ import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Stop
@@ -599,46 +602,41 @@ fun AddPlaylistScreen(first: Boolean, onSaved: (Playlist) -> Unit, onBack: (() -
                 fontWeight = FontWeight.ExtraBold, fontSize = 25.sp, color = Ink
             )
             Spacer(Modifier.height(18.dp))
-            OutlinedTextField(
+            TvTextField(
                 value = name, onValueChange = { name = it },
-                label = { Text("Give it a name (optional)") },
-                placeholder = { Text("e.g. Home, Sports, Backup") },
-                singleLine = true,
+                label = "Give it a name (optional)",
+                placeholder = "e.g. Home, Sports, Backup",
                 modifier = Modifier.fillMaxWidth()
             )
             Spacer(Modifier.height(12.dp))
             if (type == "m3u") {
-                OutlinedTextField(
+                TvTextField(
                     value = m3u, onValueChange = { m3u = it },
-                    label = { Text("Playlist link") },
-                    placeholder = { Text("http://…") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                    label = "Playlist link",
+                    placeholder = "http://…",
+                    keyboardType = KeyboardType.Uri,
                     modifier = Modifier.fillMaxWidth()
                 )
             } else {
-                OutlinedTextField(
+                TvTextField(
                     value = host, onValueChange = { host = it },
-                    label = { Text("Server address") },
-                    placeholder = { Text("http://yourserver.com:8080") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                    label = "Server address",
+                    placeholder = "http://yourserver.com:8080",
+                    keyboardType = KeyboardType.Uri,
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
+                TvTextField(
                     value = user, onValueChange = { user = it },
-                    label = { Text("Username") },
-                    singleLine = true,
+                    label = "Username",
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
+                TvTextField(
                     value = pass, onValueChange = { pass = it },
-                    label = { Text("Password") },
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    label = "Password",
+                    password = true,
+                    keyboardType = KeyboardType.Password,
                     modifier = Modifier.fillMaxWidth()
                 )
             }
@@ -2219,7 +2217,7 @@ fun SettingsPane(prefs: SharedPreferences) {
         }
 
         Spacer(Modifier.height(24.dp))
-        Text("EZTV 4.7 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
+        Text("EZTV 4.9 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
     }
 }
 
@@ -2261,12 +2259,53 @@ fun SearchTab(
     }
 
     Column(Modifier.fillMaxSize()) {
-        OutlinedTextField(
-            value = query, onValueChange = onQuery,
-            placeholder = { Text("Search live, movies & series…") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp).tvFocus(RoundedCornerShape(8.dp))
-        )
+        // Voice search: OK on the mic opens Android's speech recognizer; what you
+        // say fills the search box. (The remote's hardware mic button is locked
+        // by Fire OS for Alexa, so this on-screen mic is the way to talk-search.)
+        val speechLauncher = rememberLauncherForActivityResult(
+            ActivityResultContracts.StartActivityForResult()
+        ) { result ->
+            val spoken = result.data
+                ?.getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+            if (!spoken.isNullOrBlank()) onQuery(spoken)
+        }
+        val ctx0 = LocalContext.current
+        fun startVoice() {
+            val intent = android.content.Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(
+                    android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                    android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+                )
+                putExtra(android.speech.RecognizerIntent.EXTRA_PROMPT, "Say a show, movie, or channel")
+            }
+            try {
+                speechLauncher.launch(intent)
+            } catch (e: Exception) {
+                toast(ctx0, "Voice search needs a speech app installed on this device.")
+            }
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            TvTextField(
+                value = query, onValueChange = onQuery,
+                label = "Search",
+                placeholder = "Search live, movies & series…",
+                modifier = Modifier.weight(1f)
+            )
+            Spacer(Modifier.width(8.dp))
+            Box(
+                Modifier
+                    .tvFocus(RoundedCornerShape(24.dp))
+                    .background(Accent.copy(alpha = 0.25f), RoundedCornerShape(24.dp))
+                    .clickable { startVoice() }
+                    .padding(12.dp)
+            ) {
+                Icon(Icons.Filled.Mic, contentDescription = "Voice search", tint = Accent)
+            }
+        }
         Text(
             "Matches any part of a name — \"wars\" finds Star Wars.",
             fontSize = 11.sp, color = Muted,
@@ -2933,6 +2972,57 @@ private fun Chip(label: String, active: Boolean, onClick: () -> Unit) {
     }
 }
 
+/* On Fire TV, a normal text field grabs the keyboard the instant you arrow
+ * onto it — jarring, and it fights the remote. This wrapper shows the field as
+ * a focusable BUTTON; the editable field + keyboard appear only after you press
+ * OK on it. Press Back to leave edit mode. Used for every text input. */
+@Composable
+private fun TvTextField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    modifier: Modifier = Modifier,
+    placeholder: String = "",
+    password: Boolean = false,
+    keyboardType: KeyboardType = KeyboardType.Text
+) {
+    var editing by remember { mutableStateOf(false) }
+    val fr = remember { FocusRequester() }
+    if (editing) {
+        LaunchedEffect(Unit) { runCatching { fr.requestFocus() } }
+        BackHandler(enabled = true) { editing = false }
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            label = { Text(label) },
+            placeholder = { if (placeholder.isNotEmpty()) Text(placeholder) },
+            singleLine = true,
+            visualTransformation = if (password) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
+            keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
+            modifier = modifier.focusRequester(fr)
+        )
+    } else {
+        Column(
+            modifier
+                .tvFocus(RoundedCornerShape(8.dp))
+                .background(Color(0x33202634), RoundedCornerShape(8.dp))
+                .clickable { editing = true }
+                .padding(horizontal = 14.dp, vertical = 12.dp)
+        ) {
+            Text(label, color = Muted, fontSize = 11.sp)
+            Text(
+                when {
+                    value.isEmpty() -> placeholder.ifEmpty { "Press OK to type" }
+                    password -> "\u2022".repeat(value.length.coerceAtMost(12))
+                    else -> value
+                },
+                color = if (value.isEmpty()) Muted else Ink,
+                fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
 @Composable
 private fun ChannelIcon(name: String, icon: String?) {
     Box(
@@ -3177,16 +3267,17 @@ fun PlayerScreen(
         PlayerKeys.priority = { key ->
             when (key) {
                 // Real channel buttons (many TV remotes have them): always zap.
+                // Channel UP = next channel up the lineup (higher position);
+                // DOWN = previous. (Was reversed.)
                 android.view.KeyEvent.KEYCODE_CHANNEL_UP ->
-                    if (zapReady()) { zap(-1); true } else false
-                android.view.KeyEvent.KEYCODE_CHANNEL_DOWN ->
                     if (zapReady()) { zap(+1); true } else false
-                // D-pad up/down: with the menus hidden they zap channels;
-                // with the menus showing they navigate the menus as usual.
+                android.view.KeyEvent.KEYCODE_CHANNEL_DOWN ->
+                    if (zapReady()) { zap(-1); true } else false
+                // D-pad up = channel up (next); down = previous.
                 android.view.KeyEvent.KEYCODE_DPAD_UP ->
-                    if (zapReady() && !overlayVisible) { zap(-1); true } else false
-                android.view.KeyEvent.KEYCODE_DPAD_DOWN ->
                     if (zapReady() && !overlayVisible) { zap(+1); true } else false
+                android.view.KeyEvent.KEYCODE_DPAD_DOWN ->
+                    if (zapReady() && !overlayVisible) { zap(-1); true } else false
                 else -> false
             }
         }
@@ -3268,8 +3359,8 @@ fun PlayerScreen(
                     onDragEnd = {
                         if (zapReady()) {
                             when {
-                                totalDrag < -120f -> zap(+1)   // swiped up
-                                totalDrag > 120f -> zap(-1)    // swiped down
+                                totalDrag < -120f -> zap(+1)   // swiped up = channel up
+                                totalDrag > 120f -> zap(-1)    // swiped down = channel down
                             }
                         }
                     }
