@@ -3351,7 +3351,7 @@ fun PlayerScreen(
     LaunchedEffect(playState.intValue, currentIdx, matchFps) {
         if (!matchFps || Playback.simpleRaw) return@LaunchedEffect
         if (playState.intValue != Player.STATE_READY) return@LaunchedEffect
-        kotlinx.coroutines.delay(if (current.isLive) 4_000 else 600)
+        kotlinx.coroutines.delay(if (current.isLive) 4_000L else 600L)
         if (playState.intValue != Player.STATE_READY) return@LaunchedEffect
         val fps = exo.videoFormat?.frameRate ?: return@LaunchedEffect
         if (fps > 0f) {
