@@ -959,15 +959,17 @@ private fun HomeRail(
     onBackToRoot: () -> Unit,
     onCat: (String) -> Unit
 ) {
+    // Simple Mode strips the menu to Live TV + Settings. Read here (composable
+    // scope) — reading it inside the LazyColumn builder is a compile error.
+    val simpleMode = androidx.compose.ui.platform.LocalContext.current
+        .getSharedPreferences("easyiptv", android.content.Context.MODE_PRIVATE)
+        .getBoolean("simple_mode", false)
     LazyColumn(
         modifier = Modifier.width(126.dp).fillMaxHeight().background(SurfaceCol),
         contentPadding = PaddingValues(vertical = 6.dp)
     ) {
         if (depth == 0) {
-            val simple = androidx.compose.ui.platform.LocalContext.current
-                .getSharedPreferences("easyiptv", android.content.Context.MODE_PRIVATE)
-                .getBoolean("simple_mode", false)
-            val menuItems = if (simple) RootItems.filter { it.first == "live" || it.first == "settings" }
+            val menuItems = if (simpleMode) RootItems.filter { it.first == "live" || it.first == "settings" }
                             else RootItems
             items(menuItems) { p ->
                 RailItem(p.second, section == p.first) { onRoot(p.first) }
