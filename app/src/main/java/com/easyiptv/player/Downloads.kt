@@ -136,6 +136,24 @@ object DownloadStore {
         title.replace(Regex("[^A-Za-z0-9 _.-]"), "").trim().replace(' ', '_').take(48)
             .ifBlank { "video" }
 
+    /** Cancel every download still in progress (Simple Mode). Finished files stay. */
+    fun cancelInFlight(context: Context, prefs: SharedPreferences): Int {
+        val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+        var n = 0
+        val keep = load(prefs).filter { d ->
+            val f = File(d.path)
+            val done = f.exists() && f.length() > 0
+            if (!done) {
+                runCatching { dm.remove(d.id) }
+                runCatching { f.delete() }
+                n++
+            }
+            done
+        }
+        save(prefs, keep)
+        return n
+    }
+
     /** Free bytes on the storage that holds downloads, or -1 if unknown. */
     fun freeBytes(context: Context, prefs: SharedPreferences? = null): Long = try {
         val dir = if (prefs != null) Storage.baseDir(context, prefs, "downloads")

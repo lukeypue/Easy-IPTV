@@ -135,6 +135,14 @@ class RecordingService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
+                // Simple Mode = live TV only. Any recording that tries to start
+                // (including a scheduled one firing) is skipped while it's on.
+                val simple = getSharedPreferences("easyiptv", Context.MODE_PRIVATE)
+                    .getBoolean("simple_mode", false)
+                if (simple) {
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
                 val url = intent.getStringExtra("url") ?: return START_NOT_STICKY.also { stopSelf() }
                 val name = intent.getStringExtra("name") ?: "channel"
                 val stopAt = if (intent.hasExtra("stopAt")) intent.getLongExtra("stopAt", 0L) else null

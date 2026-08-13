@@ -964,7 +964,12 @@ private fun HomeRail(
         contentPadding = PaddingValues(vertical = 6.dp)
     ) {
         if (depth == 0) {
-            items(RootItems) { p ->
+            val simple = androidx.compose.ui.platform.LocalContext.current
+                .getSharedPreferences("easyiptv", android.content.Context.MODE_PRIVATE)
+                .getBoolean("simple_mode", false)
+            val menuItems = if (simple) RootItems.filter { it.first == "live" || it.first == "settings" }
+                            else RootItems
+            items(menuItems) { p ->
                 RailItem(p.second, section == p.first) { onRoot(p.first) }
             }
         } else {
@@ -1668,12 +1673,15 @@ object Playback {
     private fun ensurePlayer(context: Context, prefs: SharedPreferences): ExoPlayer {
         appContext = context.applicationContext
         prefsRef = prefs
+        simpleRaw = prefs.getBoolean("simple_mode", false)
         player?.let { return it }
         val bufferSec = prefs.getInt("buffer_sec", 30)
         // How much video to collect before showing the picture (and 2x that
         // after a stall). Bigger = slower channel changes but steadier playback
         // on weak channels. Settings › "Channel lock-in cushion".
-        val lockMs = prefs.getInt("live_start_ms", 4_000).coerceIn(2_000, 12_000)
+        // SIMPLE MODE: raw cable-box feel — tiny 1.5s start, flip channels fast.
+        val lockMs = if (simpleRaw) 1_500
+                     else prefs.getInt("live_start_ms", 4_000).coerceIn(2_000, 12_000)
         val renderersFactory = DefaultRenderersFactory(context)
             // PREFER the bundled FFmpeg software audio decoders — many TVs claim
             // Dolby support but play silence. Video stays on hardware (4K needs it).
@@ -1864,7 +1872,11 @@ object Playback {
             val p = player
             if (p == null) { governorRunning = false; return }
             runCatching {
-                if (liveMode) {
+                if (liveMode && simpleRaw) {
+                    // SIMPLE MODE: no governor, no recovery, no watchdog. The
+                    // stream plays through raw, like a bare-bones cable box.
+                    if (p.playbackParameters.speed != 1.0f) p.setPlaybackSpeed(1.0f)
+                } else if (liveMode) {
                     val now = System.currentTimeMillis()
                     val cushionMs = p.totalBufferedDuration
                     val cushionSec = cushionMs / 1000.0
@@ -1971,6 +1983,11 @@ object Playback {
      *  mode, but the picture always works. Resets on app restart. */
     @Volatile var directLive = false
         private set
+    /** Simple Mode: raw cable-box playback. Live plays the provider stream
+     *  directly — no DVR file, no server, no governor, no recovery machinery.
+     *  Glitches show raw, exactly like the dead-simple apps. */
+    @Volatile var simpleRaw = false
+        private set
     private var liveFails = 0
     private var retriesP = 0
 
@@ -2025,10 +2042,9 @@ object Playback {
         roughBoostUntil = if (score > 0) System.currentTimeMillis() + (30_000L + score * 20_000L) else 0L
         p.setPlaybackSpeed(1.0f)
         val uri: Uri
-        if (directLive) {
-            // Fallback: straight from the provider, the proven simple path.
-            // FULLY tear down the DVR side first (panel bug: a lingering writer
-            // Call or server could count as a second connection on retune).
+        if (directLive || simpleRaw) {
+            // Direct from the provider: the raw path. Simple Mode lives here on
+            // purpose; directLive lands here as the automatic fallback.
             Timeshift.stop()
             uri = Uri.parse(tsUrl(ch.url))
         } else {
@@ -2202,6 +2218,67 @@ fun SettingsPane(prefs: SharedPreferences) {
             .verticalScroll(androidx.compose.foundation.rememberScrollState())
             .padding(16.dp)
     ) {
+        // ---- Simple Mode (cable-box mode) ----
+        Text("Simple Mode", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
+        Spacer(Modifier.height(4.dp))
+        var simpleMode by remember { mutableStateOf(prefs.getBoolean("simple_mode", false)) }
+        var showSimpleWarn by remember { mutableStateOf(false) }
+        Text(
+            "Old-school cable box: JUST live TV and the guide. Channels flip fast and play raw — the app strips everything else down while it's on.",
+            fontSize = 12.sp, color = Muted
+        )
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Chip("Off", !simpleMode) {
+                if (simpleMode) {
+                    simpleMode = false
+                    prefs.edit().putBoolean("simple_mode", false).apply()
+                    Playback.releaseAll()
+                    toast(ctx, "Simple Mode off — full EZTV is back.")
+                }
+            }
+            Chip("On", simpleMode) {
+                if (!simpleMode) showSimpleWarn = true
+            }
+        }
+        if (showSimpleWarn) {
+            AlertDialog(
+                onDismissRequest = { showSimpleWarn = false },
+                containerColor = SurfaceCol,
+                title = { Text("Turn on Simple Mode?", color = Ink) },
+                text = {
+                    Text(
+                        "Simple Mode is live TV only, like a basic cable box:\n\n" +
+                            "\u2022 Channels flip fast and play raw — if a channel glitches, it just glitches (no smoothing or recovery).\n" +
+                            "\u2022 No pause, rewind, or recording on live TV.\n" +
+                            "\u2022 Movies, Series, Search, Downloads, and Recordings are hidden.\n" +
+                            "\u2022 Any download or recording running RIGHT NOW will be CANCELED, and scheduled recordings won't run.\n\n" +
+                            "Turn it off anytime right here in Settings.",
+                        color = Muted, fontSize = 13.sp
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        showSimpleWarn = false
+                        simpleMode = true
+                        prefs.edit().putBoolean("simple_mode", true).apply()
+                        val canceled = DownloadStore.cancelInFlight(ctx, prefs)
+                        Recorder.stop(ctx)
+                        Playback.releaseAll()
+                        toast(
+                            ctx,
+                            if (canceled > 0) "Simple Mode on — $canceled download(s) canceled."
+                            else "Simple Mode on — just live TV and the guide."
+                        )
+                    }) { Text("Turn it on", color = Accent) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showSimpleWarn = false }) { Text("Cancel", color = Muted) }
+                }
+            )
+        }
+
+        Spacer(Modifier.height(20.dp))
         // ---- External drive storage ----
         Text("Storage", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
@@ -2295,6 +2372,20 @@ fun SettingsPane(prefs: SharedPreferences) {
         }
 
         Spacer(Modifier.height(20.dp))
+        Text("Smoother motion (match TV frame rate)", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Switches your TV to the video's native frame rate (movies are 24fps) so slow camera pans stop stuttering. Trade-off: the screen goes black for a second or two when the rate changes. EZTV waits until you've settled on a channel before switching, so channel surfing stays fast.",
+            fontSize = 12.sp, color = Muted
+        )
+        Spacer(Modifier.height(10.dp))
+        var matchFpsS by remember { mutableStateOf(prefs.getBoolean("match_fps", false)) }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Chip("Off", !matchFpsS) { matchFpsS = false; prefs.edit().putBoolean("match_fps", false).apply() }
+            Chip("On", matchFpsS) { matchFpsS = true; prefs.edit().putBoolean("match_fps", true).apply() }
+        }
+
+        Spacer(Modifier.height(20.dp))
         Text("Clock while watching", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
         Text(
@@ -2309,7 +2400,7 @@ fun SettingsPane(prefs: SharedPreferences) {
         }
 
         Spacer(Modifier.height(24.dp))
-        Text("EZTV 4.10 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
+        Text("EZTV 4.13 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
     }
 }
 
@@ -3251,6 +3342,20 @@ fun PlayerScreen(
     // in the corner) — we just show it, nothing reloads or reconnects.
     // Optional cable-box clock in the corner while watching.
     val showClock = remember { prefs.getBoolean("show_clock", false) }
+    // Frame-rate matching (Settings, default off): once you've SETTLED on a
+    // channel for a few seconds, ask the TV to switch to the video's native
+    // rate. The delay means rapid zapping never thrashes the HDMI handshake.
+    val matchFps = remember { prefs.getBoolean("match_fps", false) }
+    LaunchedEffect(playState.intValue, currentIdx, matchFps) {
+        if (!matchFps || Playback.simpleRaw) return@LaunchedEffect
+        if (playState.intValue != Player.STATE_READY) return@LaunchedEffect
+        kotlinx.coroutines.delay(if (current.isLive) 4_000 else 600)
+        if (playState.intValue != Player.STATE_READY) return@LaunchedEffect
+        val fps = exo.videoFormat?.frameRate ?: return@LaunchedEffect
+        if (fps > 0f) {
+            (context as? android.app.Activity)?.let { applyFrameRateMatch(it, fps) }
+        }
+    }
     var clockText by remember { mutableStateOf("") }
     LaunchedEffect(showClock) {
         if (showClock) {
@@ -3388,7 +3493,7 @@ fun PlayerScreen(
                 android.view.KeyEvent.KEYCODE_MEDIA_REWIND -> { exo.seekBack(); true }
                 android.view.KeyEvent.KEYCODE_DPAD_CENTER,
                 android.view.KeyEvent.KEYCODE_ENTER -> {
-                    if (current.isLive && Playback.queue.size > 1 && !overlayVisible) {
+                    if (current.isLive && !overlayVisible) {
                         miniGuideOpen = !miniGuideOpen
                         true
                     } else {
@@ -3487,7 +3592,7 @@ fun PlayerScreen(
                     // In direct-fallback live (no DVR file), there's nothing to
                     // scrub through — hide the rewind/FF buttons so pressing them
                     // can't misbehave. Normal DVR live and VOD keep them.
-                    if (Playback.directLive && current.isLive) {
+                    if ((Playback.directLive || Playback.simpleRaw) && current.isLive) {
                         setShowRewindButton(false)
                         setShowFastForwardButton(false)
                     }
@@ -3530,6 +3635,8 @@ fun PlayerScreen(
                 queue = queue,
                 currentIdx = currentIdx,
                 recentIdx = recentIdx.toList(),
+                nowNext = nowNext,
+                fmt = fmt,
                 onTune = { idx ->
                     miniGuideOpen = false
                     if (idx != currentIdx) Playback.zapTo(idx)
@@ -3691,7 +3798,7 @@ fun PlayerScreen(
                         tint = Color.White
                     )
                 }
-                if (current.canRecord) {
+                if (current.canRecord && !Playback.simpleRaw) {
                     // While recording, a red REC badge sits right next to the
                     // button (which becomes a Stop button) — one press stops it.
                     if (recordingThis) {
@@ -3852,27 +3959,33 @@ private fun MiniGuide(
     queue: List<Playable>,
     currentIdx: Int,
     recentIdx: List<Int>,
+    nowNext: List<EpgEntry>,
+    fmt: SimpleDateFormat,
     onTune: (Int) -> Unit,
     onOpenSettings: () -> Unit,
     onRetry: () -> Unit,
     onClose: () -> Unit
 ) {
-    // Build the strip: recent channels (excluding current), then current, then
-    // the next few in the lineup — de-duplicated, order preserved.
+    val current = queue.getOrNull(currentIdx)
+    // Now / next for the current channel.
+    val nowMs = System.currentTimeMillis()
+    val nowShow = nowNext.firstOrNull { nowMs in it.startMs until it.endMs } ?: nowNext.firstOrNull()
+    val nextShow = nowShow?.let { ns -> nowNext.getOrNull(nowNext.indexOf(ns) + 1) }
+        ?: nowNext.firstOrNull { it.startMs > nowMs }
+
+    // Surf strip: recent channels (not current) + the next few in the lineup.
     val entries = remember(queue, currentIdx, recentIdx) {
         val out = LinkedHashSet<Int>()
         recentIdx.filter { it != currentIdx && it in queue.indices }.take(5).forEach { out.add(it) }
-        out.add(currentIdx)
-        for (k in 1..4) out.add((currentIdx + k) % queue.size)
-        out.filter { it in queue.indices }
+        for (k in 1..4) out.add((currentIdx + k) % queue.size.coerceAtLeast(1))
+        out.filter { it in queue.indices && it != currentIdx }
     }
     val firstFocus = remember { FocusRequester() }
     LaunchedEffect(Unit) { runCatching { firstFocus.requestFocus() } }
-    // Auto-hide after 5s of no interaction.
     var lastTouch by remember { mutableStateOf(System.currentTimeMillis()) }
     LaunchedEffect(lastTouch) {
-        kotlinx.coroutines.delay(5_000)
-        if (System.currentTimeMillis() - lastTouch >= 5_000) onClose()
+        kotlinx.coroutines.delay(6_000)
+        if (System.currentTimeMillis() - lastTouch >= 6_000) onClose()
     }
 
     Column(
@@ -3880,58 +3993,74 @@ private fun MiniGuide(
             .fillMaxWidth()
             .background(
                 androidx.compose.ui.graphics.Brush.verticalGradient(
-                    listOf(Color(0x00000000), Color(0xE6000000))
+                    listOf(Color(0x00000000), Color(0xF0000000))
                 )
             )
-            .padding(top = 40.dp, bottom = 14.dp, start = 12.dp, end = 12.dp)
+            .padding(top = 44.dp, bottom = 14.dp, start = 16.dp, end = 16.dp)
     ) {
-        // Action row: Settings + Refresh (reachable here in live AND is how you
-        // reach the gear without leaving the show).
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(bottom = 8.dp, start = 4.dp)
-        ) {
-            MiniGuideChip("\u2699  Settings") { lastTouch = System.currentTimeMillis(); onOpenSettings() }
-            MiniGuideChip("\u21bb  Refresh") { lastTouch = System.currentTimeMillis(); onRetry() }
+        // --- X1-style info banner for the CURRENT channel ---
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                "Recent  \u2022  Up next \u2192",
-                color = Muted, fontSize = 11.sp,
-                modifier = Modifier.padding(start = 6.dp)
+                current?.name ?: "",
+                color = Accent, fontSize = 20.sp, fontWeight = FontWeight.Bold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            MiniGuideChip("\u2699") { lastTouch = System.currentTimeMillis(); onOpenSettings() }
+            Spacer(Modifier.width(6.dp))
+            MiniGuideChip("\u21bb") { lastTouch = System.currentTimeMillis(); onRetry() }
+        }
+        if (nowShow != null) {
+            Text(
+                buildString {
+                    append(nowShow.title)
+                    if (nowShow.startMs > 0) {
+                        append("   ")
+                        append(fmt.format(Date(nowShow.startMs)))
+                        append(" – ")
+                        append(fmt.format(Date(nowShow.endMs)))
+                    }
+                },
+                color = Ink, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
+        } else {
+            Text("Now playing", color = Muted, fontSize = 12.sp)
+        }
+        if (nextShow != null) {
+            Text(
+                "Next: ${nextShow.title}  ${if (nextShow.startMs > 0) fmt.format(Date(nextShow.startMs)) else ""}",
+                color = Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
             )
         }
-        // The channel strip.
-        LazyRow(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            contentPadding = PaddingValues(horizontal = 4.dp)
-        ) {
-            itemsIndexed(entries) { pos, idx ->
-                val ch = queue[idx]
-                val isCurrent = idx == currentIdx
-                Column(
-                    Modifier
-                        .width(150.dp)
-                        .then(if (pos == 0) Modifier.focusRequester(firstFocus) else Modifier)
-                        .onFocusChanged { if (it.isFocused) lastTouch = System.currentTimeMillis() }
-                        .tvFocus(RoundedCornerShape(10.dp))
-                        .background(
-                            if (isCurrent) Accent.copy(alpha = 0.25f) else Color(0x55202634),
-                            RoundedCornerShape(10.dp)
+
+        // --- Surf strip (only if there are other channels) ---
+        if (entries.isNotEmpty()) {
+            Spacer(Modifier.height(10.dp))
+            Text("Recent  \u2022  Up next \u2192", color = Muted, fontSize = 10.sp)
+            Spacer(Modifier.height(4.dp))
+            LazyRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                contentPadding = PaddingValues(vertical = 2.dp)
+            ) {
+                itemsIndexed(entries) { pos, idx ->
+                    val ch = queue[idx]
+                    Column(
+                        Modifier
+                            .width(150.dp)
+                            .then(if (pos == 0) Modifier.focusRequester(firstFocus) else Modifier)
+                            .onFocusChanged { if (it.isFocused) lastTouch = System.currentTimeMillis() }
+                            .tvFocus(RoundedCornerShape(10.dp))
+                            .background(Color(0x55202634), RoundedCornerShape(10.dp))
+                            .clickable { lastTouch = System.currentTimeMillis(); onTune(idx) }
+                            .padding(10.dp)
+                    ) {
+                        Text(
+                            ch.name,
+                            color = Ink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis
                         )
-                        .clickable { lastTouch = System.currentTimeMillis(); onTune(idx) }
-                        .padding(10.dp)
-                ) {
-                    Text(
-                        if (isCurrent) "\u25b6  ${ch.name}" else ch.name,
-                        color = if (isCurrent) Accent else Ink,
-                        fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        if (isCurrent) "Watching now" else "Press OK to watch",
-                        color = Muted, fontSize = 10.sp,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis
-                    )
+                        Text("Press OK to watch", color = Muted, fontSize = 10.sp, maxLines = 1)
+                    }
                 }
             }
         }
@@ -3942,11 +4071,46 @@ private fun MiniGuide(
 private fun MiniGuideChip(label: String, onClick: () -> Unit) {
     Text(
         label,
-        color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+        color = Ink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
         modifier = Modifier
             .tvFocus(RoundedCornerShape(20.dp))
             .background(Color(0x66202634), RoundedCornerShape(20.dp))
             .clickable { onClick() }
             .padding(horizontal = 14.dp, vertical = 7.dp)
     )
+}
+
+/* ---------------------------------------------------------------------------
+ * FRAME RATE MATCHING
+ * Movies are 24fps, most live TV is 30/60, some sports 50. If the TV is locked
+ * at 60Hz, 24fps content judders on slow pans (frames repeat unevenly). When
+ * the setting is on, we ask the TV to switch to a refresh rate that divides
+ * evenly into the video's frame rate — buttery pans, at the cost of a 1–2s
+ * black HDMI resync when the rate changes. Only modes matching the current
+ * resolution are considered, and if nothing divides cleanly we do nothing.
+ * ------------------------------------------------------------------------- */
+private fun applyFrameRateMatch(activity: android.app.Activity, fps: Float) {
+    runCatching {
+        val display = activity.window.decorView.display ?: return
+        val active = display.mode
+        val candidates = display.supportedModes.filter {
+            it.physicalWidth == active.physicalWidth && it.physicalHeight == active.physicalHeight
+        }
+        var best: android.view.Display.Mode? = null
+        var bestScore = Float.MAX_VALUE
+        for (m in candidates) {
+            val ratio = m.refreshRate / fps
+            val frac = kotlin.math.abs(ratio - kotlin.math.round(ratio))
+            if (frac < 0.02f) {
+                // Prefer the cleanest multiple, then the rate closest to the video.
+                val score = frac * 100f + kotlin.math.abs(m.refreshRate - fps) / 1000f
+                if (score < bestScore) { bestScore = score; best = m }
+            }
+        }
+        val target = best ?: return
+        if (target.modeId == active.modeId) return
+        val lp = activity.window.attributes
+        lp.preferredDisplayModeId = target.modeId
+        activity.window.attributes = lp
+    }
 }
