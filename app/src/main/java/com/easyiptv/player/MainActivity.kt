@@ -2402,7 +2402,7 @@ fun SettingsPane(prefs: SharedPreferences) {
         }
 
         Spacer(Modifier.height(24.dp))
-        Text("EZTV 4.13 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
+        Text("EZTV 4.13.2 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
     }
 }
 
@@ -3353,7 +3353,7 @@ fun PlayerScreen(
         if (playState.intValue != Player.STATE_READY) return@LaunchedEffect
         kotlinx.coroutines.delay(if (current.isLive) 4_000L else 600L)
         if (playState.intValue != Player.STATE_READY) return@LaunchedEffect
-        val fps = exo.videoFormat?.frameRate ?: return@LaunchedEffect
+        val fps = Playback.player?.videoFormat?.frameRate ?: return@LaunchedEffect
         if (fps > 0f) {
             (context as? android.app.Activity)?.let { applyFrameRateMatch(it, fps) }
         }
