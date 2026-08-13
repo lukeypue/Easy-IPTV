@@ -298,6 +298,51 @@ fun App() {
     var seriesCat by remember(activeIdx) { mutableStateOf("all") }
     var searchQuery by remember { mutableStateOf("") }
 
+    // One-time "external drive found — use it?" prompt. Shows only if a drive is
+    // plugged in, the setting is off, and we haven't asked about THIS drive yet.
+    var showDrivePrompt by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay(1500)   // let the app settle first
+        val present = Storage.drivePresent(context)
+        val asked = prefs.getBoolean("ext_prompt_shown", false)
+        if (present && !Storage.isEnabled(prefs) && !asked) showDrivePrompt = true
+    }
+    if (showDrivePrompt) {
+        val driveGb = remember { Storage.driveFreeBytes(context) }
+        AlertDialog(
+            onDismissRequest = {
+                showDrivePrompt = false
+                prefs.edit().putBoolean("ext_prompt_shown", true).apply()
+            },
+            containerColor = SurfaceCol,
+            title = { Text("External drive found", color = Ink) },
+            text = {
+                Text(
+                    "Save downloads and recordings to your plugged-in drive" +
+                        (if (driveGb >= 0) " (${Storage.gb(driveGb)} GB free)" else "") +
+                        "? This keeps your Fire Stick's storage from filling up. You can change this anytime in Settings.",
+                    color = Muted, fontSize = 13.sp
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    Storage.setEnabled(prefs, true)
+                    prefs.edit().putBoolean("ext_prompt_shown", true).apply()
+                    showDrivePrompt = false
+                    if (Storage.driveLikelyFat32(context)) {
+                        toast(context, "Tip: format the drive as exFAT for recordings over 4 GB.")
+                    }
+                }) { Text("Use the drive", color = Accent) }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    prefs.edit().putBoolean("ext_prompt_shown", true).apply()
+                    showDrivePrompt = false
+                }) { Text("Keep on Fire Stick", color = Muted) }
+            }
+        )
+    }
+
     // The corner mini player: whatever you backed out of keeps playing here.
     var mini by remember { mutableStateOf<MiniState?>(null) }
     // Only auto-tune to the last channel once per app start.
@@ -1336,9 +1381,10 @@ internal object Timeshift {
         ((buf[off + 1].toInt() and 0x1F) shl 8) or (buf[off + 2].toInt() and 0xFF)
 
     @Synchronized
-    fun start(context: Context, url: String) {
+    fun start(context: Context, url: String, prefs: SharedPreferences? = null) {
         stopInternal()
-        val f = File(context.cacheDir, "timeshift.ts")
+        val dir = if (prefs != null) Storage.timeshiftDir(context, prefs) else context.cacheDir
+        val f = File(dir, "timeshift.ts")
         runCatching { f.delete() }
         file = f
         bytesWritten = 0L
@@ -1987,7 +2033,7 @@ object Playback {
             uri = Uri.parse(tsUrl(ch.url))
         } else {
             TimeshiftServer.ensureStarted()
-            Timeshift.start(ctx, tsUrl(ch.url))
+            Timeshift.start(ctx, tsUrl(ch.url), prefsRef)
             uri = Uri.parse("http://127.0.0.1:" + TimeshiftServer.port + "/live/" + System.nanoTime())
         }
         p.setMediaItem(
@@ -2148,6 +2194,7 @@ fun SeriesPane(
 fun SettingsPane(prefs: SharedPreferences) {
     var bufferSec by remember { mutableIntStateOf(prefs.getInt("buffer_sec", 30)) }
     var autoLast by remember { mutableStateOf(prefs.getBoolean("autoplay_last", true)) }
+    val ctx = LocalContext.current
 
     Column(
         Modifier
@@ -2155,6 +2202,51 @@ fun SettingsPane(prefs: SharedPreferences) {
             .verticalScroll(androidx.compose.foundation.rememberScrollState())
             .padding(16.dp)
     ) {
+        // ---- External drive storage ----
+        Text("Storage", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
+        Spacer(Modifier.height(4.dp))
+        val drivePresent = remember { Storage.drivePresent(ctx) }
+        var extOn by remember { mutableStateOf(Storage.isEnabled(prefs)) }
+        val internalFree = remember { Storage.internalFreeBytes(ctx) }
+        val driveFree = remember { Storage.driveFreeBytes(ctx) }
+        Text(
+            "Fire TV internal: ${if (internalFree >= 0) Storage.gb(internalFree) + " GB free" else "—"}" +
+                if (drivePresent) "\nExternal drive: ${if (driveFree >= 0) Storage.gb(driveFree) + " GB free" else "detected"}"
+                else "\nNo external drive detected.",
+            fontSize = 12.sp, color = Muted
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            if (drivePresent)
+                "Save downloads, recordings, and the live pause buffer to your plugged-in drive so the Fire Stick's small storage never fills up."
+            else
+                "Plug a USB drive or SSD into your Fire Stick (via an OTG adapter) to store lots of downloads and recordings. Format it exFAT for recordings over 4 GB.",
+            fontSize = 12.sp, color = Muted
+        )
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Chip("Fire Stick", !extOn) {
+                extOn = false; Storage.setEnabled(prefs, false)
+            }
+            Chip("External drive", extOn) {
+                if (!drivePresent) {
+                    toast(ctx, "No external drive detected. Plug one in first.")
+                } else {
+                    extOn = true; Storage.setEnabled(prefs, true)
+                    if (Storage.driveLikelyFat32(ctx)) {
+                        toast(ctx, "Drive looks like FAT32 — recordings over 4 GB may fail. Reformat as exFAT for long recordings.")
+                    } else {
+                        toast(ctx, "New downloads and recordings will save to your external drive.")
+                    }
+                }
+            }
+        }
+        Text(
+            "New downloads and recordings follow this setting. Anything already saved stays where it is.",
+            fontSize = 10.sp, color = Muted, modifier = Modifier.padding(top = 4.dp)
+        )
+
+        Spacer(Modifier.height(20.dp))
         Text("Start on last channel", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
         Text(
@@ -2217,7 +2309,7 @@ fun SettingsPane(prefs: SharedPreferences) {
         }
 
         Spacer(Modifier.height(24.dp))
-        Text("EZTV 4.9 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
+        Text("EZTV 4.10 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
     }
 }
 
@@ -2624,10 +2716,12 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
     }
 
     Column(Modifier.fillMaxSize()) {
-        val free = remember(items) { DownloadStore.freeBytes(context) }
+        val free = remember(items) { DownloadStore.freeBytes(context, prefs) }
+        val onDrive = remember { Storage.usingDrive(context, prefs) }
         if (free >= 0) {
             Text(
-                "Device storage: ${String.format(java.util.Locale.US, "%.1f", free / 1_073_741_824.0)} GB free (shared by downloads & recordings)" +
+                (if (onDrive) "External drive: " else "Fire Stick storage: ") +
+                    "${String.format(java.util.Locale.US, "%.1f", free / 1_073_741_824.0)} GB free" +
                     if (free < 3_000_000_000L) "  •  Too low to start new downloads — free up 3 GB" else "",
                 fontSize = 12.sp,
                 color = if (free < 3_000_000_000L) Live else Accent,
@@ -2755,10 +2849,12 @@ fun RecordingsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
     val schedFmt = remember { SimpleDateFormat("EEE, MMM d  h:mm a", Locale.getDefault()) }
 
     Column(Modifier.fillMaxSize()) {
-        val free = remember(files) { DownloadStore.freeBytes(context) }
+        val free = remember(files) { DownloadStore.freeBytes(context, prefs) }
+        val onDrive = remember { Storage.usingDrive(context, prefs) }
         if (free >= 0) {
             Text(
-                "Device storage: ${String.format(java.util.Locale.US, "%.1f", free / 1_073_741_824.0)} GB free (shared by recordings & downloads)" +
+                (if (onDrive) "External drive: " else "Fire Stick storage: ") +
+                    "${String.format(java.util.Locale.US, "%.1f", free / 1_073_741_824.0)} GB free (shared by recordings & downloads)" +
                     if (free < 2_500_000_000L) "  •  Too low to record safely" else "",
                 fontSize = 12.sp,
                 color = if (free < 2_500_000_000L) Live else Accent,

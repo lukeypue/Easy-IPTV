@@ -137,8 +137,9 @@ object DownloadStore {
             .ifBlank { "video" }
 
     /** Free bytes on the storage that holds downloads, or -1 if unknown. */
-    fun freeBytes(context: Context): Long = try {
-        val dir = context.getExternalFilesDir("downloads") ?: context.filesDir
+    fun freeBytes(context: Context, prefs: SharedPreferences? = null): Long = try {
+        val dir = if (prefs != null) Storage.baseDir(context, prefs, "downloads")
+                  else context.getExternalFilesDir("downloads") ?: context.filesDir
         android.os.StatFs(dir.absolutePath).availableBytes
     } catch (e: Exception) {
         -1L
@@ -147,10 +148,9 @@ object DownloadStore {
     /** Starts a system download. Returns a message to show the user. */
     fun start(context: Context, prefs: SharedPreferences, title: String, url: String): String {
         return try {
-            // Storage guard: Fire Sticks (16 GB) corrupt themselves when storage
-            // fills up. Require 3 GB free before starting — a typical movie is
-            // 1–2 GB, which always leaves breathing room.
-            val free = freeBytes(context)
+            // Storage guard: require 3 GB free on whichever drive is active
+            // (external SSD/USB if enabled and present, else internal).
+            val free = freeBytes(context, prefs)
             if (free in 0 until 3_000_000_000L) {
                 val gb = String.format(java.util.Locale.US, "%.1f", free / 1_073_741_824.0)
                 return "Not enough storage to download safely — only $gb GB free. EZTV needs 3 GB free to start a download so the device stays healthy. Delete a download or recording first."
@@ -177,16 +177,36 @@ object DownloadStore {
                 .take(4).ifBlank { "mp4" }
             val fname = safeName(title) + "_" + System.currentTimeMillis() % 100000 + "." + ext
             val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-            val req = DownloadManager.Request(Uri.parse(url))
+            val destDir = Storage.baseDir(context, prefs, "downloads")
+            val destFile = File(destDir, fname)
+            val onDrive = Storage.usingDrive(context, prefs)
+            fun buildReq(dest: File) = DownloadManager.Request(Uri.parse(url))
                 .setTitle(title)
                 .addRequestHeader("User-Agent", Net.UA)
                 .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                .setDestinationInExternalFilesDir(context, "downloads", fname)
-            val id = dm.enqueue(req)
-            val path = File(context.getExternalFilesDir("downloads"), fname).absolutePath
+                .setDestinationUri(Uri.fromFile(dest))
+            val (id, path) = try {
+                dm.enqueue(buildReq(destFile)) to destFile.absolutePath
+            } catch (e: Exception) {
+                // Some Fire OS builds reject a removable-drive destination. Fall
+                // back to internal so the download still works, and tell the user.
+                if (onDrive) {
+                    val internal = File(
+                        (context.getExternalFilesDir("downloads") ?: context.filesDir), fname
+                    )
+                    dm.enqueue(
+                        DownloadManager.Request(Uri.parse(url))
+                            .setTitle(title)
+                            .addRequestHeader("User-Agent", Net.UA)
+                            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                            .setDestinationInExternalFilesDir(context, "downloads", fname)
+                    ) to internal.absolutePath
+                } else throw e
+            }
             val expires = System.currentTimeMillis() + DAYS * 24L * 60L * 60L * 1000L
             save(prefs, load(prefs) + Item(id, title, path, expires))
-            "Downloading \"$title\" — check the Downloads section. It stays for 14 days."
+            val where = if (onDrive && path.startsWith(destDir.absolutePath)) " to your external drive" else ""
+            "Downloading \"$title\"$where — check the Downloads section. It stays for 14 days."
         } catch (e: Exception) {
             "Couldn't start that download. (${e.message})"
         }

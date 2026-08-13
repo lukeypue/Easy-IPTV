@@ -39,8 +39,10 @@ object Recorder {
     /** Name of what's currently recording, or null. Compose-observable. */
     val activeName = androidx.compose.runtime.mutableStateOf<String?>(null)
 
-    fun recordingsDir(context: Context): File =
-        File(context.getExternalFilesDir(null), "recordings").apply { mkdirs() }
+    fun recordingsDir(context: Context): File {
+        val prefs = context.getSharedPreferences("easyiptv", Context.MODE_PRIVATE)
+        return Storage.baseDir(context, prefs, "recordings")
+    }
 
     /**
      * Storage check before recording. Returns null when fine, a BLOCKING
