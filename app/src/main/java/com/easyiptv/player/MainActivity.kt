@@ -1292,6 +1292,20 @@ private fun livePlayable(prefs: SharedPreferences, ch: LiveChannel): Playable {
  *    reconnects on its own if the provider drops it.
  * The file lives in the app's cache and is wiped on channel change and exit.
  * ------------------------------------------------------------------------- */
+/* Recent live channels, tracked by IDENTITY (url), app-wide — so the list
+ * survives leaving the player and works across categories. Updated only on a
+ * successful lock-in (an event, never a tick), read only when the mini guide
+ * is open. (Panel bug fix: the old list lived inside the player screen and
+ * stored positions, so it wiped on exit and broke across categories.) */
+internal object RecentChannels {
+    val items = androidx.compose.runtime.mutableStateListOf<Playable>()
+    fun push(p: Playable) {
+        items.removeAll { it.url == p.url }
+        items.add(0, p)
+        while (items.size > 7) items.removeAt(items.size - 1)
+    }
+}
+
 internal object Timeshift {
     @Volatile var bytesWritten: Long = 0L
     @Volatile var active: Boolean = false
@@ -1316,14 +1330,9 @@ internal object Timeshift {
         return -1
     }
 
-    /** MPEG-TS packets are 188 bytes, sync byte 0x47. After a reconnect we
-     *  (1) align to a verified packet boundary, then (2) wait for a PAT packet
-     *  (PID 0) before appending a single byte. The PAT is where the decoder
-     *  re-learns the stream layout — starting there instead of mid-GOP is what
-     *  stops the half-screen "digitizing" smear after a provider hiccup. */
-    private fun tsPid(buf: ByteArray, off: Int): Int =
-        ((buf[off + 1].toInt() and 0x1F) shl 8) or (buf[off + 2].toInt() and 0xFF)
-
+    /** MPEG-TS packets are exactly 188 bytes, sync byte 0x47. The writer only
+     *  ever publishes WHOLE packets (see the carry buffer in start()), so the
+     *  file is always packet-aligned and reconnect seams are clean. */
     @Synchronized
     fun start(context: Context, url: String, prefs: SharedPreferences? = null) {
         stopInternal()
@@ -1338,14 +1347,6 @@ internal object Timeshift {
         val myGen = ++gen
         Thread {
             while (active && gen == myGen && bytesWritten < CAP_BYTES) {
-                // Trim any ragged partial packet left by the last disconnect.
-                val ragged = bytesWritten % 188L
-                if (ragged != 0L) {
-                    runCatching {
-                        java.io.RandomAccessFile(f, "rw").use { it.setLength(bytesWritten - ragged) }
-                    }
-                    bytesWritten -= ragged
-                }
                 try {
                     val req = Request.Builder().url(url).header("User-Agent", Net.UA).build()
                     val c = Net.streamClient.newCall(req)
@@ -1356,22 +1357,63 @@ internal object Timeshift {
                             java.io.FileOutputStream(f, true).use { out ->
                                 val buf = ByteArray(64 * 1024)
                                 var sinceCheck = 0L
+                                // SEAM RULE (v4.16): only WHOLE 188-byte packets
+                                // ever reach the published file. Partial packets
+                                // wait in this carry buffer until completed by
+                                // the next read. The file length is therefore
+                                // ALWAYS packet-aligned — no truncation on
+                                // disconnect, and the localhost reader position
+                                // can never end up mid-packet after a reconnect.
+                                val carry = ByteArray(188)
+                                var carryLen = 0
                                 var aligned = false
-                                var sawPat = (bytesWritten > 0L)   // only need PAT on a true reconnect
                                 var pend = java.io.ByteArrayOutputStream()
-                                val alignStart = System.currentTimeMillis()
+
+                                fun writePackets(data: ByteArray, off0: Int, len0: Int) {
+                                    var off = off0
+                                    var len = len0
+                                    // Complete a partial packet from last read.
+                                    if (carryLen > 0) {
+                                        val need = 188 - carryLen
+                                        if (len < need) {
+                                            System.arraycopy(data, off, carry, carryLen, len)
+                                            carryLen += len
+                                            return
+                                        }
+                                        System.arraycopy(data, off, carry, carryLen, need)
+                                        out.write(carry, 0, 188)
+                                        bytesWritten += 188
+                                        carryLen = 0
+                                        off += need
+                                        len -= need
+                                    }
+                                    // Write all whole packets; keep the tail.
+                                    val whole = (len / 188) * 188
+                                    if (whole > 0) {
+                                        out.write(data, off, whole)
+                                        bytesWritten += whole
+                                    }
+                                    val rem = len - whole
+                                    if (rem > 0) {
+                                        System.arraycopy(data, off + whole, carry, 0, rem)
+                                        carryLen = rem
+                                    }
+                                }
+
                                 while (active && gen == myGen && bytesWritten < CAP_BYTES) {
                                     val n = inp.read(buf)
                                     if (n < 0) break
                                     if (!active || gen != myGen) break
                                     if (!aligned) {
+                                        // Find a verified packet boundary once per
+                                        // connection, then stream through the
+                                        // whole-packet writer from there.
                                         pend.write(buf, 0, n)
                                         val pb = pend.toByteArray()
                                         val sync = findTsSync(pb, pb.size)
                                         if (sync >= 0) {
-                                            out.write(pb, sync, pb.size - sync)
-                                            bytesWritten += (pb.size - sync)
                                             aligned = true
+                                            writePackets(pb, sync, pb.size - sync)
                                             pend = java.io.ByteArrayOutputStream()
                                         } else if (pb.size > 8192) {
                                             val keep = pb.copyOfRange(pb.size - 512, pb.size)
@@ -1380,39 +1422,8 @@ internal object Timeshift {
                                         }
                                         continue
                                     }
-                                    // Aligned but haven't seen a PAT yet on this reconnect:
-                                    // hold data in memory until a PAT packet appears (or a
-                                    // 2s safety timeout), then flush from there.
-                                    if (!sawPat) {
-                                        pend.write(buf, 0, n)
-                                        val pb = pend.toByteArray()
-                                        var patAt = -1
-                                        var k = 0
-                                        while (k + 188 <= pb.size) {
-                                            if (pb[k] == 0x47.toByte() && tsPid(pb, k) == 0) { patAt = k; break }
-                                            k += 188
-                                        }
-                                        val timedOut = System.currentTimeMillis() - alignStart > 2_000
-                                        if (patAt >= 0 || timedOut) {
-                                            val from = if (patAt >= 0) patAt else 0
-                                            out.write(pb, from, pb.size - from)
-                                            bytesWritten += (pb.size - from)
-                                            lastByteAt = System.currentTimeMillis()
-                                            sawPat = true
-                                            pend = java.io.ByteArrayOutputStream()
-                                        } else if (pb.size > 400_000) {
-                                            // Don't hoard forever; flush what we have.
-                                            out.write(pb, 0, pb.size)
-                                            bytesWritten += pb.size
-                                            sawPat = true
-                                            pend = java.io.ByteArrayOutputStream()
-                                        }
-                                        continue
-                                    }
-                                    out.write(buf, 0, n)
-                                    bytesWritten += n
-                                    // Lightweight flow tracking: just note when
-                                    // bytes last arrived (for the dead-feed check).
+                                    writePackets(buf, 0, n)
+                                    // Lightweight flow tracking for the dead-feed check.
                                     lastByteAt = System.currentTimeMillis()
                                     // Storage floor: never squeeze the device.
                                     sinceCheck += n
@@ -1424,6 +1435,8 @@ internal object Timeshift {
                                         if (free < 1_500_000_000L) break
                                     }
                                 }
+                                // Connection over: the carry remainder is simply
+                                // dropped — it was never visible to the reader.
                             }
                         }
                     }
@@ -1631,11 +1644,12 @@ object Playback {
                 (lockMs * 2).coerceAtLeast(6_000)          // after a stall, come back with double protection
             )
             .setBackBuffer(10_000, false)
-            // Cap RAM buffering on the low-memory Fire Stick — since live plays
-            // from the disk file anyway, a big in-RAM buffer just causes memory
-            // pressure that hurts decoding. Keeps playback smooth.
-            .setTargetBufferBytes(24 * 1024 * 1024)
-            .setPrioritizeTimeOverSizeThresholds(false)
+            // Let Media3 size the byte target from the track (panel: the fixed
+            // 24MB cap could stop loading before enough SECONDS were banked,
+            // which showed up as the buffer % filling very slowly). Time is the
+            // controlling constraint, exactly like the smooth 4.9 build.
+            .setTargetBufferBytes(C.LENGTH_UNSET)
+            .setPrioritizeTimeOverSizeThresholds(true)
             .build()
         val extractors = androidx.media3.extractor.DefaultExtractorsFactory()
             .setConstantBitrateSeekingEnabled(true)
@@ -1685,7 +1699,13 @@ object Playback {
                 }
                 retriesP++
                 val wait = (1_000L * retriesP).coerceAtMost(5_000L)
+                // Generation guard (panel bug fix): if the viewer changes
+                // channel before this delayed retry fires, the retry belongs to
+                // a DEAD session — firing it would restart the NEW channel and
+                // look exactly like random buffering. Stale retries do nothing.
+                val myGen = playbackGen
                 android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    if (myGen != playbackGen) return@postDelayed
                     runCatching {
                         if (liveMode) {
                             // Timeshift trouble? After 3 strikes, flip to direct
@@ -1736,143 +1756,59 @@ object Playback {
     // Progress tracking: a stall only counts when growth has STOPPED.
     private var lastBufMs = -1L
     private var lastBufGrowthAt = 0L
-    // Speed-governor hysteresis (panel: stop it oscillating). We only change
-    // speed when the new target differs enough AND a minimum dwell has passed.
+    // Speed-governor hysteresis (panel: stop it oscillating).
     private var lastSpeedChangeAt = 0L
-    // Graded rough-channel memory (panel: severity score, not a binary flag).
-    // score 0 = clean; higher = needs a bigger cushion. Decays after clean minutes.
-    private var roughBoostUntil = 0L
-    private val roughScores = HashMap<String, Int>()
-    private var roughLoaded = false
-
-    private fun loadRough() {
-        if (roughLoaded) return
-        roughLoaded = true
-        runCatching {
-            val raw = prefsRef?.getString("rough_scores", null) ?: return
-            org.json.JSONObject(raw).let { o ->
-                o.keys().forEach { k -> roughScores[k] = o.getInt(k) }
-            }
-        }
-    }
-
-    private fun saveRough() {
-        runCatching {
-            val o = org.json.JSONObject()
-            roughScores.forEach { (k, v) -> o.put(k, v) }
-            prefsRef?.edit()?.putString("rough_scores", o.toString())?.apply()
-        }
-    }
-
-    /** Bump a channel's trouble score (capped), evicting the lowest if too many. */
-    private fun bumpRough(url: String, by: Int) {
-        loadRough()
-        val cur = (roughScores[url] ?: 0) + by
-        roughScores[url] = cur.coerceIn(0, 6)
-        while (roughScores.size > 60) {
-            val lowest = roughScores.minByOrNull { it.value }?.key ?: break
-            roughScores.remove(lowest)
-        }
-        saveRough()
-    }
-
-    /** Desired live cushion (seconds) for a channel, from its severity score.
-     *  Reserved for future per-channel LoadControl; the slow-start boost
-     *  currently banks the extra seconds instead. */
-    @Suppress("unused")
-    private fun cushionTargetSec(url: String): Int {
-        loadRough()
-        return when (roughScores[url] ?: 0) {
-            0 -> prefsRef?.getInt("live_start_ms", 4000)?.div(1000) ?: 4
-            1, 2 -> 8
-            3, 4 -> 14
-            else -> 22
-        }
-    }
 
     internal fun noteBufferingStarted() { if (bufferingSince == 0L) bufferingSince = System.currentTimeMillis() }
     internal fun noteReadyForStall() {
         bufferingSince = 0L
         stallRestarts = 0
         lastBufMs = -1L
-        // Reaching healthy playback slowly forgives a channel's trouble score.
-        val url = queue.getOrNull(currentIdxC.intValue)?.url ?: return
-        loadRough()
-        val s = roughScores[url] ?: return
-        if (s > 0) { roughScores[url] = s - 1; saveRough() }
     }
 
     private val governorTick = object : Runnable {
         override fun run() {
             val p = player
             if (p == null) { governorRunning = false; return }
+            // Simple Mode: the governor does nothing, so it doesn't even run.
+            // (Belt and suspenders — startGovernor also refuses to schedule it.)
+            if (simpleRaw) { governorRunning = false; return }
             runCatching {
-                if (liveMode && simpleRaw) {
-                    // SIMPLE MODE: no governor, no recovery, no watchdog. The
-                    // stream plays through raw, like a bare-bones cable box.
-                    if (p.playbackParameters.speed != 1.0f) p.setPlaybackSpeed(1.0f)
-                } else if (liveMode) {
+                if (liveMode) {
                     val now = System.currentTimeMillis()
                     val cushionMs = p.totalBufferedDuration
-                    val cushionSec = cushionMs / 1000.0
 
-                    // --- Hysteretic proportional speed governor ---
-                    // Continuous curve (panel: smoother than discrete steps), but
-                    // rate-limited so it can't hunt: change only when the target
-                    // differs by >0.02 AND at least 8s since the last change.
+                    // Simple hysteretic speed (panel: one slow state, not a
+                    // continuous curve). Reads fields only; no allocations.
                     if (p.isPlaying) {
-                        val boost = now < roughBoostUntil
-                        // Gentle: 0.94x when nearly empty → 1.0x when comfortable.
-                        val floorSpeed = if (boost) 0.96f else 0.94f
-                        val raw = (floorSpeed + 0.06f * ((cushionSec - 1.5) / 6.0)).toFloat()
-                        val target = raw.coerceIn(floorSpeed, 1.0f)
                         val cur = p.playbackParameters.speed
-                        val bigEnough = kotlin.math.abs(cur - target) > 0.02f
-                        val dwellOk = now - lastSpeedChangeAt > 8_000
-                        // Always allowed to return straight to 1.0x once healthy.
-                        if ((target >= 1.0f && cur < 1.0f) || (bigEnough && dwellOk)) {
-                            p.setPlaybackSpeed(target)
-                            lastSpeedChangeAt = now
-                        }
+                        if (cushionMs < 4_000 && cur > 0.96f) p.setPlaybackSpeed(0.95f)
+                        else if (cushionMs > 6_000 && cur < 1.0f) p.setPlaybackSpeed(1.0f)
                     }
 
-                    // --- Writer-flow-aware tiered stall recovery ---
-                    // Diagnose BEFORE reacting (panel): is the provider still
-                    // sending bytes, or has the player stalled while data flows?
+                    // Progress-based stall recovery (light): only act when the
+                    // buffer has been frozen several seconds while buffering.
                     if (playStateC.intValue == Player.STATE_BUFFERING && bufferingSince > 0) {
-                        val buf = cushionMs
-                        if (buf > lastBufMs + 200 || lastBufMs < 0) {
-                            lastBufMs = buf
+                        if (cushionMs > lastBufMs + 200 || lastBufMs < 0) {
+                            lastBufMs = cushionMs
                             lastBufGrowthAt = now
                         }
                         val frozenFor = now - lastBufGrowthAt
                         val bufferingFor = now - bufferingSince
                         val bytesFlowing = directLive ||
-                            (System.currentTimeMillis() - Timeshift.lastByteAt) < 3_000
-
+                            (now - Timeshift.lastByteAt) < 3_000
                         if (frozenFor > 4_000 && bufferingFor > 5_000) {
                             when {
-                                // Provider has stopped sending: restarting won't help
-                                // and just reconnects to the same dead source. Wait,
-                                // and let the dead-feed watchdog handle a true outage.
-                                !bytesFlowing && stallRestarts == 0 -> {
-                                    // give it one more grace window before acting
-                                    lastBufGrowthAt = now
-                                }
-                                // Bytes ARE flowing but the player is wedged (decoder/
-                                // extractor). Rewind into the recorded file — resumes
-                                // from disk instantly and re-reads past the bad seam.
+                                !bytesFlowing && stallRestarts == 0 -> lastBufGrowthAt = now
                                 stallRestarts == 0 && !directLive && p.currentPosition > 12_000 -> {
                                     stallRestarts = 1
                                     bufferingSince = 0L; lastBufMs = -1L
-                                    val back = (cushionSec * 0.6).coerceIn(4.0, 12.0)
-                                    p.seekTo((p.currentPosition - (back * 1000).toLong()).coerceAtLeast(0))
+                                    p.seekTo((p.currentPosition - 8_000).coerceAtLeast(0))
                                     p.play()
                                 }
                                 stallRestarts <= 1 -> {
                                     stallRestarts = 2
                                     bufferingSince = 0L; lastBufMs = -1L
-                                    queue.getOrNull(currentIdxC.intValue)?.let { bumpRough(it.url, 2) }
                                     zapTo(currentIdxC.intValue)
                                 }
                                 else -> streamDeadC.value = true
@@ -1880,16 +1816,12 @@ object Playback {
                         }
                     }
 
-                    // Dead-feed watchdog (timeshift only): zero bytes for 20s while
-                    // buffering = channel is down at the provider.
+                    // Dead-feed watchdog: zero bytes 20s while buffering = down.
                     if (!directLive) {
                         val b = Timeshift.bytesWritten
-                        if (b != lastBytesSeen) {
-                            lastBytesSeen = b
-                            lastBytesAt = now
-                        } else if (now - lastBytesAt > 20_000 &&
-                            playStateC.intValue == Player.STATE_BUFFERING
-                        ) {
+                        if (b != lastBytesSeen) { lastBytesSeen = b; lastBytesAt = now }
+                        else if (now - lastBytesAt > 20_000 &&
+                            playStateC.intValue == Player.STATE_BUFFERING) {
                             streamDeadC.value = true
                         }
                     }
@@ -1903,6 +1835,9 @@ object Playback {
 
     private fun startGovernor() {
         if (governorRunning) return
+        // Simple Mode plays raw — the governor never runs, so no periodic work
+        // wakes threads or allocates during Simple Mode playback.
+        if (simpleRaw) return
         governorRunning = true
         governor.postDelayed(governorTick, 2_000)
     }
@@ -1925,8 +1860,14 @@ object Playback {
         private set
     private var liveFails = 0
     private var retriesP = 0
+    // Bumped on every channel change / retry / stop. Delayed callbacks
+    // capture the value and refuse to run if it has moved on (stale).
+    @Volatile private var playbackGen = 0L
 
-    internal fun noteLiveReady() { liveFails = 0 }
+    internal fun noteLiveReady() {
+        liveFails = 0
+        queue.getOrNull(currentIdxC.intValue)?.let { RecentChannels.push(it) }
+    }
     internal fun noteLiveFail(): Boolean {
         liveFails++
         if (liveFails >= 3 && !directLive) {
@@ -1939,6 +1880,7 @@ object Playback {
     /** The customer pressed Try Again: reset the strike counters and run the
      *  full rescue cycle from scratch — a real retry, not a dead click. */
     fun tryAgain() {
+        playbackGen++
         retriesP = 0
         streamDeadC.value = false
         val p = player ?: return
@@ -1954,7 +1896,17 @@ object Playback {
 
     /** Change live channel: point the DVR recorder at the new channel and play
      *  its growing file via localhost. Wraps around the lineup like a cable box. */
+    fun zapToChannel(target: Playable) {
+        val i = queue.indexOfFirst { it.url == target.url }
+        if (i >= 0) zapTo(i)
+        else {
+            queue = queue + target
+            zapTo(queue.size - 1)
+        }
+    }
+
     fun zapTo(idx: Int) {
+        playbackGen++
         val p = player ?: return
         val ctx = appContext ?: return
         val q = queue
@@ -1970,11 +1922,6 @@ object Playback {
         lastBytesSeen = -1L
         lastBytesAt = System.currentTimeMillis()
         lastSpeedChangeAt = 0L
-        // Graded memory: the worse a channel's history, the longer we baby it
-        // with gentle slow-play after lock-in to bank extra cushion first.
-        loadRough()
-        val score = roughScores[ch.url] ?: 0
-        roughBoostUntil = if (score > 0) System.currentTimeMillis() + (30_000L + score * 20_000L) else 0L
         p.setPlaybackSpeed(1.0f)
         val uri: Uri
         if (directLive || simpleRaw) {
@@ -2042,6 +1989,7 @@ object Playback {
 
     /** Full stop: close the one stream, stop the DVR recorder, free the decoders. */
     fun releaseAll() {
+        playbackGen++
         stopGovernor()
         Timeshift.stop()
         TimeshiftServer.stop()
@@ -2346,7 +2294,7 @@ fun SettingsPane(prefs: SharedPreferences) {
         }
 
         Spacer(Modifier.height(24.dp))
-        Text("EZTV 4.14.1 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
+        Text("EZTV 4.16 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
     }
 }
 
@@ -3264,15 +3212,6 @@ fun PlayerScreen(
     // keeps playing full-screen the whole time. Arrow to highlight, OK to tune,
     // OK again (or 4s idle) to tuck it away.
     var miniGuideOpen by remember { mutableStateOf(false) }
-    // Recent channel indices, most-recent-first, tracked as you surf.
-    val recentIdx = remember { mutableStateListOf<Int>() }
-    LaunchedEffect(currentIdx) {
-        if (current.isLive) {
-            recentIdx.remove(currentIdx)
-            recentIdx.add(0, currentIdx)
-            while (recentIdx.size > 8) recentIdx.removeLast()
-        }
-    }
     val titleFocus = remember { FocusRequester() }
     // Whenever the menus appear, park the remote on the show title —
     // OK there closes the menus, arrows reach the other buttons.
@@ -3375,12 +3314,15 @@ fun PlayerScreen(
     var bufPct by remember { mutableIntStateOf(0) }
     val lockTargetMs = remember { prefs.getInt("live_start_ms", 4_000).coerceIn(2_000, 12_000).toFloat() }
     LaunchedEffect(playState.intValue) {
+        // Only spins while actually buffering; the effect re-runs (and this
+        // loop exits) the moment the state changes to READY. 600ms is plenty
+        // for a smooth-looking %, and keeps the poll off the hot path.
         if (playState.intValue == Player.STATE_BUFFERING) {
             bufPct = 0
-            while (true) {
+            while (playState.intValue == Player.STATE_BUFFERING) {
                 val targetMs = if (!everReady.value) lockTargetMs else lockTargetMs * 2f
                 bufPct = ((exo.totalBufferedDuration / targetMs) * 100f).toInt().coerceIn(0, 99)
-                kotlinx.coroutines.delay(350)
+                kotlinx.coroutines.delay(600)
             }
         }
     }
@@ -3586,12 +3528,12 @@ fun PlayerScreen(
             MiniGuide(
                 queue = queue,
                 currentIdx = currentIdx,
-                recentIdx = recentIdx.toList(),
+                recent = RecentChannels.items.toList(),
                 nowNext = nowNext,
                 fmt = fmt,
-                onTune = { idx ->
+                onTune = { ch ->
                     miniGuideOpen = false
-                    if (idx != currentIdx) Playback.zapTo(idx)
+                    if (ch.url != current.url) Playback.zapToChannel(ch)
                 },
                 onOpenSettings = {
                     miniGuideOpen = false
@@ -3910,10 +3852,10 @@ fun PlayerScreen(
 private fun MiniGuide(
     queue: List<Playable>,
     currentIdx: Int,
-    recentIdx: List<Int>,
+    recent: List<Playable>,
     nowNext: List<EpgEntry>,
     fmt: SimpleDateFormat,
-    onTune: (Int) -> Unit,
+    onTune: (Playable) -> Unit,
     onOpenSettings: () -> Unit,
     onRetry: () -> Unit,
     onClose: () -> Unit
@@ -3925,10 +3867,10 @@ private fun MiniGuide(
     val nextShow = nowShow?.let { ns -> nowNext.getOrNull(nowNext.indexOf(ns) + 1) }
         ?: nowNext.firstOrNull { it.startMs > nowMs }
 
-    // Surf strip: the last channels you actually watched (TiviMate style), so
-    // you can hop back across categories without opening the full guide.
-    val entries = remember(queue, currentIdx, recentIdx) {
-        recentIdx.filter { it != currentIdx && it in queue.indices }.take(7)
+    // Surf strip: the last channels you actually watched (identity-based, from
+    // the app-level store), excluding the one on screen.
+    val entries = remember(recent, current?.url) {
+        recent.filter { it.url != current?.url }.take(7)
     }
     val firstFocus = remember { FocusRequester() }
     LaunchedEffect(Unit) { runCatching { firstFocus.requestFocus() } }
@@ -3992,8 +3934,7 @@ private fun MiniGuide(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 contentPadding = PaddingValues(vertical = 2.dp)
             ) {
-                itemsIndexed(entries) { pos, idx ->
-                    val ch = queue[idx]
+                itemsIndexed(entries) { pos, ch ->
                     Column(
                         Modifier
                             .width(150.dp)
@@ -4001,7 +3942,7 @@ private fun MiniGuide(
                             .onFocusChanged { if (it.isFocused) lastTouch = System.currentTimeMillis() }
                             .tvFocus(RoundedCornerShape(10.dp))
                             .background(Color(0x55202634), RoundedCornerShape(10.dp))
-                            .clickable { lastTouch = System.currentTimeMillis(); onTune(idx) }
+                            .clickable { lastTouch = System.currentTimeMillis(); onTune(ch) }
                             .padding(10.dp)
                     ) {
                         Text(

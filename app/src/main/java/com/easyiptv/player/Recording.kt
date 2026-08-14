@@ -225,6 +225,16 @@ class RecordingService : Service() {
                         needNetwork = teeFromTimeshift(out, stopAt) { isActive } &&
                             isActive && (stopAt == null || System.currentTimeMillis() < stopAt)
                     }
+                    // ONE-CONNECTION RULE (panel bug fix): if live playback is
+                    // actively using the single allowed provider connection —
+                    // e.g. the viewer changed channels mid-recording, or a
+                    // scheduled recording fired while they're watching TV —
+                    // we must NEVER secretly open a second connection. The
+                    // recording ends here instead; the file keeps whatever it
+                    // captured.
+                    if (needNetwork && Playback.player != null && Playback.liveMode) {
+                        needNetwork = false
+                    }
                     if (needNetwork) {
                         // Direct connection (scheduled recordings, or the DVR
                         // feed ended mid-recording, e.g. a channel change).
