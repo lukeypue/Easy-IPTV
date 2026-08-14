@@ -1299,16 +1299,22 @@ internal object Timeshift {
 
     // ---- writer-flow diagnostics (panel: watch the WRITER, not just the player) ----
     @Volatile var lastByteAt: Long = 0L          // when the last provider byte arrived
-    @Volatile var throughputBps: Double = 0.0    // smoothed provider throughput (bits/s)
-
-    /** Best bitrate estimate: measured throughput, clamped to sane bounds.
-     *  (PCR packet-scanning was removed in v4.14 — it taxed the Fire Stick's
-     *  CPU on every buffer and hurt the thing it was meant to help: playback.) */
-    fun estBitrateBps(): Double = throughputBps.coerceIn(1_000_000.0, 20_000_000.0)
+    @Volatile var throughputBps: Double = 0.0    // (legacy; kept for the dead-feed timing)
 
     @Volatile private var gen = 0L
     @Volatile private var currentCall: okhttp3.Call? = null
     private const val CAP_BYTES = 1_000_000_000L   // ~1 GB safety cap (a long pause's worth)
+
+    /** Find the first verified TS packet boundary in a buffer: three 0x47 sync
+     *  bytes exactly 188 apart. Returns the offset, or -1 if none found. */
+    private fun findTsSync(b: ByteArray, len: Int): Int {
+        var i = 0
+        while (i + 376 < len) {
+            if (b[i] == 0x47.toByte() && b[i + 188] == 0x47.toByte() && b[i + 376] == 0x47.toByte()) return i
+            i++
+        }
+        return -1
+    }
 
     /** MPEG-TS packets are 188 bytes, sync byte 0x47. After a reconnect we
      *  (1) align to a verified packet boundary, then (2) wait for a PAT packet
@@ -2340,7 +2346,7 @@ fun SettingsPane(prefs: SharedPreferences) {
         }
 
         Spacer(Modifier.height(24.dp))
-        Text("EZTV 4.14 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
+        Text("EZTV 4.14.1 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
     }
 }
 
