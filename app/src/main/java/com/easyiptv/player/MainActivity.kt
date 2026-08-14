@@ -1300,84 +1300,15 @@ internal object Timeshift {
     // ---- writer-flow diagnostics (panel: watch the WRITER, not just the player) ----
     @Volatile var lastByteAt: Long = 0L          // when the last provider byte arrived
     @Volatile var throughputBps: Double = 0.0    // smoothed provider throughput (bits/s)
-    @Volatile var pcrBitrateBps: Double = 0.0    // true bitrate from the TS PCR clock (bits/s)
 
-    /** Best bitrate estimate: prefer the real PCR reading, else measured
-     *  throughput, clamped to sane bounds for a low-RAM device. */
-    fun estBitrateBps(): Double {
-        val b = if (pcrBitrateBps > 100_000) pcrBitrateBps else throughputBps
-        return b.coerceIn(1_000_000.0, 20_000_000.0)
-    }
+    /** Best bitrate estimate: measured throughput, clamped to sane bounds.
+     *  (PCR packet-scanning was removed in v4.14 — it taxed the Fire Stick's
+     *  CPU on every buffer and hurt the thing it was meant to help: playback.) */
+    fun estBitrateBps(): Double = throughputBps.coerceIn(1_000_000.0, 20_000_000.0)
 
     @Volatile private var gen = 0L
     @Volatile private var currentCall: okhttp3.Call? = null
     private const val CAP_BYTES = 1_000_000_000L   // ~1 GB safety cap (a long pause's worth)
-
-    // --- PCR extraction state (true bitrate between two PCR timestamps) ---
-    private var pcrPrevValue = -1.0
-    private var pcrPrevBytePos = 0L
-    private fun resetPcr() { pcrPrevValue = -1.0; pcrPrevBytePos = 0L; pcrBitrateBps = 0.0 }
-
-    /** Scan a freshly-written buffer for PCR fields and update pcrBitrateBps.
-     *  PCR lives in the adaptation field of a TS packet; occasional samples
-     *  are enough, so this stays cheap. */
-    private fun scanPcr(buf: ByteArray, len: Int, filePosAtBufStart: Long) {
-        var i = 0
-        while (i + 188 <= len) {
-            if (buf[i] != 0x47.toByte()) { i++; continue }
-            val afc = (buf[i + 3].toInt() shr 4) and 0x3
-            if (afc == 0x2 || afc == 0x3) {
-                val afLen = buf[i + 4].toInt() and 0xFF
-                if (afLen >= 7) {
-                    val pcrFlag = (buf[i + 5].toInt() shr 4) and 0x1
-                    if (pcrFlag == 1) {
-                        val b0 = buf[i + 6].toLong() and 0xFF
-                        val b1 = buf[i + 7].toLong() and 0xFF
-                        val b2 = buf[i + 8].toLong() and 0xFF
-                        val b3 = buf[i + 9].toLong() and 0xFF
-                        val b4 = buf[i + 10].toLong() and 0xFF
-                        val base = (b0 shl 25) or (b1 shl 17) or (b2 shl 9) or (b3 shl 1) or (b4 shr 7)
-                        val pcrSeconds = base / 90_000.0
-                        val bytePos = filePosAtBufStart + i
-                        if (pcrPrevValue >= 0) {
-                            val dt = pcrSeconds - pcrPrevValue
-                            if (dt > 0.05 && dt < 10.0) {
-                                val dBytes = bytePos - pcrPrevBytePos
-                                if (dBytes > 0) {
-                                    val inst = (dBytes * 8.0) / dt
-                                    pcrBitrateBps = if (pcrBitrateBps <= 0) inst
-                                    else pcrBitrateBps * 0.7 + inst * 0.3
-                                }
-                                pcrPrevValue = pcrSeconds
-                                pcrPrevBytePos = bytePos
-                            } else {
-                                pcrPrevValue = pcrSeconds   // resync past a discontinuity
-                                pcrPrevBytePos = bytePos
-                            }
-                        } else {
-                            pcrPrevValue = pcrSeconds
-                            pcrPrevBytePos = bytePos
-                        }
-                    }
-                }
-            }
-            i += 188
-        }
-    }
-
-    /** MPEG-TS packets are exactly 188 bytes starting with 0x47. Reconnects
-     *  used to splice mid-packet, leaving ragged seams that stalled the
-     *  decoder ("digitizing"). Now: every connection discards bytes until a
-     *  verified packet boundary (three aligned sync bytes), and every
-     *  disconnect trims the file back to a whole-packet edge. Clean seams. */
-    private fun findTsSync(b: ByteArray, len: Int): Int {
-        var i = 0
-        while (i + 376 < len) {
-            if (b[i] == 0x47.toByte() && b[i + 188] == 0x47.toByte() && b[i + 376] == 0x47.toByte()) return i
-            i++
-        }
-        return -1
-    }
 
     /** MPEG-TS packets are 188 bytes, sync byte 0x47. After a reconnect we
      *  (1) align to a verified packet boundary, then (2) wait for a PAT packet
@@ -1398,7 +1329,6 @@ internal object Timeshift {
         active = true
         lastByteAt = System.currentTimeMillis()
         throughputBps = 0.0
-        resetPcr()
         val myGen = ++gen
         Thread {
             while (active && gen == myGen && bytesWritten < CAP_BYTES) {
@@ -1461,9 +1391,7 @@ internal object Timeshift {
                                             val from = if (patAt >= 0) patAt else 0
                                             out.write(pb, from, pb.size - from)
                                             bytesWritten += (pb.size - from)
-                                            val nowT = System.currentTimeMillis()
-                                            throughputBps = throughputBps
-                                            lastByteAt = nowT
+                                            lastByteAt = System.currentTimeMillis()
                                             sawPat = true
                                             pend = java.io.ByteArrayOutputStream()
                                         } else if (pb.size > 400_000) {
@@ -1476,16 +1404,10 @@ internal object Timeshift {
                                         continue
                                     }
                                     out.write(buf, 0, n)
-                                    val posBefore = bytesWritten
                                     bytesWritten += n
-                                    // --- writer-flow diagnostics ---
-                                    val nowT = System.currentTimeMillis()
-                                    val dtMs = (nowT - lastByteAt).coerceAtLeast(1)
-                                    val instBps = (n * 8.0 * 1000.0) / dtMs
-                                    throughputBps = if (throughputBps <= 0) instBps
-                                    else throughputBps * 0.9 + instBps * 0.1
-                                    lastByteAt = nowT
-                                    scanPcr(buf, n, posBefore)
+                                    // Lightweight flow tracking: just note when
+                                    // bytes last arrived (for the dead-feed check).
+                                    lastByteAt = System.currentTimeMillis()
                                     // Storage floor: never squeeze the device.
                                     sinceCheck += n
                                     if (sinceCheck > 32_000_000) {
@@ -1703,6 +1625,11 @@ object Playback {
                 (lockMs * 2).coerceAtLeast(6_000)          // after a stall, come back with double protection
             )
             .setBackBuffer(10_000, false)
+            // Cap RAM buffering on the low-memory Fire Stick — since live plays
+            // from the disk file anyway, a big in-RAM buffer just causes memory
+            // pressure that hurts decoding. Keeps playback smooth.
+            .setTargetBufferBytes(24 * 1024 * 1024)
+            .setPrioritizeTimeOverSizeThresholds(false)
             .build()
         val extractors = androidx.media3.extractor.DefaultExtractorsFactory()
             .setConstantBitrateSeekingEnabled(true)
@@ -2285,6 +2212,13 @@ fun SettingsPane(prefs: SharedPreferences) {
         Text("Storage", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
         val drivePresent = remember { Storage.drivePresent(ctx) }
+        val driveRaw = remember {
+            // Detected in a slot but failed the write test = portable/unwritable.
+            try {
+                val dirs = ctx.getExternalFilesDirs(null)
+                dirs.size >= 2 && dirs[1] != null && Storage.drive(ctx) == null
+            } catch (e: Exception) { false }
+        }
         var extOn by remember { mutableStateOf(Storage.isEnabled(prefs)) }
         val internalFree = remember { Storage.internalFreeBytes(ctx) }
         val driveFree = remember { Storage.driveFreeBytes(ctx) }
@@ -2296,10 +2230,14 @@ fun SettingsPane(prefs: SharedPreferences) {
         )
         Spacer(Modifier.height(4.dp))
         Text(
-            if (drivePresent)
-                "Save downloads, recordings, and the live pause buffer to your plugged-in drive so the Fire Stick's small storage never fills up."
-            else
-                "Plug a USB drive or SSD into your Fire Stick (via an OTG adapter) to store lots of downloads and recordings. Format it exFAT for recordings over 4 GB.",
+            when {
+                drivePresent ->
+                    "Save downloads, recordings, and the live pause buffer to your plugged-in drive so the Fire Stick's small storage never fills up."
+                driveRaw ->
+                    "A drive is plugged in, but the Fire Stick formatted it as \"portable\" storage, which apps can't reliably write to. Re-format the drive as \"internal/adoptable\" storage in Fire TV Settings › My Fire TV › USB Drive, OR format it exFAT on a computer, then plug it back in."
+                else ->
+                    "Plug a USB drive or SSD into your Fire Stick (via an OTG adapter) to store lots of downloads and recordings. Format it exFAT for recordings over 4 GB."
+            },
             fontSize = 12.sp, color = Muted
         )
         Spacer(Modifier.height(10.dp))
@@ -2402,7 +2340,7 @@ fun SettingsPane(prefs: SharedPreferences) {
         }
 
         Spacer(Modifier.height(24.dp))
-        Text("EZTV 4.13.2 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
+        Text("EZTV 4.14 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
     }
 }
 
@@ -3487,10 +3425,14 @@ fun PlayerScreen(
         PlayerKeys.handler = { key ->
             when (key) {
                 android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
-                    exo.playWhenReady = !exo.playWhenReady; true
+                    if (Playback.simpleRaw && current.isLive) true   // no pause in Simple Mode
+                    else { exo.playWhenReady = !exo.playWhenReady; true }
                 }
                 android.view.KeyEvent.KEYCODE_MEDIA_PLAY -> { exo.playWhenReady = true; true }
-                android.view.KeyEvent.KEYCODE_MEDIA_PAUSE -> { exo.playWhenReady = false; true }
+                android.view.KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                    if (Playback.simpleRaw && current.isLive) true
+                    else { exo.playWhenReady = false; true }
+                }
                 android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { exo.seekForward(); true }
                 android.view.KeyEvent.KEYCODE_MEDIA_REWIND -> { exo.seekBack(); true }
                 android.view.KeyEvent.KEYCODE_DPAD_CENTER,
@@ -3498,6 +3440,8 @@ fun PlayerScreen(
                     if (current.isLive && !overlayVisible) {
                         miniGuideOpen = !miniGuideOpen
                         true
+                    } else if (Playback.simpleRaw && current.isLive) {
+                        true   // no transport controls in Simple Mode
                     } else {
                         pvRef?.showController(); true
                     }
@@ -3975,12 +3919,10 @@ private fun MiniGuide(
     val nextShow = nowShow?.let { ns -> nowNext.getOrNull(nowNext.indexOf(ns) + 1) }
         ?: nowNext.firstOrNull { it.startMs > nowMs }
 
-    // Surf strip: recent channels (not current) + the next few in the lineup.
+    // Surf strip: the last channels you actually watched (TiviMate style), so
+    // you can hop back across categories without opening the full guide.
     val entries = remember(queue, currentIdx, recentIdx) {
-        val out = LinkedHashSet<Int>()
-        recentIdx.filter { it != currentIdx && it in queue.indices }.take(5).forEach { out.add(it) }
-        for (k in 1..4) out.add((currentIdx + k) % queue.size.coerceAtLeast(1))
-        out.filter { it in queue.indices && it != currentIdx }
+        recentIdx.filter { it != currentIdx && it in queue.indices }.take(7)
     }
     val firstFocus = remember { FocusRequester() }
     LaunchedEffect(Unit) { runCatching { firstFocus.requestFocus() } }
@@ -4038,7 +3980,7 @@ private fun MiniGuide(
         // --- Surf strip (only if there are other channels) ---
         if (entries.isNotEmpty()) {
             Spacer(Modifier.height(10.dp))
-            Text("Recent  \u2022  Up next \u2192", color = Muted, fontSize = 10.sp)
+            Text("Recent channels \u2014 press OK to hop back", color = Muted, fontSize = 10.sp)
             Spacer(Modifier.height(4.dp))
             LazyRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),

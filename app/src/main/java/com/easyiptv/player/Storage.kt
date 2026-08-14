@@ -29,17 +29,21 @@ object Storage {
         prefs.edit().putBoolean(PREF_ENABLED, on).apply()
     }
 
-    /** The removable drive's app folder if one is plugged in, else null.
-     *  Slot 0 is internal; any later slot that exists and is removable is the drive. */
+    /** The removable drive's app folder if one is plugged in AND we can
+     *  actually write to it, else null. Portable-formatted drives sometimes
+     *  mount read-only to apps; we test with a real file so we never route
+     *  downloads/recordings to a path that will silently fail. */
     fun drive(context: Context): File? {
         return try {
             val dirs = context.getExternalFilesDirs(null)
             if (dirs.size < 2) return null
             for (i in 1 until dirs.size) {
                 val d = dirs[i] ?: continue
-                // Must exist / be creatable and be reported as removable.
                 if (!d.exists()) d.mkdirs()
-                if (d.exists() && android.os.Environment.isExternalStorageRemovable(d)) {
+                if (d.exists() &&
+                    android.os.Environment.getExternalStorageState(d) == android.os.Environment.MEDIA_MOUNTED &&
+                    isWritable(d)
+                ) {
                     return d
                 }
             }
@@ -47,6 +51,17 @@ object Storage {
         } catch (e: Exception) {
             null
         }
+    }
+
+    /** Actually prove we can create and delete a file here. */
+    private fun isWritable(dir: File): Boolean = try {
+        val probe = File(dir, ".eztv_write_test")
+        probe.writeText("ok")
+        val ok = probe.exists() && probe.length() > 0
+        probe.delete()
+        ok
+    } catch (e: Exception) {
+        false
     }
 
     /** Is a usable removable drive present right now? */
