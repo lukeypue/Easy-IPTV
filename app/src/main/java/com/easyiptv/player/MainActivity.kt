@@ -423,6 +423,7 @@ fun App() {
     LaunchedEffect(Unit) {
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             DownloadStore.migrateLegacyRetention(prefs)
+            DownloadStore.migrateLegacyEngine(context, prefs)
             DownloadStore.cleanup(context, prefs)
             ScheduleStore.cleanup(prefs)
         }
@@ -1713,8 +1714,6 @@ private object TimeshiftServer {
     @Synchronized
     fun ensureStarted() {
         if (server != null) return
-        // Android forbids socket work on the main thread — bind on a worker and
-        // wait briefly for the port (binding to localhost is instant).
         val latch = java.util.concurrent.CountDownLatch(1)
         Thread {
             try {
@@ -1723,50 +1722,63 @@ private object TimeshiftServer {
                 port = ss.localPort
                 latch.countDown()
                 while (true) {
-                    val sock = try { ss.accept() } catch (e: Exception) { break }
+                    val sock = try { ss.accept() } catch (_: Exception) { break }
                     Thread { handle(sock) }.apply { isDaemon = true }.start()
                 }
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 latch.countDown()
             }
         }.apply { isDaemon = true; name = "tshift-server" }.start()
         runCatching { latch.await(2, java.util.concurrent.TimeUnit.SECONDS) }
     }
 
+    /**
+     * v4.20: the LIVE tail deliberately has UNKNOWN final length again.
+     *
+     * v4.19 advertised the future 1 GB / 3.5 GB DVR cap as Content-Length so
+     * Media3 would expose a normal seek bar. For MPEG-TS, that can make the
+     * extractor inspect near the advertised end — bytes that may not exist for
+     * hours — while this server patiently tail-follows. Real Fire TV testing
+     * showed exactly that symptom: 0% / black picture for minutes while the
+     * writer kept producing a perfectly playable recording.
+     *
+     * Rewind/FF is now EZTV-controlled. A query-string offset means "start this
+     * new unknown-length tail at a byte that ALREADY EXISTS"; it is not an HTTP
+     * Range and we never claim unwritten bytes exist.
+     */
     private fun handle(sock: java.net.Socket) {
         try {
             sock.tcpNoDelay = true
             val reader = java.io.BufferedReader(java.io.InputStreamReader(sock.getInputStream()))
             val requestLine = reader.readLine() ?: return
-            var rangeStart = 0L
-            var hadRange = false
             while (true) {
                 val line = reader.readLine() ?: break
                 if (line.isEmpty()) break
-                if (line.startsWith("Range:", ignoreCase = true)) {
-                    hadRange = true
-                    val raw = line.substringAfter("=").substringBefore("-").trim()
-                    rangeStart = raw.toLongOrNull()?.coerceAtLeast(0L) ?: 0L
-                }
+                // Intentionally ignore Range headers. The growing live resource
+                // has no truthful fixed final length, so app-driven ?offset= is
+                // the only DVR seek mechanism.
             }
 
-            val virtualLength = Timeshift.capBytes.coerceAtLeast(1L)
-            if (rangeStart >= virtualLength) rangeStart = (virtualLength - 1).coerceAtLeast(0L)
-            val partial = hadRange
+            val target = runCatching {
+                val path = requestLine.substringAfter(' ').substringBefore(' ')
+                val query = path.substringAfter('?', "")
+                query.split('&')
+                    .firstOrNull { it.startsWith("offset=") }
+                    ?.substringAfter('=')
+                    ?.toLongOrNull()
+                    ?: 0L
+            }.getOrDefault(0L)
+            val writtenNow = minOf(Timeshift.bytesWritten, Timeshift.file?.length() ?: 0L)
+            var startPos = target.coerceIn(0L, writtenNow.coerceAtLeast(0L))
+            // The writer publishes only complete 188-byte TS packets. Keep every
+            // app-driven seek on the same boundary.
+            startPos = (startPos / 188L) * 188L
+
             val out = java.io.BufferedOutputStream(sock.getOutputStream())
             val headers = buildString {
-                if (partial) append("HTTP/1.1 206 Partial Content\r\n")
-                else append("HTTP/1.1 200 OK\r\n")
+                append("HTTP/1.1 200 OK\r\n")
                 append("Content-Type: video/mp2t\r\n")
-                append("Accept-Ranges: bytes\r\n")
                 append("Cache-Control: no-store\r\n")
-                // A growing stream normally has unknown length, which makes a
-                // Progressive TS source unseekable. EZTV's DVR has a hard cap,
-                // so expose that cap as a safe VIRTUAL length. The server still
-                // tail-follows unwritten bytes. Media3 can now issue Range seeks
-                // into the already-recorded part without changing the DVR writer.
-                append("Content-Length: ${virtualLength - rangeStart}\r\n")
-                if (partial) append("Content-Range: bytes $rangeStart-${virtualLength - 1}/$virtualLength\r\n")
                 append("Connection: close\r\n\r\n")
             }
             out.write(headers.toByteArray())
@@ -1774,7 +1786,7 @@ private object TimeshiftServer {
 
             val myFile = Timeshift.file ?: return
             java.io.RandomAccessFile(myFile, "r").use { raf ->
-                var pos = rangeStart
+                var pos = startPos
                 val buf = ByteArray(64 * 1024)
                 var idleTicks = 0
                 while (true) {
@@ -1802,9 +1814,9 @@ private object TimeshiftServer {
                             val gone = try {
                                 sock.soTimeout = 1
                                 sock.getInputStream().read() == -1
-                            } catch (t: java.net.SocketTimeoutException) {
+                            } catch (_: java.net.SocketTimeoutException) {
                                 false
-                            } catch (e: Exception) {
+                            } catch (_: Exception) {
                                 true
                             }
                             if (gone) break
@@ -1812,7 +1824,7 @@ private object TimeshiftServer {
                     }
                 }
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             // Client hung up (seek/channel change/app exit) — normal.
         } finally {
             runCatching { sock.close() }
@@ -2225,6 +2237,79 @@ object Playback {
     // capture the value and refuse to run if it has moved on (stale).
     @Volatile private var playbackGen = 0L
 
+    // v4.20 DVR seeking deliberately does NOT ask Media3 to treat the growing
+    // TS file like a finished seekable file. We reopen the truthful unknown-
+    // length localhost tail at a byte offset that already exists.
+    @Volatile private var dvrSourceOffsetBytes = 0L
+    @Volatile private var dvrSourceBaseMs = 0L
+
+    private fun dvrBytesPerMs(): Double {
+        val ms = Timeshift.windowMs()
+        val bytes = Timeshift.bytesWritten
+        return if (ms >= 2_000L && bytes >= 188L * 20L) bytes.toDouble() / ms.toDouble() else 0.0
+    }
+
+    /** Approximate playhead within EZTV's own temporary DVR window. */
+    fun dvrAbsolutePositionMs(): Long {
+        if (!liveMode || simpleRaw || directLive) return player?.currentPosition?.coerceAtLeast(0L) ?: 0L
+        val window = Timeshift.windowMs()
+        val relativeMs = player?.currentPosition?.coerceAtLeast(0L) ?: 0L
+        return (dvrSourceBaseMs + relativeMs).coerceIn(0L, window.coerceAtLeast(0L))
+    }
+
+    fun canSeekDvr(): Boolean =
+        liveMode && !simpleRaw && !directLive && Timeshift.active &&
+            Timeshift.windowMs() >= 6_000L && dvrBytesPerMs() > 0.0
+
+    /**
+     * Cable-box 30-second DVR jump. The offset is bitrate-estimated and aligned
+     * to a 188-byte TS boundary. The writer never restarts and the provider
+     * connection never changes; only ExoPlayer reconnects to localhost.
+     */
+    fun seekDvrBy(deltaMs: Long): Boolean {
+        if (!canSeekDvr()) return false
+        val p = player ?: return false
+        val rate = dvrBytesPerMs()
+        if (rate <= 0.0) return false
+        val window = Timeshift.windowMs()
+        val current = dvrAbsolutePositionMs()
+        // Keep about 1.5 s of already-written material ahead of the new read
+        // position so the extractor can relock instead of landing on the byte
+        // that is being appended this instant.
+        val liveSafe = (window - 1_500L).coerceAtLeast(0L)
+        val targetMs = (current + deltaMs).coerceIn(0L, liveSafe)
+        var offset = (targetMs * rate).toLong().coerceAtLeast(0L)
+        val maxWritten = Timeshift.bytesWritten.coerceAtLeast(0L)
+        offset = offset.coerceAtMost(maxWritten)
+        offset = (offset / 188L) * 188L
+        reopenDvrAtOffset(offset, targetMs)
+        return true
+    }
+
+    private fun reopenDvrAtOffset(offset: Long, targetMs: Long) {
+        val p = player ?: return
+        val ch = queue.getOrNull(currentIdxC.intValue) ?: return
+        if (!ch.isLive || simpleRaw || directLive || !Timeshift.active) return
+        playbackGen++
+        retriesP = 0
+        streamDeadC.value = false
+        everReadyC.value = false
+        dvrSourceOffsetBytes = offset.coerceAtLeast(0L)
+        dvrSourceBaseMs = targetMs.coerceAtLeast(0L)
+        val keepPlaying = p.playWhenReady
+        val uri = Uri.parse(
+            "http://127.0.0.1:${TimeshiftServer.port}/live/${System.nanoTime()}?offset=$dvrSourceOffsetBytes"
+        )
+        p.setMediaItem(
+            MediaItem.Builder()
+                .setUri(uri)
+                .setMediaMetadata(MediaMetadata.Builder().setTitle(ch.name).build())
+                .build()
+        )
+        p.prepare()
+        p.playWhenReady = keepPlaying
+    }
+
     internal fun noteLiveReady() {
         liveFails = 0
         queue.getOrNull(currentIdxC.intValue)?.let { RecentChannels.push(it, prefsRef) }
@@ -2294,6 +2379,8 @@ object Playback {
         lastSpeedChangeAt = 0L
         p.setPlaybackSpeed(1.0f)
         val uri: Uri
+        dvrSourceOffsetBytes = 0L
+        dvrSourceBaseMs = 0L
         if (directLive || simpleRaw) {
             // Direct from the provider: the raw path. Simple Mode lives here on
             // purpose; directLive lands here as the automatic fallback.
@@ -2472,6 +2559,8 @@ object Playback {
         liveMode = false
         directLive = false
         simpleRaw = false
+        dvrSourceOffsetBytes = 0L
+        dvrSourceBaseMs = 0L
         backgroundSuspended = false
         liveFails = 0
         playStateC.intValue = Player.STATE_IDLE
@@ -3297,33 +3386,34 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
 
     LaunchedEffect(Unit) {
         while (true) {
+            // Refresh even on the exact tick a job moves RUNNING → SUCCESS/FAILED;
+            // otherwise the last in-flight row can sit visually stuck until the
+            // user leaves and re-enters Downloads.
+            items = DownloadStore.load(prefs)
             val inFlight = items.filter { d -> DownloadStore.isInFlight(context, d.id) }
-            if (inFlight.isNotEmpty()) {
-                val m = HashMap<Long, Pair<Long, Long>>()
-                val eta = HashMap<Long, Long>()
-                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    inFlight.forEach { d ->
-                        DownloadStore.progress(context, d.id)?.let { m[d.id] = it }
-                    }
+            val m = HashMap<Long, Pair<Long, Long>>()
+            val eta = HashMap<Long, Long>()
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                inFlight.forEach { d ->
+                    DownloadStore.progress(context, d.id)?.let { m[d.id] = it }
                 }
-                // Compute smoothed download speed and seconds remaining.
-                m.forEach { (id, p) ->
-                    val done = p.first; val total = p.second
-                    val prev = lastBytes[id]
-                    if (prev != null && done > prev) {
-                        val inst = (done - prev).toDouble()   // bytes per ~1s poll
-                        val smooth = lastRate[id]?.let { it * 0.6 + inst * 0.4 } ?: inst
-                        lastRate[id] = smooth
-                        if (total > 0 && smooth > 1) {
-                            eta[id] = ((total - done) / smooth).toLong().coerceAtLeast(0)
-                        }
-                    }
-                    lastBytes[id] = done
-                }
-                progressMap = m
-                etaMap = eta
-                items = DownloadStore.load(prefs)   // pick up ones that just finished
             }
+            // Compute smoothed download speed and seconds remaining.
+            m.forEach { (id, p) ->
+                val done = p.first; val total = p.second
+                val prev = lastBytes[id]
+                if (prev != null && done > prev) {
+                    val inst = (done - prev).toDouble()   // bytes per ~1s poll
+                    val smooth = lastRate[id]?.let { it * 0.6 + inst * 0.4 } ?: inst
+                    lastRate[id] = smooth
+                    if (total > 0 && smooth > 1) {
+                        eta[id] = ((total - done) / smooth).toLong().coerceAtLeast(0)
+                    }
+                }
+                lastBytes[id] = done
+            }
+            progressMap = m
+            etaMap = eta
             kotlinx.coroutines.delay(1_000)
         }
     }
@@ -3400,8 +3490,10 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
                                     color = Muted, fontSize = 12.sp
                                 )
                             } else {
-                                val done = prog?.first ?: 0L
-                                val total = prog?.second ?: -1L
+                                val state = DownloadStore.state(context, d.id)
+                                val err = DownloadStore.error(context, d.id)
+                                val done = prog?.first ?: DownloadStore.progress(context, d.id)?.first ?: 0L
+                                val total = prog?.second ?: DownloadStore.progress(context, d.id)?.second ?: -1L
                                 val pct = if (total > 0) ((done * 100) / total).toInt().coerceIn(0, 100) else null
                                 val eta = etaMap[d.id]
                                 val etaText = eta?.let { s ->
@@ -3413,24 +3505,30 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
                                 } ?: ""
                                 Text(
                                     when {
+                                        state == DownloadStore.STATE_FAILED -> "Download failed${if (err.isNotBlank()) ": $err" else ""}"
                                         pct != null -> "Downloading… $pct%  (${done / 1_048_576} MB of ${total / 1_048_576} MB)$etaText"
                                         done > 0 -> "Downloading… ${done / 1_048_576} MB so far"
                                         else -> "Starting download…"
                                     },
-                                    color = Muted, fontSize = 12.sp
+                                    color = if (state == DownloadStore.STATE_FAILED) Live else Muted,
+                                    fontSize = 12.sp,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                                 Spacer(Modifier.height(4.dp))
-                                if (pct != null) {
-                                    LinearProgressIndicator(
-                                        progress = { pct / 100f },
-                                        color = Accent, trackColor = Surface2,
-                                        modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp))
-                                    )
-                                } else {
-                                    LinearProgressIndicator(
-                                        color = Accent, trackColor = Surface2,
-                                        modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp))
-                                    )
+                                if (state != DownloadStore.STATE_FAILED) {
+                                    if (pct != null) {
+                                        LinearProgressIndicator(
+                                            progress = { pct / 100f },
+                                            color = Accent, trackColor = Surface2,
+                                            modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp))
+                                        )
+                                    } else {
+                                        LinearProgressIndicator(
+                                            color = Accent, trackColor = Surface2,
+                                            modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp))
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -4107,18 +4205,13 @@ fun PlayerScreen(
                 }
                 android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
                     if (current.isLive) {
-                        if (!Playback.simpleRaw && !Playback.directLive && exo.isCurrentMediaItemSeekable) {
-                            val edge = Timeshift.windowMs().coerceAtLeast(exo.currentPosition)
-                            exo.seekTo((exo.currentPosition + 30_000L).coerceAtMost((edge - 500L).coerceAtLeast(0L)))
-                        }
+                        if (!Playback.simpleRaw && !Playback.directLive) Playback.seekDvrBy(30_000L)
                     } else exo.seekForward()
                     true
                 }
                 android.view.KeyEvent.KEYCODE_MEDIA_REWIND -> {
                     if (current.isLive) {
-                        if (!Playback.simpleRaw && !Playback.directLive && exo.isCurrentMediaItemSeekable) {
-                            exo.seekTo((exo.currentPosition - 30_000L).coerceAtLeast(0L))
-                        }
+                        if (!Playback.simpleRaw && !Playback.directLive) Playback.seekDvrBy(-30_000L)
                     } else exo.seekBack()
                     true
                 }
@@ -4684,15 +4777,15 @@ private fun MiniGuide(
     var dvrBytes by remember { mutableLongStateOf(0L) }
     var displayHz by remember { mutableFloatStateOf(0f) }
     var isPlaying by remember { mutableStateOf(player?.isPlaying == true) }
-    var isSeekable by remember { mutableStateOf(player?.isCurrentMediaItemSeekable == true) }
+    var isSeekable by remember { mutableStateOf(Playback.canSeekDvr()) }
     LaunchedEffect(Unit) {
         while (true) {
             playerBufferMs = player?.totalBufferedDuration ?: 0L
-            playerPosMs = player?.currentPosition?.coerceAtLeast(0L) ?: 0L
+            playerPosMs = Playback.dvrAbsolutePositionMs()
             dvrWindowMs = Timeshift.windowMs()
             dvrBytes = Timeshift.bytesWritten
             isPlaying = player?.isPlaying == true
-            isSeekable = player?.isCurrentMediaItemSeekable == true
+            isSeekable = Playback.canSeekDvr()
             displayHz = runCatching {
                 (context as? android.app.Activity)?.windowManager?.defaultDisplay?.mode?.refreshRate ?: 0f
             }.getOrDefault(0f)
@@ -4722,21 +4815,13 @@ private fun MiniGuide(
     fun touch() { lastTouch = System.currentTimeMillis() }
     fun seekDvr(deltaMs: Long) {
         touch()
-        val p = player ?: return
         if (Playback.simpleRaw || Playback.directLive || current?.isLive != true) {
             toast(context, "Rewind needs DVR Live.")
             return
         }
-        if (!isSeekable) {
-            toast(context, "DVR seek is still initializing — give it a few seconds.")
-            return
+        if (!Playback.seekDvrBy(deltaMs)) {
+            toast(context, "DVR is still building its first few seconds — try again shortly.")
         }
-        val liveEdge = dvrWindowMs.coerceAtLeast(p.currentPosition)
-        val target = (p.currentPosition + deltaMs).coerceIn(0L, (liveEdge - 500L).coerceAtLeast(0L))
-        runCatching {
-            p.seekTo(target)
-            p.playWhenReady = true
-        }.onFailure { toast(context, "DVR seek is not ready yet — wait a few seconds and try again.") }
     }
 
     val lockMs = prefs.getInt("live_start_ms", 4_000).coerceIn(2_000, 12_000)
@@ -4838,7 +4923,7 @@ private fun MiniGuide(
                     append(" watched  •  ")
                     append(shortTime(behindMs))
                     append(" behind LIVE")
-                    if (!isSeekable) append("  •  seek initializing")
+                    if (!isSeekable) append("  •  building rewind buffer")
                 },
                 color = Muted, fontSize = 10.sp
             )

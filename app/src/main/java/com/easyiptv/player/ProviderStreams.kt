@@ -25,7 +25,7 @@ object ProviderStreams {
     /** A tee recording uses the live DVR file and costs no extra provider slot. */
     fun recordingSlots(): Int = if (Recorder.usesProviderConnection) 1 else 0
 
-    /** DownloadManager owns one remote HTTP stream while a provider download is active. */
+    /** EZTV's one app-owned VOD downloader uses one provider HTTP stream while active. */
     fun downloadSlots(context: Context, prefs: SharedPreferences): Int =
         if (DownloadStore.hasInFlight(context, prefs)) 1 else 0
 
