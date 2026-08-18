@@ -38,15 +38,21 @@ object Storage {
         ok
     } catch (_: Exception) { false }
 
-    private fun appSpecificRemovable(context: Context): File? = try {
-        val dirs = context.getExternalFilesDirs(null)
-        for (i in 1 until dirs.size) {
-            val d = dirs[i] ?: continue
-            val removable = runCatching { Environment.isExternalStorageRemovable(d) }.getOrDefault(true)
-            if (removable && Environment.getExternalStorageState(d) == Environment.MEDIA_MOUNTED && isWritable(d)) return d
+    private fun appSpecificRemovable(context: Context): File? {
+        return try {
+            val dirs = context.getExternalFilesDirs(null)
+            for (i in 1 until dirs.size) {
+                val d = dirs[i] ?: continue
+                val removable = runCatching { Environment.isExternalStorageRemovable(d) }.getOrDefault(true)
+                if (removable && Environment.getExternalStorageState(d) == Environment.MEDIA_MOUNTED && isWritable(d)) {
+                    return d
+                }
+            }
+            null
+        } catch (_: Exception) {
+            null
         }
-        null
-    } catch (_: Exception) { null }
+    }
 
     private fun hasLegacyWritePermission(context: Context): Boolean =
         Build.VERSION.SDK_INT <= 28 &&
