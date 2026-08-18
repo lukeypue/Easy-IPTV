@@ -40,6 +40,12 @@ object Recorder {
     val activeName = androidx.compose.runtime.mutableStateOf<String?>(null)
     /** Last user-facing recording result/status. Compose-observable. */
     val lastStatus = androidx.compose.runtime.mutableStateOf<String?>(null)
+    /** True only when the recorder opened its OWN provider HTTP stream. A
+     * watched-channel tee recording is false because it shares Live TV's DVR. */
+    @Volatile var usesProviderConnection: Boolean = false
+        internal set
+    @Volatile var activeUrl: String? = null
+        internal set
 
     fun recordingsDir(context: Context): File {
         val prefs = context.getSharedPreferences("easyiptv", Context.MODE_PRIVATE)
@@ -147,13 +153,27 @@ class RecordingService : Service() {
                     return START_NOT_STICKY
                 }
                 val url = intent.getStringExtra("url") ?: return START_NOT_STICKY.also { stopSelf() }
-                // Scheduled/manual recording is time-sensitive and must own the
-                // provider's single connection. Stop any background VOD download
-                // before the recording starts instead of letting the provider kill one.
-                DownloadStore.cancelInFlight(this, getSharedPreferences("easyiptv", Context.MODE_PRIVATE))
+                val prefs = getSharedPreferences("easyiptv", Context.MODE_PRIVATE)
                 val name = intent.getStringExtra("name") ?: "channel"
                 val stopAt = if (intent.hasExtra("stopAt")) intent.getLongExtra("stopAt", 0L) else null
-                val tee = intent.getBooleanExtra("tee", false)
+                // If this is the exact channel already playing through DVR Live,
+                // share that one stream even for scheduled/manual calls that did
+                // not explicitly know to request a tee.
+                val sameWatchedChannel = Playback.currentProviderUrl()?.let { it == url } == true
+                val tee = intent.getBooleanExtra("tee", false) ||
+                    (sameWatchedChannel && Playback.canTeeRecording())
+
+                // A tee costs zero extra provider streams. A direct recording
+                // costs one. Only cancel a download when the user's configured
+                // 1/2/3-stream budget would otherwise be exceeded.
+                if (!tee) {
+                    val max = ProviderStreams.max(prefs)
+                    val playback = ProviderStreams.playbackSlots()
+                    val download = ProviderStreams.downloadSlots(this, prefs)
+                    if (playback + download + 1 > max && download > 0) {
+                        DownloadStore.cancelInFlight(this, prefs)
+                    }
+                }
                 startForeground(NOTIF_ID, notification(name))
                 beginRecording(url, name, stopAt, tee)
             }
@@ -213,6 +233,8 @@ class RecordingService : Service() {
     private fun beginRecording(url: String, name: String, stopAt: Long?, tee: Boolean) {
         job?.cancel()
         Recorder.activeName.value = name
+        Recorder.activeUrl = url
+        Recorder.usesProviderConnection = false
         Recorder.lastStatus.value = "Recording: $name"
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "EasyIPTV:record").apply {
@@ -231,26 +253,46 @@ class RecordingService : Service() {
                 FileOutputStream(f).use { out ->
                     var needNetwork = !tee
                     if (tee) {
-                        // ONE-CONNECTION recording: copy from the live DVR file.
-                        needNetwork = teeFromTimeshift(out, stopAt) { isActive } &&
-                            isActive && (stopAt == null || System.currentTimeMillis() < stopAt)
-                    }
-                    // ONE-CONNECTION RULE: a scheduled recording that fires while
-                    // live TV is playing must never open connection #2. Give the
-                    // recording the one connection instead: stop playback first,
-                    // then open the scheduled channel. Manual watched-channel
-                    // recordings normally tee the DVR and never reach this block.
-                    if (needNetwork && Playback.player != null && Playback.liveMode) {
-                        val latch = java.util.concurrent.CountDownLatch(1)
-                        android.os.Handler(android.os.Looper.getMainLooper()).post {
-                            Playback.releaseAll()
-                            latch.countDown()
+                        // SAME-CHANNEL RECORDING: copy from the live DVR file,
+                        // which costs no second provider connection. If the DVR
+                        // file is briefly recreated (retune/recovery), retry the
+                        // attachment a few times before giving up.
+                        var tries = 0
+                        while (isActive && (stopAt == null || System.currentTimeMillis() < stopAt)) {
+                            val ended = teeFromTimeshift(out, stopAt) { isActive }
+                            if (!ended || !isActive || (stopAt != null && System.currentTimeMillis() >= stopAt)) {
+                                needNetwork = false
+                                break
+                            }
+                            val stillSame = Playback.currentProviderUrl() == url
+                            if (stillSame && Playback.canTeeRecording() && tries++ < 4) {
+                                Thread.sleep(150)
+                                continue
+                            }
+                            needNetwork = true
+                            break
                         }
-                        runCatching { latch.await(1200, java.util.concurrent.TimeUnit.MILLISECONDS) }
                     }
                     if (needNetwork) {
-                        // Direct connection (scheduled recordings, or the DVR
-                        // feed ended mid-recording, e.g. a channel change).
+                        val prefs = getSharedPreferences("easyiptv", Context.MODE_PRIVATE)
+                        // Direct recording costs a provider slot. Respect the
+                        // customer setting: with 1 stream, recording takes over;
+                        // with 2/3 streams, live playback may continue.
+                        if (ProviderStreams.playbackSlots() + ProviderStreams.downloadSlots(this@RecordingService, prefs) + 1 > ProviderStreams.max(prefs)) {
+                            // First sacrifice a background download, not live TV.
+                            DownloadStore.cancelInFlight(this@RecordingService, prefs)
+                        }
+                        if (ProviderStreams.playbackSlots() + 1 > ProviderStreams.max(prefs)) {
+                            val latch = java.util.concurrent.CountDownLatch(1)
+                            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                Playback.releaseAll()
+                                latch.countDown()
+                            }
+                            runCatching { latch.await(1200, java.util.concurrent.TimeUnit.MILLISECONDS) }
+                        }
+                        Recorder.usesProviderConnection = true
+                        // Direct connection (different-channel/scheduled recording,
+                        // or a tee that genuinely lost its source).
                         val req = Request.Builder().url(url).header("User-Agent", Net.UA).build()
                         Net.streamClient.newCall(req).execute().use { resp ->
                             if (!resp.isSuccessful) throw java.io.IOException("HTTP ${resp.code}")
@@ -306,6 +348,8 @@ class RecordingService : Service() {
                     }
                 }
                 Recorder.activeName.value = null
+                Recorder.activeUrl = null
+                Recorder.usesProviderConnection = false
                 stopSelf()
             }
         }
@@ -315,6 +359,8 @@ class RecordingService : Service() {
         job?.cancel()
         job = null
         Recorder.activeName.value = null
+        Recorder.activeUrl = null
+        Recorder.usesProviderConnection = false
         runCatching { wakeLock?.let { if (it.isHeld) it.release() } }
         super.onDestroy()
     }

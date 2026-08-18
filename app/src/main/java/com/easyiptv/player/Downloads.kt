@@ -206,10 +206,9 @@ object DownloadStore {
     /** Starts a system download. Returns a message to show the user. */
     fun start(context: Context, prefs: SharedPreferences, title: String, url: String): String {
         return try {
-            // This provider is known to enforce one stream connection. Never
-            // start a background VOD download beside live TV or a recording.
-            if (Recorder.activeName.value != null)
-                return "Stop the recording before starting a download — your IPTV service allows one connection."
+            // One download at a time keeps Fire TV RAM/disk work predictable.
+            // Whether it may run BESIDE live TV/recording depends on the user's
+            // IPTV plan (Settings → Provider streams: 1/2/3).
             val activeOther = load(prefs).firstOrNull { isInFlight(context, it.id) }
             if (activeOther != null)
                 return "${activeOther.title} is already downloading. EZTV runs one provider download at a time so the service doesn't kill either connection."
@@ -252,8 +251,24 @@ object DownloadStore {
                 .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
                 .setDestinationUri(Uri.fromFile(dest))
             var usbFallback = false
-            val stoppedPlayback = Playback.player != null
-            if (stoppedPlayback) Playback.releaseAll()
+            val maxStreams = ProviderStreams.max(prefs)
+            var stoppedPlayback = false
+            // Starting this download costs one provider connection. If the only
+            // thing preventing it is ordinary playback, a 1-stream customer gets
+            // the cable-box behavior: stop playback and let the explicit download
+            // take the connection. Never silently kill an active recording.
+            if (ProviderStreams.used(context, prefs) + 1 > maxStreams) {
+                if (Recorder.activeName.value != null) {
+                    return "No provider stream is free. Your EZTV setting is $maxStreams stream${if (maxStreams == 1) "" else "s"}. Stop the recording or raise Provider streams only if your IPTV plan really allows more."
+                }
+                if (Playback.providerConnectionSlots() > 0) {
+                    Playback.releaseAll()
+                    stoppedPlayback = true
+                }
+            }
+            if (ProviderStreams.used(context, prefs) + 1 > maxStreams) {
+                return "No provider stream is free for this download. Check Settings → Provider streams."
+            }
             val (id, path) = try {
                 dm.enqueue(buildReq(destFile)) to destFile.absolutePath
             } catch (e: Exception) {
@@ -279,7 +294,7 @@ object DownloadStore {
             val keep = retentionDays(prefs)
             val base = if (keep <= 0) "Downloading \"$title\"$where — it stays until you delete it."
                 else "Downloading \"$title\"$where — kept for $keep day${if (keep == 1) "" else "s"}."
-            val connectionNote = if (stoppedPlayback) " Live/on-demand playback was stopped so the download can use your provider's one connection." else ""
+            val connectionNote = if (stoppedPlayback) " Playback was stopped because your Provider streams setting is 1. Set 2 or 3 only if your IPTV subscription includes those connections." else ""
             if (usbFallback) "$base Fire OS rejected the USB destination for Download Manager, so this one is saving on the Fire Stick instead.$connectionNote" else base + connectionNote
         } catch (e: Exception) {
             "Couldn't start that download. (${e.message})"

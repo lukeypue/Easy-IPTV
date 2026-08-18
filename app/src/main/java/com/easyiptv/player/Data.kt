@@ -324,6 +324,46 @@ class XtreamSource(rawHost: String, private val user: String, private val pass: 
         }
     }
 
+    /**
+     * Xtream panels are not perfectly consistent. Most return a JSON array for
+     * get_vod_streams/get_series, but a few panel forks wrap the array in a
+     * small object. Keep the parser tolerant without accepting arbitrary HTML
+     * or login-error objects as a valid empty catalog.
+     */
+    private fun parseXtreamArray(raw: String, action: String): JSONArray {
+        val t = raw.trim()
+        if (t.isEmpty()) return JSONArray()
+        if (t.startsWith("[")) return JSONArray(t)
+        if (t.startsWith("{")) {
+            val o = JSONObject(t)
+            val wrapperKeys = when (action) {
+                "get_vod_streams" -> listOf("data", "results", "streams", "movies", "vod")
+                "get_series" -> listOf("data", "results", "series")
+                else -> listOf("data", "results")
+            }
+            wrapperKeys.forEach { k -> o.optJSONArray(k)?.let { return it } }
+            val msg = o.optString("message", o.optString("error", ""))
+            if (msg.isNotBlank()) throw RuntimeException("$action: $msg")
+        }
+        throw RuntimeException("$action returned an unexpected response")
+    }
+
+    /** One retry, sequentially. Loading two giant VOD JSON documents at the
+     * same time was needlessly hard on Fire TV memory and some IPTV panels
+     * throttle concurrent player_api calls. */
+    private fun getArrayWithRetry(action: String): JSONArray {
+        var last: Throwable? = null
+        repeat(2) { attempt ->
+            try {
+                return parseXtreamArray(Net.get(api(action)), action)
+            } catch (t: Throwable) {
+                last = t
+                if (attempt == 0) Thread.sleep(350)
+            }
+        }
+        throw RuntimeException(last?.message ?: "$action failed")
+    }
+
     override suspend fun loadLiveOnly(): AppData = withContext(Dispatchers.IO) {
         coroutineScope {
             val liveCatsD = async {
@@ -356,109 +396,80 @@ class XtreamSource(rawHost: String, private val user: String, private val pass: 
     }
 
     override suspend fun loadOnDemandOnly(): AppData = withContext(Dispatchers.IO) {
-        coroutineScope {
-            val vodCatsD = async { runCatching { parseCats(Net.get(api("get_vod_categories"))) }.getOrDefault(emptyList()) }
-            val serCatsD = async { runCatching { parseCats(Net.get(api("get_series_categories"))) }.getOrDefault(emptyList()) }
-            val vodD = async {
-                runCatching {
-                    val arr = JSONArray(Net.get(api("get_vod_streams")))
-                    (0 until arr.length()).map { i ->
-                        val o = arr.getJSONObject(i)
-                        val id = o.opt("stream_id")?.toString() ?: ""
-                        val ext = o.optString("container_extension", "mp4").ifBlank { "mp4" }
-                        Movie(
-                            id = id, name = o.optString("name", "Movie"),
-                            icon = o.optString("stream_icon", "").ifBlank { null },
-                            categoryId = o.opt("category_id")?.toString(),
-                            url = "$base/movie/$user/$pass/$id.$ext"
-                        )
-                    }
-                }.getOrDefault(emptyList())
+        // IMPORTANT: do these SEQUENTIALLY. Movie and series catalogs can each
+        // be several megabytes; concurrent body.string()+JSONArray parsing was
+        // the likely reason v4.18 could show live TV but an empty VOD library on
+        // low-memory Fire TV devices. Categories are optional and fetched only
+        // after the actual playable lists succeed.
+        var movieErr: Throwable? = null
+        var seriesErr: Throwable? = null
+
+        val movies = try {
+            val arr = getArrayWithRetry("get_vod_streams")
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val id = o.opt("stream_id")?.toString()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val ext = o.optString("container_extension", "mp4").ifBlank { "mp4" }
+                Movie(
+                    id = id,
+                    name = o.optString("name", "Movie"),
+                    icon = o.optString("stream_icon", o.optString("movie_image", "")).ifBlank { null },
+                    categoryId = o.opt("category_id")?.toString(),
+                    url = "$base/movie/$user/$pass/$id.$ext"
+                )
             }
-            val serD = async {
-                runCatching {
-                    val arr = JSONArray(Net.get(api("get_series")))
-                    (0 until arr.length()).map { i ->
-                        val o = arr.getJSONObject(i)
-                        SeriesItem(
-                            id = o.opt("series_id")?.toString() ?: "",
-                            name = o.optString("name", "Series"),
-                            icon = o.optString("cover", "").ifBlank { null },
-                            categoryId = o.opt("category_id")?.toString()
-                        )
-                    }
-                }.getOrDefault(emptyList())
-            }
-            AppData(
-                liveCats = emptyList(), live = emptyList(),
-                vodCats = vodCatsD.await(), movies = vodD.await(),
-                seriesCats = serCatsD.await(), series = serD.await()
-            )
+        } catch (t: Throwable) {
+            movieErr = t
+            emptyList()
         }
+
+        val series = try {
+            val arr = getArrayWithRetry("get_series")
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val id = (o.opt("series_id") ?: o.opt("id"))?.toString()?.takeIf { it.isNotBlank() }
+                    ?: return@mapNotNull null
+                SeriesItem(
+                    id = id,
+                    name = o.optString("name", "Series"),
+                    icon = o.optString("cover", o.optString("stream_icon", "")).ifBlank { null },
+                    categoryId = o.opt("category_id")?.toString()
+                )
+            }
+        } catch (t: Throwable) {
+            seriesErr = t
+            emptyList()
+        }
+
+        // Do not make a missing category endpoint hide otherwise valid content.
+        val vodCats = runCatching { parseCats(Net.get(api("get_vod_categories"))) }.getOrDefault(emptyList())
+        val seriesCats = runCatching { parseCats(Net.get(api("get_series_categories"))) }.getOrDefault(emptyList())
+
+        if (movies.isEmpty() && series.isEmpty() && (movieErr != null || seriesErr != null)) {
+            val parts = listOfNotNull(
+                movieErr?.message?.let { "Movies: $it" },
+                seriesErr?.message?.let { "Series: $it" }
+            )
+            throw RuntimeException(parts.joinToString("  •  ").ifBlank { "On-demand catalog request failed" })
+        }
+
+        AppData(
+            liveCats = emptyList(), live = emptyList(),
+            vodCats = vodCats, movies = movies,
+            seriesCats = seriesCats, series = series
+        )
     }
 
     override suspend fun loadAll(): AppData = withContext(Dispatchers.IO) {
-        coroutineScope {
-            val liveCatsD = async { runCatching { parseCats(Net.get(api("get_live_categories"))) }.getOrDefault(emptyList()) }
-            val vodCatsD = async { runCatching { parseCats(Net.get(api("get_vod_categories"))) }.getOrDefault(emptyList()) }
-            val serCatsD = async { runCatching { parseCats(Net.get(api("get_series_categories"))) }.getOrDefault(emptyList()) }
-
-            val liveD = async {
-                val arr = JSONArray(Net.get(api("get_live_streams")))
-                (0 until arr.length()).map { i ->
-                    val o = arr.getJSONObject(i)
-                    val id = o.opt("stream_id")?.toString() ?: ""
-                    LiveChannel(
-                        id = id,
-                        name = o.optString("name", "Channel"),
-                        icon = o.optString("stream_icon", "").ifBlank { null },
-                        categoryId = o.opt("category_id")?.toString(),
-                        url = "$base/live/$user/$pass/$id.ts",
-                        epgId = o.optString("epg_channel_id", "").ifBlank { null }
-                    )
-                }
-            }
-            val vodD = async {
-                runCatching {
-                    val arr = JSONArray(Net.get(api("get_vod_streams")))
-                    (0 until arr.length()).map { i ->
-                        val o = arr.getJSONObject(i)
-                        val id = o.opt("stream_id")?.toString() ?: ""
-                        val ext = o.optString("container_extension", "mp4").ifBlank { "mp4" }
-                        Movie(
-                            id = id,
-                            name = o.optString("name", "Movie"),
-                            icon = o.optString("stream_icon", "").ifBlank { null },
-                            categoryId = o.opt("category_id")?.toString(),
-                            url = "$base/movie/$user/$pass/$id.$ext"
-                        )
-                    }
-                }.getOrDefault(emptyList())
-            }
-            val serD = async {
-                runCatching {
-                    val arr = JSONArray(Net.get(api("get_series")))
-                    (0 until arr.length()).map { i ->
-                        val o = arr.getJSONObject(i)
-                        SeriesItem(
-                            id = o.opt("series_id")?.toString() ?: "",
-                            name = o.optString("name", "Series"),
-                            icon = o.optString("cover", "").ifBlank { null },
-                            categoryId = o.opt("category_id")?.toString()
-                        )
-                    }
-                }.getOrDefault(emptyList())
-            }
-
-            AppData(
-                liveCats = liveCatsD.await(),
-                live = liveD.await(),
-                vodCats = vodCatsD.await(),
-                movies = vodD.await(),
-                seriesCats = serCatsD.await(),
-                series = serD.await()
-            )
-        }
+        // Full refresh is intentionally sequential on Fire TV. Startup normally
+        // calls loadLiveOnly(), then lazily calls loadOnDemandOnly() when needed.
+        val livePart = loadLiveOnly()
+        val vodPart = loadOnDemandOnly()
+        AppData(
+            liveCats = livePart.liveCats, live = livePart.live,
+            vodCats = vodPart.vodCats, movies = vodPart.movies,
+            seriesCats = vodPart.seriesCats, series = vodPart.series
+        )
     }
 
     // Most Xtream panels base64-encode guide text, but a few send plain text.
@@ -534,27 +545,45 @@ class XtreamSource(rawHost: String, private val user: String, private val pass: 
     override suspend fun seriesEpisodes(seriesId: String): Map<Int, List<Episode>> =
         withContext(Dispatchers.IO) {
             val raw = Net.get(api("get_series_info") + "&series_id=$seriesId")
-            val eps = JSONObject(raw).optJSONObject("episodes") ?: return@withContext emptyMap()
-            val out = sortedMapOf<Int, List<Episode>>()
-            val keys = eps.keys()
-            while (keys.hasNext()) {
-                val season = keys.next()
-                val arr = eps.optJSONArray(season) ?: continue
-                val list = (0 until arr.length()).map { i ->
-                    val o = arr.getJSONObject(i)
-                    val id = o.opt("id")?.toString() ?: ""
-                    val ext = o.optString("container_extension", "mp4").ifBlank { "mp4" }
-                    Episode(
-                        id = id,
-                        title = o.optString("title", "Episode"),
-                        season = season.toIntOrNull() ?: 0,
-                        episodeNum = o.opt("episode_num")?.toString()?.toIntOrNull() ?: (i + 1),
-                        url = "$base/series/$user/$pass/$id.$ext"
-                    )
-                }.sortedBy { it.episodeNum }
-                out[season.toIntOrNull() ?: 0] = list
+            val root = JSONObject(raw)
+            val epsObj = root.optJSONObject("episodes")
+            val epsArr = root.optJSONArray("episodes")
+            val out = sortedMapOf<Int, MutableList<Episode>>()
+
+            fun addEpisode(o: JSONObject, fallbackSeason: Int, fallbackNum: Int) {
+                val id = (o.opt("id") ?: o.opt("episode_id") ?: o.opt("stream_id"))
+                    ?.toString()?.takeIf { it.isNotBlank() } ?: return
+                val info = o.optJSONObject("info")
+                val season = o.opt("season")?.toString()?.toIntOrNull()
+                    ?: info?.opt("season")?.toString()?.toIntOrNull()
+                    ?: fallbackSeason
+                val num = o.opt("episode_num")?.toString()?.toIntOrNull()
+                    ?: info?.opt("episode_num")?.toString()?.toIntOrNull()
+                    ?: fallbackNum
+                val ext = o.optString("container_extension", info?.optString("container_extension", "mp4") ?: "mp4")
+                    .ifBlank { "mp4" }
+                val title = o.optString("title", info?.optString("title", "") ?: "").ifBlank { "Episode $num" }
+                out.getOrPut(season) { ArrayList() }.add(
+                    Episode(id, title, season, num, "$base/series/$user/$pass/$id.$ext")
+                )
             }
-            out
+
+            if (epsObj != null) {
+                val keys = epsObj.keys()
+                while (keys.hasNext()) {
+                    val seasonKey = keys.next()
+                    val arr = epsObj.optJSONArray(seasonKey) ?: continue
+                    val season = seasonKey.toIntOrNull() ?: 0
+                    for (i in 0 until arr.length()) arr.optJSONObject(i)?.let { addEpisode(it, season, i + 1) }
+                }
+            } else if (epsArr != null) {
+                // A few Xtream forks return a flat episode array instead of an
+                // object keyed by season. TiviMate-like compatibility means not
+                // assuming only one panel flavor.
+                for (i in 0 until epsArr.length()) epsArr.optJSONObject(i)?.let { addEpisode(it, 0, i + 1) }
+            }
+
+            out.mapValues { (_, v) -> v.sortedBy { it.episodeNum } }
         }
 
     companion object {

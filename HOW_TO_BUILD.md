@@ -1,23 +1,17 @@
-# EZTV v4.18 — Build the APK with GitHub (no coding needed)
+# EZTV v4.19 — Build the APK with GitHub (no coding needed)
 
-The zip contains the Android source project and a ready GitHub Actions workflow.
+This is a complete replacement Android source project. You do **not** need any patch files.
 
 ## Easiest path
-1. Unzip `EZTV_v4.18_GPT-5.6-Sol.zip` on your computer.
-2. Put the **contents of the EasyIPTV folder** in your GitHub repository.
+1. Unzip `EZTV_v4.19_GPT-5.6-Sol.zip` on your computer.
+2. Replace the old project contents in your GitHub repository with the **contents of this EasyIPTV project folder**.
 3. Commit/push to `main` or `master`.
-4. In GitHub, open **Actions**.
-5. Open **Build Easy IPTV APK**.
-6. Wait for the green build run.
-7. Open that run and download the artifact named **EZTV-v4.18-debug**.
-8. Inside the artifact is `app-debug.apk` for your Fire Stick test.
+4. In GitHub, open **Actions** → **Build Easy IPTV APK**.
+5. Wait for a green build.
+6. Open the run and download **EZTV-v4.19-debug**.
+7. Install `app-debug.apk` on the Fire TV Stick.
 
 The workflow uses Java 17, Gradle 8.7, Android Gradle Plugin 8.6.1 and compileSdk 35.
 
-## If the build fails
-Open the failed build, expand **Build debug APK**, copy the red compiler/error text, and send that exact text back with `EZTV_v4.18_GPT-5.6-Sol.zip`.
-
-Do not randomly change Gradle/Media3 versions first. The compiler message tells us much more.
-
-## Test before adding more features
-Use `TEST_V4.18_FIRST.md`. In particular, test Smooth Live and AFR separately so we know which one is improving the problem channel.
+## If the build is red
+Open **Build debug APK** and send the first red Kotlin/Gradle error (with the file and line number). Do not randomly change Gradle or Media3 first.
