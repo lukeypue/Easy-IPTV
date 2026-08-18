@@ -36,6 +36,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -425,6 +428,7 @@ fun App() {
             DownloadStore.migrateLegacyRetention(prefs)
             DownloadStore.migrateLegacyEngine(context, prefs)
             DownloadStore.cleanup(context, prefs)
+            DownloadStore.kickQueue(context, prefs)
             ScheduleStore.cleanup(prefs)
         }
     }
@@ -1020,7 +1024,7 @@ fun HomeScreen(
                         depth == 1 && section == "movies" -> MoviesPane(prefs, data!!, movieCat, onPlay)
                         depth == 1 && section == "series" -> SeriesPane(source, data!!, seriesCat, onSeries)
                         section == "search" -> SearchTab(
-                            prefs, data!!, searchQuery, onSearchQuery, onPlay, onSeries,
+                            prefs, data!!, searchQuery, onSearchQuery, onPlay, onPlayLive, onSeries,
                             onDemandWarning = if (!catalogLoading) catalogError else null
                         )
                         section == "downloads" -> DownloadsPane(prefs, onPlay)
@@ -2599,21 +2603,22 @@ fun MoviesPane(
 
     val filtered = data.movies.filter { selectedCat == "all" || it.categoryId == selectedCat }
 
-    LazyColumn(
-        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+    // Fire-TV poster wall: five large tiles across instead of tiny list rows.
+    // LazyVerticalGrid only composes the visible rows, so the bigger artwork
+    // does not mean the whole catalog is held in RAM.
+    LazyVerticalGrid(
+        columns = GridCells.Fixed(5),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        items(filtered) { m ->
-            MediaRow(
+        gridItems(filtered, key = { it.url }) { m ->
+            PosterGridCard(
                 name = (if (WatchStore.isWatched(prefs, m.url)) "✓  " else "") + m.name,
                 icon = m.icon,
                 onClick = { onPlay(Playable(m.name, m.url, isLive = false, artwork = m.icon)) },
-                trailing = { fm ->
-                    IconButton(modifier = fm.then(Modifier.tvFocus(RoundedCornerShape(24.dp))), onClick = {
-                        toast(context, DownloadStore.start(context, prefs, m.name, m.url))
-                    }) {
-                        Icon(Icons.Filled.Download, contentDescription = "Download for offline", tint = Muted)
-                    }
+                onDownload = {
+                    toast(context, DownloadStore.start(context, prefs, m.name, m.url))
                 }
             )
         }
@@ -2649,12 +2654,14 @@ fun SeriesPane(
 
     val filtered = data.series.filter { selectedCat == "all" || it.categoryId == selectedCat }
 
-    LazyColumn(
-        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+    LazyVerticalGrid(
+        columns = GridCells.Fixed(5),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        items(filtered) { s ->
-            MediaRow(name = s.name, icon = s.icon, onClick = { onSeries(s) })
+        gridItems(filtered, key = { it.id }) { s ->
+            PosterGridCard(name = s.name, icon = s.icon, onClick = { onSeries(s) })
         }
     }
 }
@@ -3018,6 +3025,7 @@ fun SearchTab(
     query: String,
     onQuery: (String) -> Unit,
     onPlay: (Playable) -> Unit,
+    onPlayLive: (List<Playable>, Int) -> Unit,
     onSeries: (SeriesItem) -> Unit,
     onDemandWarning: String? = null
 ) {
@@ -3157,6 +3165,17 @@ fun SearchTab(
         }
         val guideFmt = remember { SimpleDateFormat("EEE h:mm a", Locale.getDefault()) }
 
+        // Search used to launch a live hit as a one-item queue. That made the
+        // channel play, but EZTV no longer knew its real lineup position:
+        // channel up/down and the recent-channel mini guide broke (the 24/7
+        // Star Wars test exposed it). Always re-enter Live with the complete
+        // playlist queue and the searched channel's true index.
+        fun playLiveHit(ch: LiveChannel) {
+            val fullQueue = data.live.map { livePlayable(prefs, it) }
+            val idx = data.live.indexOfFirst { it.url == ch.url }.coerceAtLeast(0)
+            onPlayLive(fullQueue, idx)
+        }
+
         if (liveHits.isEmpty() && movieHits.isEmpty() && seriesHits.isEmpty() && guideHits.isEmpty()) {
             Column(
                 Modifier.fillMaxSize(),
@@ -3175,7 +3194,7 @@ fun SearchTab(
             if (liveHits.isNotEmpty()) {
                 item { SectionHeader("Live TV") }
                 items(liveHits) { ch ->
-                    MediaRow(ch.name, ch.icon, onClick = { saveRecent(q); onPlay(livePlayable(prefs, ch)) })
+                    MediaRow(ch.name, ch.icon, onClick = { saveRecent(q); playLiveHit(ch) })
                 }
             }
             if (movieHits.isNotEmpty()) {
@@ -3217,7 +3236,7 @@ fun SearchTab(
                                 if (ch == null) return@clickable
                                 saveRecent(q)
                                 if (airingNow) {
-                                    onPlay(livePlayable(prefs, ch))
+                                    playLiveHit(ch)
                                 } else {
                                     toast(context, ScheduleStore.add(context, prefs, hit.entry.title, ch.name, ch.url, hit.entry.startMs, hit.entry.endMs))
                                 }
@@ -3386,6 +3405,10 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
 
     LaunchedEffect(Unit) {
         while (true) {
+            // If the previous item finished (or a provider slot became free),
+            // start the next queued item. This check exists only while the
+            // Downloads screen is open; the service itself also chains items.
+            DownloadStore.kickQueue(context, prefs)
             // Refresh even on the exact tick a job moves RUNNING → SUCCESS/FAILED;
             // otherwise the last in-flight row can sit visually stuck until the
             // user leaves and re-enters Downloads.
@@ -3434,9 +3457,9 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
         }
         Text(
             if (DownloadStore.retentionDays(prefs) <= 0)
-                "Saved for offline watching. Downloads stay until you delete them. Downloads keep going even if you close the app."
+                "Saved for offline watching. Add as many titles as you want — EZTV downloads one at a time in a lightweight queue. Files stay until you delete them."
             else
-                "Saved for offline watching. Downloads are kept for ${DownloadStore.retentionDays(prefs)} days. Downloads keep going even if you close the app.",
+                "Saved for offline watching. Add as many titles as you want — EZTV downloads one at a time in a lightweight queue. Files are kept for ${DownloadStore.retentionDays(prefs)} days.",
             fontSize = 12.sp, color = Muted,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
         )
@@ -3506,6 +3529,11 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
                                 Text(
                                     when {
                                         state == DownloadStore.STATE_FAILED -> "Download failed${if (err.isNotBlank()) ": $err" else ""}"
+                                        state == DownloadStore.STATE_PENDING && !DownloadService.isActive(d.id) -> {
+                                            val queued = items.filter { DownloadStore.state(context, it.id) == DownloadStore.STATE_PENDING }
+                                            val pos = queued.indexOfFirst { it.id == d.id }.let { if (it >= 0) it + 1 else 1 }
+                                            "Queued — #$pos waiting for the current download"
+                                        }
                                         pct != null -> "Downloading… $pct%  (${done / 1_048_576} MB of ${total / 1_048_576} MB)$etaText"
                                         done > 0 -> "Downloading… ${done / 1_048_576} MB so far"
                                         else -> "Starting download…"
@@ -3882,6 +3910,74 @@ private fun ChannelIcon(name: String, icon: String?, size: androidx.compose.ui.u
 }
 
 @Composable
+private fun PosterGridCard(
+    name: String,
+    icon: String?,
+    onClick: () -> Unit,
+    onDownload: (() -> Unit)? = null
+) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .tvFocus(RoundedCornerShape(13.dp))
+            .clickable { onClick() }
+            .padding(3.dp)
+    ) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .aspectRatio(0.68f)
+                .clip(RoundedCornerShape(11.dp))
+                .background(Surface2)
+        ) {
+            if (!icon.isNullOrBlank()) {
+                AsyncImage(
+                    model = icon,
+                    contentDescription = name,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(name.take(1).uppercase(), color = Accent, fontSize = 38.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+            if (onDownload != null) {
+                Box(
+                    Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(5.dp)
+                        .background(Color(0xDD101217), CircleShape)
+                        .tvFocus(CircleShape)
+                        .clickable {
+                            // Nested download button: consume this click rather
+                            // than launching playback from the poster beneath it.
+                            onDownload()
+                        }
+                        .padding(7.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.Download,
+                        contentDescription = "Download for offline",
+                        tint = Accent,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(5.dp))
+        Text(
+            name,
+            color = Ink,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
 private fun PosterCard(name: String, icon: String?, onClick: () -> Unit) {
     Column(
         Modifier
@@ -3977,8 +4073,10 @@ fun PlayerScreen(
     val currentIdx by Playback.currentIdxC
     val current = queue[currentIdx.coerceIn(0, queue.size - 1)]
     var nowNext by remember { mutableStateOf<List<EpgEntry>>(emptyList()) }
-    // Our top bar shows and hides in lockstep with the player's own controls.
-    var overlayVisible by remember { mutableStateOf(true) }
+    // VOD/recordings keep the legacy Media3 control overlay. Live TV has only
+    // the EZTV mini guide; starting this true on live was the reason the old
+    // title/gear overlay could still appear underneath the mini guide.
+    var overlayVisible by remember { mutableStateOf(queue.getOrNull(start)?.isLive != true) }
     var showRecordChoice by remember { mutableStateOf(false) }
     // Resume support: if there's a saved spot for the starting item, hold playback
     // and ask Resume / Start over. (Skipped when re-attaching to the running
@@ -4003,13 +4101,14 @@ fun PlayerScreen(
     // OK again (or 4s idle) to tuck it away.
     var miniGuideOpen by remember { mutableStateOf(false) }
     var ccEnabled by remember { mutableStateOf(prefs.getBoolean("cc_enabled", false)) }
-    val titleFocus = remember { FocusRequester() }
     // Whenever the menus appear, park the remote on the show title —
     // OK there closes the menus, arrows reach the other buttons.
-    LaunchedEffect(overlayVisible) {
-        if (overlayVisible) {
+    LaunchedEffect(overlayVisible, current.isLive) {
+        if (overlayVisible && !current.isLive) {
+            // Do NOT force focus onto the Compose title. Media3's progress/play
+            // controls own VOD/recording focus; the title is information only.
             kotlinx.coroutines.delay(150)
-            runCatching { titleFocus.requestFocus() }
+            pvRef?.showController()
         }
     }
     val fmt = remember { SimpleDateFormat("h:mm a", Locale.getDefault()) }
@@ -4087,11 +4186,13 @@ fun PlayerScreen(
     // When a DVR recording finishes playing, offer to clean it up — keeps the
     // 16 GB Fire Stick healthy without anyone thinking about storage.
     var askDeleteRecording by remember { mutableStateOf(false) }
-    LaunchedEffect(playState.intValue) {
-        if (playState.intValue == Player.STATE_ENDED &&
-            current.url.startsWith("/") && current.url.contains("/recordings/")
-        ) {
-            askDeleteRecording = true
+    var askDeleteDownload by remember { mutableStateOf(false) }
+    LaunchedEffect(playState.intValue, current.url) {
+        if (playState.intValue == Player.STATE_ENDED && current.url.startsWith("/")) {
+            when {
+                current.url.contains("/recordings/") -> askDeleteRecording = true
+                current.url.contains("/downloads/") -> askDeleteDownload = true
+            }
         }
     }
     if (askDeleteRecording) {
@@ -4116,6 +4217,35 @@ fun PlayerScreen(
             dismissButton = {
                 TextButton(onClick = {
                     askDeleteRecording = false
+                    onBack(Playback.currentIdxC.intValue, 0L)
+                }) { Text("Keep it", color = Muted) }
+            }
+        )
+    }
+    if (askDeleteDownload) {
+        AlertDialog(
+            onDismissRequest = { askDeleteDownload = false },
+            containerColor = SurfaceCol,
+            title = { Text("Finished watching", color = Ink) },
+            text = {
+                Text(
+                    "Delete this downloaded video to free up space? (${File(current.url).length() / (1024 * 1024)} MB)",
+                    color = Muted, fontSize = 13.sp
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    askDeleteDownload = false
+                    DownloadStore.load(prefs).firstOrNull { it.path == current.url }?.let {
+                        DownloadStore.remove(prefs, it, context)
+                    } ?: runCatching { File(current.url).delete() }
+                    toast(context, "Download deleted.")
+                    onBack(Playback.currentIdxC.intValue, 0L)
+                }) { Text("Delete it", color = Accent) }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    askDeleteDownload = false
                     onBack(Playback.currentIdxC.intValue, 0L)
                 }) { Text("Keep it", color = Muted) }
             }
@@ -4280,6 +4410,34 @@ fun PlayerScreen(
         a != null && (a == current.name || a.endsWith("(${current.name})"))
     }
 
+    fun cyclePictureSize() {
+        val label: String
+        if (superStretch) {
+            superStretch = false
+            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+            label = "Fit — whole picture, may have black bars"
+        } else when (resizeMode) {
+            AspectRatioFrameLayout.RESIZE_MODE_FIT -> {
+                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
+                label = "Stretch — fills the screen"
+            }
+            AspectRatioFrameLayout.RESIZE_MODE_FILL -> {
+                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                label = "Zoom — crops the edges"
+            }
+            else -> {
+                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
+                superStretch = true
+                label = "FULL SCREEN — edge to edge, even over built-in bars"
+            }
+        }
+        prefs.edit()
+            .putInt("resize_mode", resizeMode)
+            .putBoolean("resize_super", superStretch)
+            .apply()
+        toast(context, label)
+    }
+
     Box(
         Modifier
             .fillMaxSize()
@@ -4350,6 +4508,37 @@ fun PlayerScreen(
                             }
                         }
                     )
+
+                    // Fire TV focus bridge for VOD/recordings. Media3's stock
+                    // controller can move UP from the seek bar but on some Fire
+                    // OS builds spatial focus will not move DOWN again. Explicitly
+                    // bridge the main play row <-> progress bar so the viewer can
+                    // always get back to the bottom timeline.
+                    if (!current.isLive) {
+                        setOnKeyListener { _, keyCode, event ->
+                            if (event.action != android.view.KeyEvent.ACTION_DOWN) {
+                                false
+                            } else {
+                                val progress = findViewById<android.view.View>(androidx.media3.ui.R.id.exo_progress)
+                                val play = findViewById<android.view.View>(androidx.media3.ui.R.id.exo_play_pause)
+                                when (keyCode) {
+                                    android.view.KeyEvent.KEYCODE_DPAD_DOWN -> {
+                                        if (progress != null && !progress.hasFocus()) {
+                                            progress.requestFocus()
+                                            true
+                                        } else false
+                                    }
+                                    android.view.KeyEvent.KEYCODE_DPAD_UP -> {
+                                        if (progress?.hasFocus() == true && play != null) {
+                                            play.requestFocus()
+                                            true
+                                        } else false
+                                    }
+                                    else -> false
+                                }
+                            }
+                        }
+                    }
                 }
             },
             update = { view ->
@@ -4372,20 +4561,35 @@ fun PlayerScreen(
             Box(Modifier.align(Alignment.BottomCenter)) {
                 MiniGuide(
                     queue = queue,
-                currentIdx = currentIdx,
-                recent = RecentChannels.items.toList(),
-                nowNext = nowNext,
-                fmt = fmt,
-                prefs = prefs,
-                ccEnabled = ccEnabled,
-                onToggleCc = { setCcEnabled(!ccEnabled) },
-                afrEnabled = matchFps,
-                onToggleAfr = {
-                    matchFps = !matchFps
-                    prefs.edit().putBoolean("match_fps_live", matchFps).apply()
-                    if (!matchFps) (context as? android.app.Activity)?.let { clearFrameRateMatch(it) }
-                },
-                onToggleLiveMode = {
+                    currentIdx = currentIdx,
+                    recent = RecentChannels.items.toList(),
+                    nowNext = nowNext,
+                    fmt = fmt,
+                    prefs = prefs,
+                    ccEnabled = ccEnabled,
+                    onToggleCc = { setCcEnabled(!ccEnabled) },
+                    afrEnabled = matchFps,
+                    recordingThis = recordingThis,
+                    canRecord = current.canRecord,
+                    onToggleAfr = {
+                        matchFps = !matchFps
+                        prefs.edit().putBoolean("match_fps_live", matchFps).apply()
+                        if (!matchFps) (context as? android.app.Activity)?.let { clearFrameRateMatch(it) }
+                    },
+                    onRecord = {
+                        if (recordingThis) {
+                            Recorder.stop(context)
+                            toast(context, "Recording saved — find it in Recordings.")
+                        } else if (Recorder.activeName.value != null) {
+                            toast(context, "EZTV is already recording ${Recorder.activeName.value}. Stop that recording first.")
+                        } else if (Playback.simpleRaw) {
+                            toast(context, "Recording needs DVR Live. Switch to DVR Live, let the picture lock in, then press REC.")
+                        } else {
+                            showRecordChoice = true
+                        }
+                    },
+                    onResize = { cyclePictureSize() },
+                    onToggleLiveMode = {
                     val nextSmooth = !Playback.simpleRaw
                     if (nextSmooth && Recorder.activeName.value != null) {
                         toast(context, "Stop recording before switching to Smooth Live.")
@@ -4483,13 +4687,25 @@ fun PlayerScreen(
                 ) { Text("Try again") }
             }
         }
-        if (overlayVisible) Column(
+        if (overlayVisible && !current.isLive) Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(Color(0xAA000000))
                 .padding(8.dp)
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.onPreviewKeyEvent { ev ->
+                    if (ev.type == KeyEventType.KeyDown && ev.key == Key.DirectionDown) {
+                        pvRef?.showController()
+                        pvRef?.post {
+                            pvRef?.findViewById<android.view.View>(androidx.media3.ui.R.id.exo_play_pause)
+                                ?.requestFocus()
+                        }
+                        true
+                    } else false
+                }
+            ) {
                 IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = {
                     onBack(Playback.currentIdxC.intValue, exo.currentPosition.coerceAtLeast(0L))
                 }) {
@@ -4498,12 +4714,9 @@ fun PlayerScreen(
                 Column(
                     Modifier
                         .weight(1f)
-                        .focusRequester(titleFocus)
-                        .tvFocus(RoundedCornerShape(8.dp))
-                        .clickable {
-                            pvRef?.hideController()
-                            overlayVisible = false
-                        }
+                        // Title is information only. Making it a separate Compose
+                        // focus target trapped the Fire remote above Media3's
+                        // play/progress controls.
                         .padding(4.dp)
                 ) {
                     Text(
@@ -4528,34 +4741,7 @@ fun PlayerScreen(
                 // Screen shape: Fit (black bars) → Stretch (fill screen) → Zoom (crop edges)
                 IconButton(
                     modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)),
-                    onClick = {
-                        // Cycle: Fit -> Stretch -> Zoom -> FULL SCREEN -> Fit
-                        val label: String
-                        if (superStretch) {
-                            superStretch = false
-                            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                            label = "Fit — whole picture, may have black bars"
-                        } else when (resizeMode) {
-                            AspectRatioFrameLayout.RESIZE_MODE_FIT -> {
-                                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
-                                label = "Stretch — fills the screen"
-                            }
-                            AspectRatioFrameLayout.RESIZE_MODE_FILL -> {
-                                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                                label = "Zoom — crops the edges"
-                            }
-                            else -> {
-                                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
-                                superStretch = true
-                                label = "FULL SCREEN — edge to edge, even over built-in bars"
-                            }
-                        }
-                        prefs.edit()
-                            .putInt("resize_mode", resizeMode)
-                            .putBoolean("resize_super", superStretch)
-                            .apply()
-                        toast(context, label)
-                    }
+                    onClick = { cyclePictureSize() }
                 ) {
                     Icon(
                         Icons.Filled.AspectRatio,
@@ -4737,7 +4923,11 @@ private fun MiniGuide(
     ccEnabled: Boolean,
     onToggleCc: () -> Unit,
     afrEnabled: Boolean,
+    recordingThis: Boolean,
+    canRecord: Boolean,
     onToggleAfr: () -> Unit,
+    onRecord: () -> Unit,
+    onResize: () -> Unit,
     onToggleLiveMode: () -> Unit,
     onTune: (Playable) -> Unit,
     onOpenSettings: () -> Unit,
@@ -4771,6 +4961,8 @@ private fun MiniGuide(
         out
     }
 
+    // Everything below exists ONLY while the guide is on-screen. No hidden
+    // polling is added to normal live playback.
     var playerBufferMs by remember { mutableLongStateOf(0L) }
     var playerPosMs by remember { mutableLongStateOf(0L) }
     var dvrWindowMs by remember { mutableLongStateOf(0L) }
@@ -4795,18 +4987,28 @@ private fun MiniGuide(
 
     var lastTouch by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(lastTouch, isPlaying) {
-        // Keep controls visible while paused — that is when the viewer most
-        // needs the DVR bar. While playing, 15 seconds gives a Fire TV user
-        // enough time to D-pad across recents/settings without the guide vanishing.
         if (isPlaying) {
             kotlinx.coroutines.delay(15_000)
             if (isPlaying && System.currentTimeMillis() - lastTouch >= 15_000) onClose()
         }
     }
 
+    // Explicit D-pad map. Relying on Compose's geometric focus search was the
+    // reason FF/RW sometimes still activated Play/Pause and why users could go
+    // up but not reliably come back down.
+    val rewFocus = remember { FocusRequester() }
     val playFocus = remember { FocusRequester() }
+    val ffFocus = remember { FocusRequester() }
+    val ccFocus = remember { FocusRequester() }
+    val afrFocus = remember { FocusRequester() }
+    val modeFocus = remember { FocusRequester() }
+    val recFocus = remember { FocusRequester() }
+    val sizeFocus = remember { FocusRequester() }
+    val retryFocus = remember { FocusRequester() }
+    val settingsFocus = remember { FocusRequester() }
     val timelineFocus = remember { FocusRequester() }
     val recentFocus = remember { FocusRequester() }
+
     LaunchedEffect(Unit) {
         kotlinx.coroutines.delay(100)
         runCatching { playFocus.requestFocus() }
@@ -4831,13 +5033,14 @@ private fun MiniGuide(
     val dvrActive = current?.isLive == true && !Playback.simpleRaw && !Playback.directLive && Timeshift.file != null
     val dvrProgress = if (dvrWindowMs > 0L) (playerPosMs.toFloat() / dvrWindowMs.toFloat()).coerceIn(0f, 1f) else 1f
     val behindMs = (dvrWindowMs - playerPosMs).coerceAtLeast(0L)
+    val downFromControls = if (dvrActive) timelineFocus else recentFocus
 
     fun shortTime(ms: Long): String {
         val sec = (ms / 1000L).coerceAtLeast(0L)
         val h = sec / 3600
         val m = (sec % 3600) / 60
-        val s = sec % 60
-        return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
+        val ss = sec % 60
+        return if (h > 0) "%d:%02d:%02d".format(h, m, ss) else "%d:%02d".format(m, ss)
     }
 
     Column(
@@ -4852,9 +5055,9 @@ private fun MiniGuide(
                     listOf(Color(0x22000000), Color(0xFA000000))
                 )
             )
-            .padding(top = 18.dp, bottom = 14.dp, start = 16.dp, end = 16.dp)
+            .padding(top = 16.dp, bottom = 14.dp, start = 16.dp, end = 16.dp)
     ) {
-        // Current / next — information only, so focus never gets trapped here.
+        // One live-TV controller only: title/status plus all live actions.
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (current != null) {
                 ChannelIcon(current.name, current.artwork, 40.dp)
@@ -4879,32 +5082,119 @@ private fun MiniGuide(
                     )
                 }
             }
-            MiniGuideChip("↻", Modifier.focusProperties { down = playFocus }) { touch(); onRetry() }
+
+            if (canRecord) {
+                MiniGuideChip(
+                    if (recordingThis) "■ STOP REC" else "● REC",
+                    Modifier
+                        .focusRequester(recFocus)
+                        .focusProperties {
+                            left = modeFocus
+                            right = sizeFocus
+                            down = playFocus
+                        },
+                    color = Live
+                ) { touch(); onRecord() }
+                Spacer(Modifier.width(6.dp))
+            }
+            MiniGuideChip(
+                "SIZE",
+                Modifier
+                    .focusRequester(sizeFocus)
+                    .focusProperties {
+                        left = if (canRecord) recFocus else modeFocus
+                        right = retryFocus
+                        down = playFocus
+                    }
+            ) { touch(); onResize() }
             Spacer(Modifier.width(6.dp))
-            MiniGuideChip("⚙", Modifier.focusProperties { down = playFocus }) { touch(); onOpenSettings() }
+            MiniGuideChip(
+                "↻",
+                Modifier.focusRequester(retryFocus).focusProperties {
+                    left = sizeFocus
+                    right = settingsFocus
+                    down = playFocus
+                }
+            ) { touch(); onRetry() }
+            Spacer(Modifier.width(6.dp))
+            MiniGuideChip(
+                "⚙",
+                Modifier.focusRequester(settingsFocus).focusProperties {
+                    left = retryFocus
+                    down = playFocus
+                }
+            ) { touch(); onOpenSettings() }
         }
 
         Spacer(Modifier.height(8.dp))
 
-        // PRIMARY REMOTE CONTROLS. Play/Pause gets focus every time OK opens the
-        // guide, exactly as requested. Media3's stock controller is disabled on
-        // live TV so there is no second menu fighting for D-pad focus.
-        val downFromControls = if (dvrActive) timelineFocus else recentFocus
         Row(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically) {
-            MiniGuideControl("↶ 30", enabled = dvrActive && isSeekable, modifier = Modifier.focusProperties { down = downFromControls }) { seekDvr(-30_000L) }
+            MiniGuideControl(
+                "↶ 30",
+                enabled = dvrActive && isSeekable,
+                modifier = Modifier.focusRequester(rewFocus).focusProperties {
+                    right = playFocus
+                    down = downFromControls
+                    up = if (canRecord) recFocus else sizeFocus
+                }
+            ) { seekDvr(-30_000L) }
+
             MiniGuideControl(
                 if (isPlaying) "❚❚" else "▶",
                 enabled = true,
-                modifier = Modifier.focusRequester(playFocus).focusProperties { down = downFromControls }
+                modifier = Modifier.focusRequester(playFocus).focusProperties {
+                    left = rewFocus
+                    right = ffFocus
+                    down = downFromControls
+                    up = if (canRecord) recFocus else sizeFocus
+                }
             ) {
                 touch()
                 if (Playback.simpleRaw) toast(context, "Pause needs DVR Live.")
                 else player?.let { it.playWhenReady = !it.playWhenReady }
             }
-            MiniGuideControl("30 ↷", enabled = dvrActive && isSeekable, modifier = Modifier.focusProperties { down = downFromControls }) { seekDvr(30_000L) }
-            MiniGuideControl(if (ccEnabled) "CC ON" else "CC", modifier = Modifier.focusProperties { down = downFromControls }) { touch(); onToggleCc() }
-            MiniGuideControl(if (afrEnabled) "AFR ON" else "AFR", modifier = Modifier.focusProperties { down = downFromControls }) { touch(); onToggleAfr() }
-            MiniGuideControl(if (Playback.simpleRaw) "SMOOTH" else "DVR LIVE", modifier = Modifier.focusProperties { down = downFromControls }) { touch(); onToggleLiveMode() }
+
+            MiniGuideControl(
+                "30 ↷",
+                enabled = dvrActive && isSeekable,
+                modifier = Modifier.focusRequester(ffFocus).focusProperties {
+                    left = playFocus
+                    right = ccFocus
+                    down = downFromControls
+                    up = sizeFocus
+                }
+            ) { seekDvr(30_000L) }
+
+            MiniGuideControl(
+                if (ccEnabled) "CC ON" else "CC",
+                modifier = Modifier.focusRequester(ccFocus).focusProperties {
+                    left = ffFocus
+                    right = afrFocus
+                    down = downFromControls
+                    up = sizeFocus
+                }
+            ) { touch(); onToggleCc() }
+
+            MiniGuideControl(
+                if (afrEnabled) "AFR ON" else "AFR",
+                modifier = Modifier.focusRequester(afrFocus).focusProperties {
+                    left = ccFocus
+                    right = modeFocus
+                    down = downFromControls
+                    up = retryFocus
+                }
+            ) { touch(); onToggleAfr() }
+
+            MiniGuideControl(
+                if (Playback.simpleRaw) "SMOOTH" else "DVR LIVE",
+                modifier = Modifier.focusRequester(modeFocus).focusProperties {
+                    left = afrFocus
+                    right = if (canRecord) recFocus else sizeFocus
+                    down = downFromControls
+                    up = if (canRecord) recFocus else sizeFocus
+                }
+            ) { touch(); onToggleLiveMode() }
+
             Text(
                 ProviderStreams.label(prefs),
                 color = Muted, fontSize = 9.sp, modifier = Modifier.padding(start = 4.dp)
@@ -4912,6 +5202,11 @@ private fun MiniGuide(
         }
 
         Spacer(Modifier.height(8.dp))
+
+        if (recordingThis) {
+            Text("● Recording this channel", color = Live, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(3.dp))
+        }
 
         if (dvrActive) {
             Text(
@@ -4955,7 +5250,11 @@ private fun MiniGuide(
             Row(Modifier.fillMaxWidth()) {
                 Text("DVR START", color = Muted, fontSize = 9.sp)
                 Spacer(Modifier.weight(1f))
-                Text(if (behindMs < 1500L) "LIVE" else "LIVE +${shortTime(behindMs)}", color = if (behindMs < 1500L) Live else Muted, fontSize = 9.sp)
+                Text(
+                    if (behindMs < 1500L) "LIVE" else "${shortTime(behindMs)} behind LIVE",
+                    color = if (behindMs < 1500L) Live else Muted,
+                    fontSize = 9.sp
+                )
             }
         } else {
             LinearProgressIndicator(
@@ -5009,8 +5308,21 @@ private fun MiniGuide(
                         ChannelIcon(ch.name, ch.artwork, 44.dp)
                         Spacer(Modifier.width(8.dp))
                         Column(Modifier.weight(1f)) {
-                            Text(ch.name, color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(recentNow ?: "Press OK to watch", color = if (recentNow != null) Muted else Accent, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                ch.name,
+                                color = Ink,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                recentNow ?: "Press OK to watch",
+                                color = if (recentNow != null) Muted else Accent,
+                                fontSize = 9.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
                     }
                 }
@@ -5041,10 +5353,15 @@ private fun MiniGuideControl(
 }
 
 @Composable
-private fun MiniGuideChip(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+private fun MiniGuideChip(
+    label: String,
+    modifier: Modifier = Modifier,
+    color: Color = Ink,
+    onClick: () -> Unit
+) {
     Text(
         label,
-        color = Ink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+        color = color, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
         modifier = modifier
             .tvFocus(RoundedCornerShape(20.dp))
             .background(Color(0x66202634), RoundedCornerShape(20.dp))

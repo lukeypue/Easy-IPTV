@@ -25,9 +25,9 @@ object ProviderStreams {
     /** A tee recording uses the live DVR file and costs no extra provider slot. */
     fun recordingSlots(): Int = if (Recorder.usesProviderConnection) 1 else 0
 
-    /** EZTV's one app-owned VOD downloader uses one provider HTTP stream while active. */
+    /** Only the ACTIVE downloader owns a provider socket. Queued titles cost 0. */
     fun downloadSlots(context: Context, prefs: SharedPreferences): Int =
-        if (DownloadStore.hasInFlight(context, prefs)) 1 else 0
+        if (DownloadService.hasActive()) 1 else 0
 
     fun used(context: Context, prefs: SharedPreferences): Int =
         playbackSlots() + recordingSlots() + downloadSlots(context, prefs)

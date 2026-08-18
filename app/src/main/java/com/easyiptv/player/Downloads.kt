@@ -119,7 +119,7 @@ object DownloadStore {
         return if (days <= 0) Long.MAX_VALUE else now + days * 86_400_000L
     }
 
-    data class Item(val id: Long, val title: String, val path: String, val expires: Long)
+    data class Item(val id: Long, val title: String, val path: String, val expires: Long, val url: String = "")
 
     fun load(prefs: SharedPreferences): List<Item> {
         val raw = prefs.getString(KEY, null) ?: return emptyList()
@@ -131,7 +131,8 @@ object DownloadStore {
                     id = o.optLong("id"),
                     title = o.optString("title"),
                     path = o.optString("path"),
-                    expires = o.optLong("expires")
+                    expires = o.optLong("expires"),
+                    url = o.optString("url", "")
                 )
             }
         } catch (_: Exception) {
@@ -161,6 +162,7 @@ object DownloadStore {
                     .put("title", d.title)
                     .put("path", d.path)
                     .put("expires", d.expires)
+                    .put("url", d.url)
             )
         }
         prefs.edit().putString(KEY, arr.toString()).apply()
@@ -240,9 +242,15 @@ object DownloadStore {
                     runCatching { File(item.path + ".part").delete() }
                     clearState(context, item.id)
                 }
-                isInFlight(context, item.id) && hasNativeState(context, item.id) && !DownloadService.isActive(item.id) -> {
-                    // A previous process/service died mid-transfer. Do not leave
-                    // a permanent "Starting download…" zombie after reboot.
+                state(context, item.id) == STATE_PENDING && item.url.isBlank() -> {
+                    mark(context, item.id, STATE_FAILED, 0L, -1L, "Old download entry — select the title again to queue it.")
+                    keep.add(item)
+                }
+                state(context, item.id) == STATE_RUNNING &&
+                    hasNativeState(context, item.id) && !DownloadService.isActive(item.id) -> {
+                    // A RUNNING transfer with no service really was interrupted.
+                    // PENDING items are legitimate v4.21 queue entries and must
+                    // survive app navigation/restarts.
                     runCatching { File(item.path + ".part").delete() }
                     mark(context, item.id, STATE_FAILED, 0L, -1L, "Download was interrupted. Start it again.")
                     keep.add(item)
@@ -334,14 +342,12 @@ object DownloadStore {
         -1L
     }
 
-    /** Start one app-owned streaming VOD download. */
+    /** Start or queue an app-owned streaming VOD download.
+     * Only ONE transfer socket runs at a time; additional picks are tiny
+     * metadata queue entries, so parents can line up a trip's worth of shows
+     * without adding RAM/CPU pressure. */
     fun start(context: Context, prefs: SharedPreferences, title: String, url: String): String {
         return try {
-            val activeOther = load(prefs).firstOrNull { isInFlight(context, it.id) }
-            if (activeOther != null) {
-                return "${activeOther.title} is already downloading. EZTV runs one download at a time to keep the Fire Stick light."
-            }
-
             val free = freeBytes(context, prefs)
             if (free in 0 until 3_000_000_000L) {
                 val gb = String.format(Locale.US, "%.1f", free / 1_073_741_824.0)
@@ -352,7 +358,7 @@ object DownloadStore {
             if (existing != null) {
                 when {
                     isInFlight(context, existing.id) ->
-                        return "\"$title\" is already downloading — check Downloads for progress."
+                        return "\"$title\" is already downloading or queued — check Downloads."
                     isReady(context, existing) ->
                         return "\"$title\" is already downloaded — find it in Downloads."
                     else -> remove(prefs, existing, context)
@@ -360,7 +366,7 @@ object DownloadStore {
             }
 
             if (url.substringBefore('?').endsWith(".m3u8", ignoreCase = true)) {
-                return "This provider is delivering that title as HLS. EZTV v4.20 downloads direct movie/episode files; HLS offline saving is not enabled yet."
+                return "This provider is delivering that title as HLS. EZTV downloads direct movie/episode files; HLS offline saving is not enabled yet."
             }
 
             val extRaw = url.substringBefore('?').substringAfterLast('.', "mp4")
@@ -370,40 +376,52 @@ object DownloadStore {
             if (!destDir.exists()) destDir.mkdirs()
             val destFile = File(destDir, fname)
 
-            val maxStreams = ProviderStreams.max(prefs)
+            val alreadyDownloading = DownloadService.hasActive() ||
+                load(prefs).any { state(context, it.id) == STATE_RUNNING }
+
+            // Provider budget matters only for a transfer that will start NOW.
+            // A queued title owns no socket/stream until it reaches the front.
             var stoppedPlayback = false
-            if (ProviderStreams.used(context, prefs) + 1 > maxStreams) {
-                if (Recorder.activeName.value != null) {
-                    return "No provider stream is free. Stop the recording or raise Provider streams only if your IPTV plan really allows more."
+            if (!alreadyDownloading) {
+                val maxStreams = ProviderStreams.max(prefs)
+                if (ProviderStreams.used(context, prefs) + 1 > maxStreams) {
+                    if (Recorder.activeName.value != null) {
+                        return "No provider stream is free. Stop the recording or raise Provider streams only if your IPTV plan really allows more."
+                    }
+                    if (Playback.providerConnectionSlots() > 0) {
+                        Playback.releaseAll()
+                        stoppedPlayback = true
+                    }
                 }
-                if (Playback.providerConnectionSlots() > 0) {
-                    Playback.releaseAll()
-                    stoppedPlayback = true
+                if (ProviderStreams.used(context, prefs) + 1 > ProviderStreams.max(prefs)) {
+                    return "No provider stream is free for this download. Check Settings → Provider streams."
                 }
-            }
-            if (ProviderStreams.used(context, prefs) + 1 > maxStreams) {
-                return "No provider stream is free for this download. Check Settings → Provider streams."
             }
 
             var id = System.currentTimeMillis()
             while (load(prefs).any { it.id == id }) id++
-            val item = Item(id, title, destFile.absolutePath, expiryForNewDownload(prefs))
+            val item = Item(
+                id = id,
+                title = title,
+                path = destFile.absolutePath,
+                expires = expiryForNewDownload(prefs),
+                url = url
+            )
             save(prefs, load(prefs) + item)
             mark(context, id, STATE_PENDING, 0L, -1L, "")
 
-            try {
-                DownloadService.start(context, id, title, url, destFile.absolutePath)
-            } catch (t: Throwable) {
-                remove(prefs, item, context)
-                throw t
-            }
-
+            val started = kickQueue(context, prefs)
             val where = if (Storage.usingDrive(context, prefs)) " to your external drive" else ""
             val keep = retentionDays(prefs)
-            val base = if (keep <= 0) {
-                "Downloading \"$title\"$where — it stays until you delete it."
+            val keepText = if (keep <= 0) "kept until you delete it"
+                else "kept for $keep day${if (keep == 1) "" else "s"}"
+            val pendingAhead = load(prefs).count {
+                it.id != id && state(context, it.id) == STATE_PENDING
+            }
+            val base = if (started) {
+                "Downloading \"$title\"$where — $keepText."
             } else {
-                "Downloading \"$title\"$where — kept for $keep day${if (keep == 1) "" else "s"}."
+                "Queued \"$title\"$where — ${pendingAhead + 1} in the download queue. $keepText."
             }
             val connectionNote = if (stoppedPlayback) {
                 " Playback was stopped because your Provider streams setting had no free connection."
@@ -413,6 +431,32 @@ object DownloadStore {
             "Couldn't start that download. (${e.message})"
         }
     }
+
+    /** Start the oldest queued item when no download socket is active.
+     * Returns true when a transfer was launched. */
+    fun kickQueue(context: Context, prefs: SharedPreferences): Boolean {
+        if (DownloadService.hasActive()) return false
+        val next = load(prefs).firstOrNull {
+            state(context, it.id) == STATE_PENDING && it.url.isNotBlank()
+        } ?: return false
+
+        // Queue entries cost zero provider connections until this point.
+        val usedWithoutDownload = ProviderStreams.playbackSlots() + ProviderStreams.recordingSlots()
+        if (usedWithoutDownload + 1 > ProviderStreams.max(prefs)) return false
+
+        return try {
+            // Reserve the queue head synchronously so rapid-fire selections do
+            // not enqueue duplicate ACTION_START intents before the foreground
+            // service has time to set its activeId.
+            mark(context, next.id, STATE_RUNNING, 0L, -1L, "")
+            DownloadService.start(context, next.id, next.title, next.url, next.path)
+            true
+        } catch (t: Throwable) {
+            mark(context, next.id, STATE_FAILED, 0L, -1L, t.message ?: "Couldn't start queued download")
+            false
+        }
+    }
+
 }
 
 /** One lightweight downloader for Fire TV: one socket + one file writer. */
@@ -438,13 +482,15 @@ class DownloadService : Service() {
         }
 
         fun cancel(context: Context, id: Long) {
-            if (activeId == id) runCatching { activeCall?.cancel() }
-            // stopService works even when the caller is a foreground recording
-            // service; no need to start another background service just to stop it.
-            context.stopService(Intent(context, DownloadService::class.java))
+            // Removing a QUEUED item must never stop the currently active movie.
+            if (activeId == id) {
+                runCatching { activeCall?.cancel() }
+                context.stopService(Intent(context, DownloadService::class.java))
+            }
         }
 
         fun isActive(id: Long): Boolean = id != 0L && activeId == id
+        fun hasActive(): Boolean = activeId != 0L
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -625,8 +671,16 @@ class DownloadService : Service() {
             } finally {
                 activeCall = null
                 activeId = 0L
+                runCatching { wakeLock?.let { if (it.isHeld) it.release() } }
+                wakeLock = null
+                // Clear the job reference before launching the next queued item,
+                // otherwise onStartCommand would think the old transfer is still
+                // active and discard the next ACTION_START.
+                job = null
                 stopForeground(STOP_FOREGROUND_DETACH)
-                stopSelf()
+                val prefs = getSharedPreferences("easyiptv", Context.MODE_PRIVATE)
+                val startedNext = DownloadStore.kickQueue(this@DownloadService, prefs)
+                if (!startedNext) stopSelf()
             }
         }
     }
