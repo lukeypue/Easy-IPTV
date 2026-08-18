@@ -1,49 +1,23 @@
-# Easy IPTV 2.0 — How to build your app (no coding needed)
+# EZTV v4.17 — Build the APK with GitHub (no coding needed)
 
-You upload these files to a free website (GitHub), it builds the app for you,
-and you download the finished APK. About 10 minutes the first time.
+This ZIP already contains the GitHub Action that builds the Android APK.
+You do not need Android Studio.
 
-## Get the files ready
-1. Unzip EasyIPTV.zip on your computer so you have the `EasyIPTV` folder with
-   the files loose inside it.
+## Build it
+1. Unzip `EZTV_v4.17_GPT-5.6-Sol.zip` on your computer.
+2. Open your EZTV GitHub repository.
+3. Replace the old project files with everything inside the unzipped `EasyIPTV` folder, then commit the changes.
+4. Open the **Actions** tab.
+5. Choose **Build Easy IPTV APK**. A push to `main`/`master` normally starts it automatically; you can also press **Run workflow**.
+6. Wait for the build to show a green check.
+7. Open that run and download the artifact named **EZTV-v4.17-debug**.
+8. Unzip the artifact. The install file is **app-debug.apk**.
 
-## Make a free GitHub account (skip if you have one)
-2. Go to **github.com** and click **Sign up**. Follow the prompts.
+## Put it on the Fire TV Stick
+Use the same sideload method you have already been using for EZTV. Install `app-debug.apk` over the prior test build so your settings remain available.
 
-## Create a place for the project
-3. Once logged in, click the **+** in the top-right corner → **New repository**.
-4. Name it `easy-iptv-2`. Leave everything else as-is. Click the green
-   **Create repository**.
+## If GitHub shows a red X
+Open the failed build, expand **Build debug APK**, copy the red error text, and send that error back to the AI reviewer together with `EZTV_v4.17_GPT-5.6-Sol.zip`. Do not start changing random Gradle versions first—the exact compiler message is more useful.
 
-## Upload the app files
-5. On the next page, find the line of text that says "**uploading an existing
-   file**" and tap that link.
-6. Open your unzipped `EasyIPTV` folder, select **everything inside it**, and
-   drag it all into the upload box. Wait for the file list to finish filling in.
-7. Scroll down and click the green **Commit changes**.
-
-## Let it build
-8. Click the **Actions** tab along the top of the repository.
-9. A build kicks off on its own — a yellow dot means it's working. Give it
-   about 3–5 minutes until it turns into a **green check** (or a red X).
-10. Click into that build. Scroll to the bottom to the **Artifacts** section
-    and download **EasyIPTV-app**. Inside that download is `app-debug.apk`.
-
-## Put it on your phone
-11. Get `app-debug.apk` onto your Android phone — email it to yourself or drop
-    it in Google Drive.
-12. Tap the file. Android will warn about installing from this source; allow it.
-13. Open **Easy IPTV** and add your playlist (username & password, or an M3U
-    link).
-
-## Put it on a Firestick
-1. On the Firestick, install **Downloader** from the Amazon app store.
-2. Settings → My Fire TV → Developer Options → turn ON
-   **Install unknown apps** for Downloader.
-3. Upload `app-debug.apk` somewhere with a link (Google Drive share link
-   works), enter that link in Downloader, and install.
-4. Easy IPTV shows up in your apps. The whole app works with the remote's
-   directional pad — whatever is highlighted gets a gold outline.
-
-## If the build fails (red X)
-Click the red X → click the job → copy the red error text → paste it to Claude.
+## Important first test
+Before changing more settings, test the same known-good and known-bad channels/shows you used with v4.16/TiviMate. See `TEST_V4.17_FIRST.md` for the short test list.

@@ -270,6 +270,11 @@ interface Source {
     /** Returns null when the login works, or a friendly error message. */
     suspend fun test(): String?
     suspend fun loadAll(): AppData
+    /** Lightweight startup path. Sources that can separate Live from VOD/Series
+     *  override this so channel playback is never competing with catalog parsing. */
+    suspend fun loadLiveOnly(): AppData = loadAll()
+    /** Catalog-only refresh used after live playback has settled. */
+    suspend fun loadOnDemandOnly(): AppData = loadAll()
     suspend fun epg(channelId: String, limit: Int): List<EpgEntry>
     suspend fun seriesEpisodes(seriesId: String): Map<Int, List<Episode>>
 }
@@ -316,6 +321,79 @@ class XtreamSource(rawHost: String, private val user: String, private val pass: 
         return (0 until arr.length()).map { i ->
             val o = arr.getJSONObject(i)
             Category(o.opt("category_id")?.toString() ?: "", o.optString("category_name", ""))
+        }
+    }
+
+    override suspend fun loadLiveOnly(): AppData = withContext(Dispatchers.IO) {
+        coroutineScope {
+            val liveCatsD = async {
+                runCatching { parseCats(Net.get(api("get_live_categories"))) }.getOrDefault(emptyList())
+            }
+            val liveD = async {
+                val arr = JSONArray(Net.get(api("get_live_streams")))
+                (0 until arr.length()).map { i ->
+                    val o = arr.getJSONObject(i)
+                    val id = o.opt("stream_id")?.toString() ?: ""
+                    LiveChannel(
+                        id = id,
+                        name = o.optString("name", "Channel"),
+                        icon = o.optString("stream_icon", "").ifBlank { null },
+                        categoryId = o.opt("category_id")?.toString(),
+                        url = "$base/live/$user/$pass/$id.ts",
+                        epgId = o.optString("epg_channel_id", "").ifBlank { null }
+                    )
+                }
+            }
+            AppData(
+                liveCats = liveCatsD.await(),
+                live = liveD.await(),
+                vodCats = emptyList(),
+                movies = emptyList(),
+                seriesCats = emptyList(),
+                series = emptyList()
+            )
+        }
+    }
+
+    override suspend fun loadOnDemandOnly(): AppData = withContext(Dispatchers.IO) {
+        coroutineScope {
+            val vodCatsD = async { runCatching { parseCats(Net.get(api("get_vod_categories"))) }.getOrDefault(emptyList()) }
+            val serCatsD = async { runCatching { parseCats(Net.get(api("get_series_categories"))) }.getOrDefault(emptyList()) }
+            val vodD = async {
+                runCatching {
+                    val arr = JSONArray(Net.get(api("get_vod_streams")))
+                    (0 until arr.length()).map { i ->
+                        val o = arr.getJSONObject(i)
+                        val id = o.opt("stream_id")?.toString() ?: ""
+                        val ext = o.optString("container_extension", "mp4").ifBlank { "mp4" }
+                        Movie(
+                            id = id, name = o.optString("name", "Movie"),
+                            icon = o.optString("stream_icon", "").ifBlank { null },
+                            categoryId = o.opt("category_id")?.toString(),
+                            url = "$base/movie/$user/$pass/$id.$ext"
+                        )
+                    }
+                }.getOrDefault(emptyList())
+            }
+            val serD = async {
+                runCatching {
+                    val arr = JSONArray(Net.get(api("get_series")))
+                    (0 until arr.length()).map { i ->
+                        val o = arr.getJSONObject(i)
+                        SeriesItem(
+                            id = o.opt("series_id")?.toString() ?: "",
+                            name = o.optString("name", "Series"),
+                            icon = o.optString("cover", "").ifBlank { null },
+                            categoryId = o.opt("category_id")?.toString()
+                        )
+                    }
+                }.getOrDefault(emptyList())
+            }
+            AppData(
+                liveCats = emptyList(), live = emptyList(),
+                vodCats = vodCatsD.await(), movies = vodD.await(),
+                seriesCats = serCatsD.await(), series = serD.await()
+            )
         }
     }
 
@@ -655,7 +733,7 @@ object EpgStore {
                 val idNames = HashMap<String, String>()
 
                 val req = okhttp3.Request.Builder().url(url).header("User-Agent", Net.UA).build()
-                Net.streamClient.newCall(req).execute().use { resp ->
+                Net.client.newCall(req).execute().use { resp ->
                     val stream = resp.body?.byteStream() ?: return@use
                     val parser = android.util.Xml.newPullParser()
                     parser.setInput(stream, null)

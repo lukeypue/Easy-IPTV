@@ -203,7 +203,8 @@ data class Playable(
     val isLive: Boolean,
     val epgId: String? = null,
     val guideKey: String? = null,
-    val canRecord: Boolean = false
+    val canRecord: Boolean = false,
+    val artwork: String? = null
 )
 
 sealed class Nav {
@@ -297,6 +298,10 @@ fun App() {
     var movieCat by remember(activeIdx) { mutableStateOf("all") }
     var seriesCat by remember(activeIdx) { mutableStateOf("all") }
     var searchQuery by remember { mutableStateOf("") }
+    // Heavy VOD/series JSON never competes with live playback at startup.
+    // Fetch it once per session only when the viewer actually enters Movies,
+    // Series, or Search. Cached catalog data can still appear immediately.
+    var catalogLoadedThisSession by remember(activeIdx, reload) { mutableStateOf(false) }
 
     // One-time "external drive found — use it?" prompt. Shows only if a drive is
     // plugged in, the setting is off, and we haven't asked about THIS drive yet.
@@ -364,6 +369,7 @@ fun App() {
 
     LaunchedEffect(Unit) {
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            DownloadStore.migrateLegacyRetention(prefs)
             DownloadStore.cleanup(context, prefs)
             ScheduleStore.cleanup(prefs)
         }
@@ -397,34 +403,91 @@ fun App() {
         loadError = null
         EpgStore.clear()
         if (source != null) {
+            var cached: AppData? = null
             // 1) Open INSTANTLY with the saved copy from last time (if we have one).
             if (cacheKey != null) {
-                val cached = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                cached = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                     DataCache.load(context, cacheKey)
                 }
                 if (cached != null) data = cached
             }
-            // 2) Then quietly refresh from the provider in the background.
+            // 2) Refresh LIVE first. Xtream can do this with only two small calls,
+            // so live playback is not fighting VOD/series JSON parsing at startup.
             try {
-                val fresh = source.loadAll()
-                data = fresh
-                if (cacheKey != null) {
-                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                        DataCache.save(context, cacheKey, fresh)
-                    }
+                val liveFresh = source.loadLiveOnly()
+                val merged = if (source.supportsSeries) {
+                    AppData(
+                        liveCats = liveFresh.liveCats, live = liveFresh.live,
+                        vodCats = cached?.vodCats ?: liveFresh.vodCats,
+                        movies = cached?.movies ?: liveFresh.movies,
+                        seriesCats = cached?.seriesCats ?: liveFresh.seriesCats,
+                        series = cached?.series ?: liveFresh.series
+                    )
+                } else {
+                    // M3U has no separate VOD/series API; loadLiveOnly() is already
+                    // the complete refresh, so do not fetch the same playlist twice.
+                    liveFresh
+                }
+                data = merged
+
+                // Save the refreshed live lineup plus any cached catalog. Do NOT
+                // start a giant VOD/series refresh on a timer behind live TV.
+                // The on-demand effect below loads it only when the user asks.
+                if (cacheKey != null) kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    DataCache.save(context, cacheKey, merged)
                 }
             } catch (e: Exception) {
-                // Only show an error if we had nothing cached to fall back on.
                 if (data == null) loadError = e.message ?: "error"
             }
         }
     }
 
-    // Once channels are in, quietly download the full TV guide in the background.
-    LaunchedEffect(data) {
-        val s = source
-        if (data != null && s != null) {
-            EpgStore.load(s.xmltvUrl())
+    // XMLTV can be huge. Never download/parse the full guide behind full-screen
+    // playback. PlayerScreen uses the provider's tiny now/next request instead.
+    // Load XMLTV only when the viewer is actually browsing Live/Search, and
+    // Simple Mode skips it entirely to protect troublesome channels.
+    LaunchedEffect(data, source, nav, railSection) {
+        val s = source ?: return@LaunchedEffect
+        if (data == null || nav is Nav.Play || prefs.getBoolean("simple_mode", false)) return@LaunchedEffect
+        // Do not start XMLTV from Search: Search may already be lazily loading
+        // the large Movies/Series catalog. Two large parses at once is exactly
+        // the kind of CPU/GC competition we are removing for Fire TV.
+        if (railSection != "live") return@LaunchedEffect
+        kotlinx.coroutines.delay(600)
+        EpgStore.load(s.xmltvUrl())
+    }
+
+    // True lazy loading: Xtream movie/series catalogs are often huge. They load
+    // only when the viewer opens an on-demand/search screen, never on a timer
+    // behind live TV. This applies in normal AND Simple Mode.
+    LaunchedEffect(railSection, source, activeIdx, catalogLoadedThisSession) {
+        val s = source ?: return@LaunchedEffect
+        val needsCatalog = railSection == "movies" || railSection == "series" || railSection == "search"
+        if (!needsCatalog || !s.supportsSeries || catalogLoadedThisSession) return@LaunchedEffect
+        catalogLoadedThisSession = true
+        try {
+            val catalog = s.loadOnDemandOnly()
+            val liveBase = data ?: return@LaunchedEffect
+            val merged = AppData(
+                liveCats = liveBase.liveCats, live = liveBase.live,
+                vodCats = catalog.vodCats, movies = catalog.movies,
+                seriesCats = catalog.seriesCats, series = catalog.series
+            )
+            data = merged
+            if (cacheKey != null) kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                DataCache.save(context, cacheKey, merged)
+            }
+        } catch (_: Exception) {
+            // Allow another attempt the next time the viewer enters the section.
+            catalogLoadedThisSession = false
+        }
+    }
+
+    // Restore the recent-channel surf strip across app restarts. This is done
+    // only when playlist data changes — zero periodic work while watching.
+    LaunchedEffect(data, activeIdx) {
+        data?.live?.let { channels ->
+            RecentChannels.restore(prefs, channels.map { livePlayable(prefs, it) })
         }
     }
 
@@ -470,6 +533,14 @@ fun App() {
                 attach = pl.attach,
                 source = source,
                 prefs = prefs,
+                onOpenSettings = { idx, posMs ->
+                    // Keep the SAME stream in the corner, then open Settings.
+                    // The mini-guide gear should never masquerade as a Back button.
+                    mini = MiniState(pl.queue, idx, posMs)
+                    railSection = "settings"
+                    railDepth = 0
+                    nav = Nav.Home
+                },
                 onBack = { idx, posMs ->
                     // Back doesn't stop or reconnect anything — the SAME stream
                     // just moves to the corner while you browse.
@@ -844,7 +915,7 @@ fun HomeScreen(
                         section == "downloads" -> DownloadsPane(prefs, onPlay)
                         section == "recordings" -> RecordingsPane(prefs, onPlay)
                         section == "playlists" -> PlaylistsPane(playlists, activeIdx, onSelectPlaylist, onDeletePlaylist, onAddPlaylist)
-                        section == "settings" -> SettingsPane(prefs)
+                        section == "settings" -> SettingsPane(prefs, onModeChanged = onRetry)
                         else -> Column(
                             Modifier.fillMaxSize(),
                             verticalArrangement = Arrangement.Center,
@@ -959,19 +1030,14 @@ private fun HomeRail(
     onBackToRoot: () -> Unit,
     onCat: (String) -> Unit
 ) {
-    // Simple Mode strips the menu to Live TV + Settings. Read here (composable
-    // scope) — reading it inside the LazyColumn builder is a compile error.
-    val simpleMode = androidx.compose.ui.platform.LocalContext.current
-        .getSharedPreferences("easyiptv", android.content.Context.MODE_PRIVATE)
-        .getBoolean("simple_mode", false)
+    // Simple Mode changes the LIVE playback engine only. Movies, Series,
+    // Search, Downloads, and saved Recordings remain available.
     LazyColumn(
         modifier = Modifier.width(126.dp).fillMaxHeight().background(SurfaceCol),
         contentPadding = PaddingValues(vertical = 6.dp)
     ) {
         if (depth == 0) {
-            val menuItems = if (simpleMode) RootItems.filter { it.first == "live" || it.first == "settings" }
-                            else RootItems
-            items(menuItems) { p ->
+            items(RootItems) { p ->
                 RailItem(p.second, section == p.first) { onRoot(p.first) }
             }
         } else {
@@ -1057,7 +1123,7 @@ private fun ErrorBox(err: String, onRetry: () -> Unit) {
         Text("Couldn't load your playlist", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = Ink)
         Spacer(Modifier.height(8.dp))
         Text(
-            "Your service didn't answer. Check your internet, or tell Claude what it says here: $err",
+            "Your service didn't answer. Check your internet, then try again. Details: $err",
             fontSize = 13.sp, color = Muted
         )
         Spacer(Modifier.height(20.dp))
@@ -1276,7 +1342,8 @@ private fun livePlayable(prefs: SharedPreferences, ch: LiveChannel): Playable {
         isLive = true,
         epgId = ch.id,
         guideKey = ch.epgId,
-        canRecord = ch.url.endsWith(".ts")
+        canRecord = ch.url.endsWith(".ts"),
+        artwork = ch.icon
     )
 }
 
@@ -1298,11 +1365,27 @@ private fun livePlayable(prefs: SharedPreferences, ch: LiveChannel): Playable {
  * is open. (Panel bug fix: the old list lived inside the player screen and
  * stored positions, so it wiped on exit and broke across categories.) */
 internal object RecentChannels {
+    private const val KEY = "recent_live_urls_v417"
     val items = androidx.compose.runtime.mutableStateListOf<Playable>()
-    fun push(p: Playable) {
+
+    /** Restore history against the CURRENT playlist so stale/deleted channels
+     * simply vanish. This runs when playlist data arrives, never during video. */
+    fun restore(prefs: SharedPreferences, candidates: List<Playable>) {
+        val urls = prefs.getString(KEY, "").orEmpty().lineSequence().filter { it.isNotBlank() }.toList()
+        if (urls.isEmpty()) return
+        val byUrl = candidates.associateBy { it.url }
+        items.clear()
+        urls.mapNotNullTo(items) { byUrl[it] }
+        while (items.size > 7) items.removeAt(items.size - 1)
+    }
+
+    /** A channel becomes recent only after it actually reaches READY. One tiny
+     * preference write per successful tune is negligible and survives restarts. */
+    fun push(p: Playable, prefs: SharedPreferences? = null) {
         items.removeAll { it.url == p.url }
         items.add(0, p)
         while (items.size > 7) items.removeAt(items.size - 1)
+        prefs?.edit()?.putString(KEY, items.joinToString("\n") { it.url })?.apply()
     }
 }
 
@@ -1603,6 +1686,10 @@ object Playback {
     val playStateC = androidx.compose.runtime.mutableIntStateOf(Player.STATE_IDLE)
     val streamDeadC = androidx.compose.runtime.mutableStateOf(false)
     val everReadyC = androidx.compose.runtime.mutableStateOf(false)
+    val videoFpsC = androidx.compose.runtime.mutableFloatStateOf(0f)
+
+    private var standardMediaSources: androidx.media3.exoplayer.source.DefaultMediaSourceFactory? = null
+    private var tolerantTsMediaSources: androidx.media3.exoplayer.source.DefaultMediaSourceFactory? = null
 
     private fun mediaItemFor(pl: Playable, forceClassic: Boolean): MediaItem {
         val u = if (forceClassic && pl.isLive) tsUrl(pl.url) else pl.url
@@ -1622,13 +1709,15 @@ object Playback {
         // How much video to collect before showing the picture (and 2x that
         // after a stall). Bigger = slower channel changes but steadier playback
         // on weak channels. Settings › "Channel lock-in cushion".
-        // SIMPLE MODE: raw cable-box feel — tiny 1.5s start, flip channels fast.
-        val lockMs = if (simpleRaw) 1_500
-                     else prefs.getInt("live_start_ms", 4_000).coerceIn(2_000, 12_000)
+        // SIMPLE MODE removes DVR/recording/governor overhead, but it is meant
+        // to HELP a troublesome channel — not race to picture with only 1.5 s.
+        // Keep the user's normal lock-in cushion so the raw provider path still
+        // has a few seconds of protection before playback begins.
+        val lockMs = prefs.getInt("live_start_ms", 4_000).coerceIn(2_000, 12_000)
         val renderersFactory = DefaultRenderersFactory(context)
-            // PREFER the bundled FFmpeg software audio decoders — many TVs claim
-            // Dolby support but play silence. Video stays on hardware (4K needs it).
-            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+            // Keep the bundled FFmpeg decoder AVAILABLE as fallback, but let Fire TV
+            // hardware/native audio decode first to save CPU during live playback.
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
             .setEnableDecoderFallback(true)
         // LIVE TV REALITY: providers send live video at exactly real-time speed,
         // so a live buffer can never stockpile much — the only cushion you get
@@ -1654,15 +1743,33 @@ object Playback {
         val extractors = androidx.media3.extractor.DefaultExtractorsFactory()
             .setConstantBitrateSeekingEnabled(true)
             .setConstantBitrateSeekingAlwaysEnabled(true)
-        // The standard, proven playback path (same as v3.8). Live channels play
-        // a localhost stream served from the DVR file; the player can't tell
-        // the difference from a provider stream.
-        val mediaSources = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(context, extractors)
-            .setLoadErrorHandlingPolicy(
-                androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy(8)
+        val tolerantTsExtractors = androidx.media3.extractor.DefaultExtractorsFactory()
+            .setConstantBitrateSeekingEnabled(true)
+            .setConstantBitrateSeekingAlwaysEnabled(true)
+            .setTsExtractorFlags(
+                androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS or
+                    androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES
             )
+        // Use one explicit HTTP policy for direct live + VOD. Media3's default
+        // HTTP source times out reads after 8 s, uses a platform UA, and rejects
+        // HTTP<->HTTPS redirects. IPTV providers commonly redirect stream URLs,
+        // and a weak live server can pause longer than 8 s without truly dying.
+        // Keep this passive: no worker/tick is added; it only changes socket rules.
+        val mediaHttp = androidx.media3.datasource.DefaultHttpDataSource.Factory()
+            .setUserAgent(Net.UA)
+            .setConnectTimeoutMs(15_000)
+            .setReadTimeoutMs(20_000)
+            .setAllowCrossProtocolRedirects(true)
+        val mediaData = androidx.media3.datasource.DefaultDataSource.Factory(context, mediaHttp)
+
+        // Normal/live uses the cheap extractor path. Only MPEG-TS VOD gets the
+        // more tolerant (and more CPU-expensive) parser used for malformed files.
+        standardMediaSources = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(mediaData, extractors)
+            .setLoadErrorHandlingPolicy(androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy(8))
+        tolerantTsMediaSources = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(mediaData, tolerantTsExtractors)
+            .setLoadErrorHandlingPolicy(androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy(8))
         val p = ExoPlayer.Builder(context, renderersFactory)
-            .setMediaSourceFactory(mediaSources)
+            .setMediaSourceFactory(standardMediaSources!!)
             .setSeekBackIncrementMs(10_000)
             .setSeekForwardIncrementMs(30_000)
             .setLoadControl(loadControl)
@@ -1690,6 +1797,11 @@ object Playback {
                     noteReadyForStall()
                     if (liveMode) noteLiveReady()
                 }
+            }
+
+            override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                val fps = p.videoFormat?.frameRate ?: 0f
+                if (fps > 0f) videoFpsC.floatValue = fps
             }
 
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
@@ -1727,6 +1839,7 @@ object Playback {
                 prevIdx = p.currentMediaItemIndex
                 currentIdxC.intValue = p.currentMediaItemIndex
                 everReadyC.value = false
+                videoFpsC.floatValue = 0f
                 p.setPlaybackSpeed(1.0f)
                 if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO &&
                     prev in q.indices && !q[prev].isLive
@@ -1829,7 +1942,13 @@ object Playback {
                     p.setPlaybackSpeed(1.0f)
                 }
             }
-            governor.postDelayed(this, 2_000)
+            // When the cushion is healthy there is no reason to wake the main
+            // thread every two seconds. Check slowly; tighten back to 2 s only
+            // while the buffer is thin or the player is actively buffering.
+            val nextCheck = if (liveMode &&
+                (playStateC.intValue == Player.STATE_BUFFERING ||
+                    (player?.totalBufferedDuration ?: 0L) < 7_000L)) 2_000L else 6_000L
+            governor.postDelayed(this, nextCheck)
         }
     }
 
@@ -1866,7 +1985,7 @@ object Playback {
 
     internal fun noteLiveReady() {
         liveFails = 0
-        queue.getOrNull(currentIdxC.intValue)?.let { RecentChannels.push(it) }
+        queue.getOrNull(currentIdxC.intValue)?.let { RecentChannels.push(it, prefsRef) }
     }
     internal fun noteLiveFail(): Boolean {
         liveFails++
@@ -1915,6 +2034,7 @@ object Playback {
         val ch = q[i]
         currentIdxC.intValue = i
         everReadyC.value = false
+        videoFpsC.floatValue = 0f
         streamDeadC.value = false
         retriesP = 0
         bufferingSince = 0L
@@ -1964,23 +2084,31 @@ object Playback {
         attachOnly: Boolean
     ): ExoPlayer {
         val p = ensurePlayer(context, prefs)
-        startGovernor()
         if (attachOnly && queue.isNotEmpty()) return p
         queue = newQueue
         val s = start.coerceIn(0, (newQueue.size - 1).coerceAtLeast(0))
         if (newQueue.getOrNull(s)?.isLive == true) {
-            // LIVE: everything flows through the timeshift DVR.
+            // LIVE only: the lightweight governor may run (Simple Mode disables it).
             liveMode = true
+            startGovernor()
             zapTo(s)
         } else {
-            // Movies / episodes / downloads / recordings: normal playlist.
+            // Movies / episodes / downloads / recordings: no periodic live-TV
+            // supervision at all. Keep the Fire Stick focused on decode/render.
             liveMode = false
+            stopGovernor()
             Timeshift.stop()
             currentIdxC.intValue = s
             everReadyC.value = false
             streamDeadC.value = false
             p.setPlaybackSpeed(1.0f)
-            p.setMediaItems(newQueue.map { mediaItemFor(it, forceClassic = false) }, s, startAtMs ?: C.TIME_UNSET)
+            val sources = newQueue.map { pl ->
+                // Use the tolerant extractor factory for ALL on-demand items. It
+                // only costs extra when the content actually sniffs as MPEG-TS,
+                // so providers that label TS with a .mp4/.mkv URL still benefit.
+                tolerantTsMediaSources!!.createMediaSource(mediaItemFor(pl, forceClassic = false))
+            }
+            p.setMediaSources(sources, s, startAtMs ?: C.TIME_UNSET)
             p.prepare()
             p.playWhenReady = true
         }
@@ -2000,6 +2128,9 @@ object Playback {
         playStateC.intValue = Player.STATE_IDLE
         streamDeadC.value = false
         everReadyC.value = false
+        videoFpsC.floatValue = 0f
+        standardMediaSources = null
+        tolerantTsMediaSources = null
     }
 }
 
@@ -2036,7 +2167,7 @@ fun MoviesPane(
             MediaRow(
                 name = (if (WatchStore.isWatched(prefs, m.url)) "✓  " else "") + m.name,
                 icon = m.icon,
-                onClick = { onPlay(Playable(m.name, m.url, isLive = false)) },
+                onClick = { onPlay(Playable(m.name, m.url, isLive = false, artwork = m.icon)) },
                 trailing = { fm ->
                     IconButton(modifier = fm.then(Modifier.tvFocus(RoundedCornerShape(24.dp))), onClick = {
                         toast(context, DownloadStore.start(context, prefs, m.name, m.url))
@@ -2090,7 +2221,7 @@ fun SeriesPane(
 
 /* ----------------------------- settings pane ----------------------------- */
 @Composable
-fun SettingsPane(prefs: SharedPreferences) {
+fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
     var bufferSec by remember { mutableIntStateOf(prefs.getInt("buffer_sec", 30)) }
     var autoLast by remember { mutableStateOf(prefs.getBoolean("autoplay_last", true)) }
     val ctx = LocalContext.current
@@ -2101,13 +2232,13 @@ fun SettingsPane(prefs: SharedPreferences) {
             .verticalScroll(androidx.compose.foundation.rememberScrollState())
             .padding(16.dp)
     ) {
-        // ---- Simple Mode (cable-box mode) ----
+        // ---- Simple Mode (lightweight live playback) ----
         Text("Simple Mode", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
         var simpleMode by remember { mutableStateOf(prefs.getBoolean("simple_mode", false)) }
         var showSimpleWarn by remember { mutableStateOf(false) }
         Text(
-            "Old-school cable box: JUST live TV and the guide. Channels flip fast and play raw — the app strips everything else down while it's on.",
+            "For stubborn live channels. Plays the provider stream directly and turns off live DVR, recording, rewind/pause, and the buffer governor. Movies, Series, Search, Downloads, and saved Recordings still work.",
             fontSize = 12.sp, color = Muted
         )
         Spacer(Modifier.height(10.dp))
@@ -2117,6 +2248,7 @@ fun SettingsPane(prefs: SharedPreferences) {
                     simpleMode = false
                     prefs.edit().putBoolean("simple_mode", false).apply()
                     Playback.releaseAll()
+                    onModeChanged()
                     toast(ctx, "Simple Mode off — full EZTV is back.")
                 }
             }
@@ -2131,12 +2263,12 @@ fun SettingsPane(prefs: SharedPreferences) {
                 title = { Text("Turn on Simple Mode?", color = Ink) },
                 text = {
                     Text(
-                        "Simple Mode is live TV only, like a basic cable box:\n\n" +
-                            "\u2022 Channels flip fast and play raw — if a channel glitches, it just glitches (no smoothing or recovery).\n" +
-                            "\u2022 No pause, rewind, or recording on live TV.\n" +
-                            "\u2022 Movies, Series, Search, Downloads, and Recordings are hidden.\n" +
-                            "\u2022 Any download or recording running RIGHT NOW will be CANCELED, and scheduled recordings won't run.\n\n" +
-                            "Turn it off anytime right here in Settings.",
+                        "Simple Mode changes LIVE TV only:\n\n" +
+                            "\u2022 Live channels play directly from the provider with the lightest path.\n" +
+                            "\u2022 Live DVR/timeshift, pause, rewind, recording, and the speed governor are off.\n" +
+                            "\u2022 Movies, Series, Search, Downloads, and recordings you already saved stay available.\n" +
+                            "\u2022 A live recording already running will stop, and scheduled live recordings wait until Simple Mode is off.\n\n" +
+                            "Use this when a provider channel has trouble. Turn it off anytime in Settings.",
                         color = Muted, fontSize = 13.sp
                     )
                 },
@@ -2145,14 +2277,13 @@ fun SettingsPane(prefs: SharedPreferences) {
                         showSimpleWarn = false
                         simpleMode = true
                         prefs.edit().putBoolean("simple_mode", true).apply()
-                        val canceled = DownloadStore.cancelInFlight(ctx, prefs)
+                        // Stop a LIVE recording because Simple Mode promises one raw
+                        // playback stream. Downloads are local HTTP jobs and are not
+                        // destroyed just because the live playback mode changed.
                         Recorder.stop(ctx)
                         Playback.releaseAll()
-                        toast(
-                            ctx,
-                            if (canceled > 0) "Simple Mode on — $canceled download(s) canceled."
-                            else "Simple Mode on — just live TV and the guide."
-                        )
+                        onModeChanged()
+                        toast(ctx, "Simple Mode on — lightweight live playback.")
                     }) { Text("Turn it on", color = Accent) }
                 },
                 dismissButton = {
@@ -2218,6 +2349,29 @@ fun SettingsPane(prefs: SharedPreferences) {
         )
 
         Spacer(Modifier.height(20.dp))
+        Text("Keep downloads", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Choose how long completed downloads stay. ‘Until I delete it’ has no automatic expiration.",
+            fontSize = 12.sp, color = Muted
+        )
+        Spacer(Modifier.height(10.dp))
+        var keepDays by remember { mutableIntStateOf(DownloadStore.retentionDays(prefs)) }
+        fun setKeep(days: Int) { keepDays = days; DownloadStore.setRetentionDays(prefs, days) }
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Chip("Until I delete it", keepDays == 0) { setKeep(0) }
+                Chip("7 days", keepDays == 7) { setKeep(7) }
+                Chip("14 days", keepDays == 14) { setKeep(14) }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Chip("30 days", keepDays == 30) { setKeep(30) }
+                Chip("60 days", keepDays == 60) { setKeep(60) }
+                Chip("90 days", keepDays == 90) { setKeep(90) }
+            }
+        }
+
+        Spacer(Modifier.height(20.dp))
         Text("Start on last channel", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
         Text(
@@ -2266,17 +2420,26 @@ fun SettingsPane(prefs: SharedPreferences) {
         }
 
         Spacer(Modifier.height(20.dp))
-        Text("Smoother motion (match TV frame rate)", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
+        Text("Auto frame rate (AFR)", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
         Text(
-            "Switches your TV to the video's native frame rate (movies are 24fps) so slow camera pans stop stuttering. Trade-off: the screen goes black for a second or two when the rate changes. EZTV waits until you've settled on a channel before switching, so channel surfing stays fast.",
+            "Matches the Fire TV display to 24/25/30/50/60 fps content when the TV supports it. EZTV waits until playback is stable and restores normal display preference when you leave the player. The TV may briefly go black while HDMI changes rate.",
             fontSize = 12.sp, color = Muted
         )
         Spacer(Modifier.height(10.dp))
-        var matchFpsS by remember { mutableStateOf(prefs.getBoolean("match_fps", false)) }
+        val legacyFps = prefs.getBoolean("match_fps", false)
+        var matchFpsLive by remember { mutableStateOf(prefs.getBoolean("match_fps_live", legacyFps)) }
+        var matchFpsVod by remember { mutableStateOf(prefs.getBoolean("match_fps_vod", legacyFps)) }
+        Text("Live TV", fontSize = 11.sp, color = Muted)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Chip("Off", !matchFpsS) { matchFpsS = false; prefs.edit().putBoolean("match_fps", false).apply() }
-            Chip("On", matchFpsS) { matchFpsS = true; prefs.edit().putBoolean("match_fps", true).apply() }
+            Chip("Off", !matchFpsLive) { matchFpsLive = false; prefs.edit().putBoolean("match_fps_live", false).apply() }
+            Chip("On", matchFpsLive) { matchFpsLive = true; prefs.edit().putBoolean("match_fps_live", true).apply() }
+        }
+        Spacer(Modifier.height(8.dp))
+        Text("Movies & series", fontSize = 11.sp, color = Muted)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Chip("Off", !matchFpsVod) { matchFpsVod = false; prefs.edit().putBoolean("match_fps_vod", false).apply() }
+            Chip("On", matchFpsVod) { matchFpsVod = true; prefs.edit().putBoolean("match_fps_vod", true).apply() }
         }
 
         Spacer(Modifier.height(20.dp))
@@ -2294,7 +2457,7 @@ fun SettingsPane(prefs: SharedPreferences) {
         }
 
         Spacer(Modifier.height(24.dp))
-        Text("EZTV 4.16 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
+        Text("EZTV 4.17 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
     }
 }
 
@@ -2474,14 +2637,25 @@ fun SearchTab(
             }
             if (movieHits.isNotEmpty()) {
                 item { SectionHeader("Movies") }
-                items(movieHits) { m ->
-                    MediaRow(m.name, m.icon, onClick = { saveRecent(q); onPlay(Playable(m.name, m.url, isLive = false)) })
+                item {
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        items(movieHits) { m ->
+                            PosterCard(m.name, m.icon) {
+                                saveRecent(q)
+                                onPlay(Playable(m.name, m.url, isLive = false, artwork = m.icon))
+                            }
+                        }
+                    }
                 }
             }
             if (seriesHits.isNotEmpty()) {
                 item { SectionHeader("Series") }
-                items(seriesHits) { s ->
-                    MediaRow(s.name, s.icon, onClick = { saveRecent(q); onSeries(s) })
+                item {
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        items(seriesHits) { s ->
+                            PosterCard(s.name, s.icon) { saveRecent(q); onSeries(s) }
+                        }
+                    }
                 }
             }
             if (guideHits.isNotEmpty()) {
@@ -2715,7 +2889,10 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
             )
         }
         Text(
-            "Saved for offline watching. Each download is kept for 14 days, then removed automatically. Downloads keep going even if you close the app.",
+            if (DownloadStore.retentionDays(prefs) <= 0)
+                "Saved for offline watching. Downloads stay until you delete them. Downloads keep going even if you close the app."
+            else
+                "Saved for offline watching. Downloads are kept for ${DownloadStore.retentionDays(prefs)} days. Downloads keep going even if you close the app.",
             fontSize = 12.sp, color = Muted,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
         )
@@ -2737,7 +2914,8 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
                 items(items) { d ->
                     val f = File(d.path)
                     val ready = f.exists() && f.length() > 0
-                    val daysLeft = ((d.expires - System.currentTimeMillis()) / 86_400_000L).coerceAtLeast(0)
+                    val daysLeft = if (d.expires == Long.MAX_VALUE) Long.MAX_VALUE
+                        else ((d.expires - System.currentTimeMillis()) / 86_400_000L).coerceAtLeast(0)
                     val prog = progressMap[d.id]
                     val btnFocus = remember { FocusRequester() }
                     Row(
@@ -2763,7 +2941,8 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
                             )
                             if (ready) {
                                 Text(
-                                    "$daysLeft day${if (daysLeft == 1L) "" else "s"} left",
+                                    if (daysLeft == Long.MAX_VALUE) "Kept until you delete it"
+                                    else "$daysLeft day${if (daysLeft == 1L) "" else "s"} left",
                                     color = Muted, fontSize = 12.sp
                                 )
                             } else {
@@ -3105,9 +3284,9 @@ private fun TvTextField(
 }
 
 @Composable
-private fun ChannelIcon(name: String, icon: String?) {
+private fun ChannelIcon(name: String, icon: String?, size: androidx.compose.ui.unit.Dp = 46.dp) {
     Box(
-        modifier = Modifier.size(46.dp).background(Surface2, RoundedCornerShape(10.dp)),
+        modifier = Modifier.size(size).background(Surface2, RoundedCornerShape(10.dp)),
         contentAlignment = Alignment.Center
     ) {
         if (icon != null) {
@@ -3120,6 +3299,37 @@ private fun ChannelIcon(name: String, icon: String?) {
         } else {
             Text(name.take(1).uppercase(), color = Muted, fontWeight = FontWeight.Bold)
         }
+    }
+}
+
+@Composable
+private fun PosterCard(name: String, icon: String?, onClick: () -> Unit) {
+    Column(
+        Modifier
+            .width(126.dp)
+            .tvFocus(RoundedCornerShape(12.dp))
+            .clickable { onClick() }
+    ) {
+        Box(
+            Modifier
+                .width(126.dp)
+                .height(184.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(Surface2)
+        ) {
+            if (!icon.isNullOrBlank()) {
+                AsyncImage(
+                    model = icon, contentDescription = name, contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(name.take(1).uppercase(), color = Accent, fontSize = 34.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+        Spacer(Modifier.height(5.dp))
+        Text(name, color = Ink, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -3168,6 +3378,7 @@ fun PlayerScreen(
     attach: Boolean = false,
     source: Source?,
     prefs: SharedPreferences,
+    onOpenSettings: (index: Int, posMs: Long) -> Unit,
     onBack: (index: Int, posMs: Long) -> Unit
 ) {
     // Safety: never crash on an empty queue — just go back.
@@ -3230,16 +3441,29 @@ fun PlayerScreen(
     // Frame-rate matching (Settings, default off): once you've SETTLED on a
     // channel for a few seconds, ask the TV to switch to the video's native
     // rate. The delay means rapid zapping never thrashes the HDMI handshake.
-    val matchFps = remember { prefs.getBoolean("match_fps", false) }
-    LaunchedEffect(playState.intValue, currentIdx, matchFps) {
-        if (!matchFps || Playback.simpleRaw) return@LaunchedEffect
-        if (playState.intValue != Player.STATE_READY) return@LaunchedEffect
-        kotlinx.coroutines.delay(if (current.isLive) 4_000L else 600L)
-        if (playState.intValue != Player.STATE_READY) return@LaunchedEffect
-        val fps = Playback.player?.videoFormat?.frameRate ?: return@LaunchedEffect
-        if (fps > 0f) {
-            (context as? android.app.Activity)?.let { applyFrameRateMatch(it, fps) }
+    val legacyFps = prefs.getBoolean("match_fps", false)
+    val matchFps = remember(current.isLive) {
+        if (current.isLive) prefs.getBoolean("match_fps_live", legacyFps)
+        else prefs.getBoolean("match_fps_vod", legacyFps)
+    }
+    val detectedFps by Playback.videoFpsC
+    LaunchedEffect(playState.intValue, currentIdx, matchFps, detectedFps) {
+        val activity = context as? android.app.Activity ?: return@LaunchedEffect
+        if (!matchFps) {
+            clearFrameRateMatch(activity)
+            return@LaunchedEffect
         }
+        if (playState.intValue != Player.STATE_READY) return@LaunchedEffect
+        kotlinx.coroutines.delay(if (current.isLive) 4_000L else 900L)
+        if (playState.intValue != Player.STATE_READY) return@LaunchedEffect
+        var fps = Playback.player?.videoFormat?.frameRate ?: detectedFps
+        // Some Fire/codec combinations populate frameRate slightly after READY.
+        repeat(8) {
+            if (fps > 0f) return@repeat
+            kotlinx.coroutines.delay(350)
+            fps = Playback.player?.videoFormat?.frameRate ?: Playback.videoFpsC.floatValue
+        }
+        if (fps > 0f) applyFrameRateMatch(activity, fps)
     }
     var clockText by remember { mutableStateOf("") }
     LaunchedEffect(showClock) {
@@ -3269,6 +3493,7 @@ fun PlayerScreen(
                 }
             }
             pvRef?.player = null
+            if (matchFps) (context as? android.app.Activity)?.let { clearFrameRateMatch(it) }
         }
     }
     // When a DVR recording finishes playing, offer to clean it up — keeps the
@@ -3364,9 +3589,9 @@ fun PlayerScreen(
                     if (zapReady()) { zap(-1); true } else false
                 // D-pad up = channel up (next); down = previous.
                 android.view.KeyEvent.KEYCODE_DPAD_UP ->
-                    if (zapReady() && !overlayVisible) { zap(+1); true } else false
+                    if (zapReady() && !overlayVisible && !miniGuideOpen) { zap(+1); true } else false
                 android.view.KeyEvent.KEYCODE_DPAD_DOWN ->
-                    if (zapReady() && !overlayVisible) { zap(-1); true } else false
+                    if (zapReady() && !overlayVisible && !miniGuideOpen) { zap(-1); true } else false
                 else -> false
             }
         }
@@ -3385,20 +3610,24 @@ fun PlayerScreen(
                 android.view.KeyEvent.KEYCODE_MEDIA_REWIND -> { exo.seekBack(); true }
                 android.view.KeyEvent.KEYCODE_DPAD_CENTER,
                 android.view.KeyEvent.KEYCODE_ENTER -> {
-                    if (current.isLive && !overlayVisible) {
-                        miniGuideOpen = !miniGuideOpen
-                        true
-                    } else if (Playback.simpleRaw && current.isLive) {
-                        true   // no transport controls in Simple Mode
-                    } else {
-                        pvRef?.showController(); true
+                    when {
+                        // When the recent-channel guide is open, Compose must
+                        // receive OK so the focused card can tune the channel.
+                        miniGuideOpen -> false
+                        current.isLive && !overlayVisible -> {
+                            miniGuideOpen = true
+                            true
+                        }
+                        Playback.simpleRaw && current.isLive -> true
+                        else -> { pvRef?.showController(); true }
                     }
                 }
                 android.view.KeyEvent.KEYCODE_DPAD_UP,
                 android.view.KeyEvent.KEYCODE_DPAD_DOWN,
                 android.view.KeyEvent.KEYCODE_DPAD_LEFT,
                 android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> {
-                    pvRef?.showController(); true
+                    // Let the recent-channel LazyRow own D-pad focus.
+                    if (miniGuideOpen) false else { pvRef?.showController(); true }
                 }
                 else -> false
             }
@@ -3537,7 +3766,7 @@ fun PlayerScreen(
                 },
                 onOpenSettings = {
                     miniGuideOpen = false
-                    onBack(Playback.currentIdxC.intValue, exo.currentPosition.coerceAtLeast(0L))
+                    onOpenSettings(Playback.currentIdxC.intValue, exo.currentPosition.coerceAtLeast(0L))
                 },
                 onRetry = { Playback.tryAgain() },
                 onClose = { miniGuideOpen = false }
@@ -3873,7 +4102,15 @@ private fun MiniGuide(
         recent.filter { it.url != current?.url }.take(7)
     }
     val firstFocus = remember { FocusRequester() }
-    LaunchedEffect(Unit) { runCatching { firstFocus.requestFocus() } }
+    LaunchedEffect(entries.size) {
+        if (entries.isNotEmpty()) {
+            // Give Compose one frame to attach the first card before requesting
+            // focus. Without this, the request can race the LazyRow and OK/D-pad
+            // appears dead the first time the mini guide opens on Fire TV.
+            kotlinx.coroutines.delay(80)
+            runCatching { firstFocus.requestFocus() }
+        }
+    }
     var lastTouch by remember { mutableStateOf(System.currentTimeMillis()) }
     LaunchedEffect(lastTouch) {
         kotlinx.coroutines.delay(6_000)
@@ -3935,22 +4172,35 @@ private fun MiniGuide(
                 contentPadding = PaddingValues(vertical = 2.dp)
             ) {
                 itemsIndexed(entries) { pos, ch ->
-                    Column(
+                    val recentNow = remember(ch.url, EpgStore.loaded.value) {
+                        val t = System.currentTimeMillis()
+                        EpgStore.guide(ch.guideKey, ch.name).firstOrNull { t in it.startMs until it.endMs }?.title
+                    }
+                    Row(
                         Modifier
-                            .width(150.dp)
+                            .width(210.dp)
                             .then(if (pos == 0) Modifier.focusRequester(firstFocus) else Modifier)
                             .onFocusChanged { if (it.isFocused) lastTouch = System.currentTimeMillis() }
                             .tvFocus(RoundedCornerShape(10.dp))
                             .background(Color(0x55202634), RoundedCornerShape(10.dp))
                             .clickable { lastTouch = System.currentTimeMillis(); onTune(ch) }
-                            .padding(10.dp)
+                            .padding(9.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            ch.name,
-                            color = Ink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis
-                        )
-                        Text("Press OK to watch", color = Muted, fontSize = 10.sp, maxLines = 1)
+                        ChannelIcon(ch.name, ch.artwork, 44.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                ch.name,
+                                color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                recentNow ?: "Press OK to watch",
+                                color = if (recentNow != null) Muted else Accent.copy(alpha = 0.8f),
+                                fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
                 }
             }
@@ -3980,6 +4230,16 @@ private fun MiniGuideChip(label: String, onClick: () -> Unit) {
  * black HDMI resync when the rate changes. Only modes matching the current
  * resolution are considered, and if nothing divides cleanly we do nothing.
  * ------------------------------------------------------------------------- */
+private fun clearFrameRateMatch(activity: android.app.Activity) {
+    runCatching {
+        val lp = activity.window.attributes
+        if (lp.preferredDisplayModeId != 0) {
+            lp.preferredDisplayModeId = 0
+            activity.window.attributes = lp
+        }
+    }
+}
+
 private fun applyFrameRateMatch(activity: android.app.Activity, fps: Float) {
     runCatching {
         val display = activity.window.decorView.display ?: return

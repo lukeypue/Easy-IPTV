@@ -8,11 +8,38 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
-/* ----------------------------- offline downloads (expire after 14 days) ----------------------------- */
+/* ----------------------------- offline downloads (user-selected retention) ----------------------------- */
 
 object DownloadStore {
-    const val DAYS = 14L
+    const val KEEP_FOREVER = 0
     private const val KEY = "downloads_v2"
+    private const val RETENTION_KEY = "download_keep_days"
+    private const val MIGRATION_KEY = "download_retention_v417_migrated"
+
+    fun retentionDays(prefs: SharedPreferences): Int = prefs.getInt(RETENTION_KEY, KEEP_FOREVER)
+    fun setRetentionDays(prefs: SharedPreferences, days: Int) {
+        val safeDays = days.coerceAtLeast(0)
+        prefs.edit().putInt(RETENTION_KEY, safeDays).apply()
+        // The setting is a real retention policy, not just a default for future
+        // files: changing it updates the downloads already in the library too.
+        val expires = if (safeDays == 0) Long.MAX_VALUE
+        else System.currentTimeMillis() + safeDays * 86_400_000L
+        save(prefs, load(prefs).map { it.copy(expires = expires) })
+    }
+
+    /** v4.16 and earlier hard-coded 14 days. v4.17 removes that deadline for
+     * existing files once, so an upgrade never unexpectedly deletes a download. */
+    fun migrateLegacyRetention(prefs: SharedPreferences) {
+        if (prefs.getBoolean(MIGRATION_KEY, false)) return
+        val migrated = load(prefs).map { it.copy(expires = Long.MAX_VALUE) }
+        save(prefs, migrated)
+        prefs.edit().putBoolean(MIGRATION_KEY, true).apply()
+    }
+
+    fun expiryForNewDownload(prefs: SharedPreferences, now: Long = System.currentTimeMillis()): Long {
+        val days = retentionDays(prefs)
+        return if (days <= 0) Long.MAX_VALUE else now + days * 86_400_000L
+    }
 
     data class Item(val id: Long, val title: String, val path: String, val expires: Long)
 
@@ -83,7 +110,7 @@ object DownloadStore {
 
     /**
      * Housekeeping at app start:
-     *  - delete anything older than 14 days
+     *  - delete files whose user-selected retention period has elapsed
      *  - drop dead entries (downloads that failed and left no file behind),
      *    which is what caused the "shows twice but only one works" problem
      */
@@ -94,7 +121,7 @@ object DownloadStore {
             val f = File(item.path)
             val hasFile = f.exists() && f.length() > 0
             when {
-                item.expires < now -> runCatching { f.delete() }          // too old — remove
+                item.expires != Long.MAX_VALUE && item.expires < now -> runCatching { f.delete() } // retention elapsed
                 hasFile -> keep.add(item)                                  // downloaded and working
                 isStillDownloading(context, item.id) -> keep.add(item)     // still coming in
                 else -> runCatching { f.delete() }                         // failed/dead — drop it
@@ -221,10 +248,12 @@ object DownloadStore {
                     ) to internal.absolutePath
                 } else throw e
             }
-            val expires = System.currentTimeMillis() + DAYS * 24L * 60L * 60L * 1000L
+            val expires = expiryForNewDownload(prefs)
             save(prefs, load(prefs) + Item(id, title, path, expires))
             val where = if (onDrive && path.startsWith(destDir.absolutePath)) " to your external drive" else ""
-            "Downloading \"$title\"$where — check the Downloads section. It stays for 14 days."
+            val keep = retentionDays(prefs)
+            if (keep <= 0) "Downloading \"$title\"$where — it stays until you delete it."
+            else "Downloading \"$title\"$where — kept for $keep day${if (keep == 1) "" else "s"}."
         } catch (e: Exception) {
             "Couldn't start that download. (${e.message})"
         }
