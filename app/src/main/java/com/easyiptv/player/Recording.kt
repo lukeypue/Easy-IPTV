@@ -138,12 +138,16 @@ class RecordingService : Service() {
                 // Simple Mode = live TV only. Any recording that tries to start
                 // (including a scheduled one firing) is skipped while it's on.
                 val simple = getSharedPreferences("easyiptv", Context.MODE_PRIVATE)
-                    .getBoolean("simple_mode", false)
+                    .getBoolean("simple_mode", true)
                 if (simple) {
                     stopSelf()
                     return START_NOT_STICKY
                 }
                 val url = intent.getStringExtra("url") ?: return START_NOT_STICKY.also { stopSelf() }
+                // Scheduled/manual recording is time-sensitive and must own the
+                // provider's single connection. Stop any background VOD download
+                // before the recording starts instead of letting the provider kill one.
+                DownloadStore.cancelInFlight(this, getSharedPreferences("easyiptv", Context.MODE_PRIVATE))
                 val name = intent.getStringExtra("name") ?: "channel"
                 val stopAt = if (intent.hasExtra("stopAt")) intent.getLongExtra("stopAt", 0L) else null
                 val tee = intent.getBooleanExtra("tee", false)
@@ -213,11 +217,13 @@ class RecordingService : Service() {
         }
         val dir = Recorder.recordingsDir(this)
         job = scope.launch {
+            var currentFile: File? = null
             try {
                 val stamp = SimpleDateFormat("MMM-d_h-mm-ss_a", Locale.US).format(Date())
                 val safe = name.replace(Regex("[^A-Za-z0-9 _-]"), "").trim()
                     .replace(' ', '_').take(40).ifBlank { "channel" }
                 val f = File(dir, "REC_${safe}_$stamp.ts")
+                currentFile = f
                 FileOutputStream(f).use { out ->
                     var needNetwork = !tee
                     if (tee) {
@@ -225,21 +231,25 @@ class RecordingService : Service() {
                         needNetwork = teeFromTimeshift(out, stopAt) { isActive } &&
                             isActive && (stopAt == null || System.currentTimeMillis() < stopAt)
                     }
-                    // ONE-CONNECTION RULE (panel bug fix): if live playback is
-                    // actively using the single allowed provider connection —
-                    // e.g. the viewer changed channels mid-recording, or a
-                    // scheduled recording fired while they're watching TV —
-                    // we must NEVER secretly open a second connection. The
-                    // recording ends here instead; the file keeps whatever it
-                    // captured.
+                    // ONE-CONNECTION RULE: a scheduled recording that fires while
+                    // live TV is playing must never open connection #2. Give the
+                    // recording the one connection instead: stop playback first,
+                    // then open the scheduled channel. Manual watched-channel
+                    // recordings normally tee the DVR and never reach this block.
                     if (needNetwork && Playback.player != null && Playback.liveMode) {
-                        needNetwork = false
+                        val latch = java.util.concurrent.CountDownLatch(1)
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            Playback.releaseAll()
+                            latch.countDown()
+                        }
+                        runCatching { latch.await(1200, java.util.concurrent.TimeUnit.MILLISECONDS) }
                     }
                     if (needNetwork) {
                         // Direct connection (scheduled recordings, or the DVR
                         // feed ended mid-recording, e.g. a channel change).
                         val req = Request.Builder().url(url).header("User-Agent", Net.UA).build()
                         Net.streamClient.newCall(req).execute().use { resp ->
+                            if (!resp.isSuccessful) throw java.io.IOException("HTTP ${resp.code}")
                             val body = resp.body
                             if (body != null) {
                                 body.byteStream().use { inp ->
@@ -267,8 +277,14 @@ class RecordingService : Service() {
                     }
                 }
             } catch (e: Exception) {
-                // stream closed or network error — the partial file is kept and playable
+                // Stream closed or network error — keep any non-empty partial
+                // recording because it may still be playable.
             } finally {
+                // Never leave a fake 0 MB recording behind after a 403, dead
+                // socket, or failed storage open. This was confusing in v4.17.
+                currentFile?.let { f ->
+                    if (f.exists() && f.length() == 0L) runCatching { f.delete() }
+                }
                 Recorder.activeName.value = null
                 stopSelf()
             }

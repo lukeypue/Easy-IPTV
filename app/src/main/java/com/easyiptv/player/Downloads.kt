@@ -90,23 +90,37 @@ object DownloadStore {
         prefs.edit().putString(KEY, arr.toString()).apply()
     }
 
-    /** Is this download still actively working in the Android download system? */
-    private fun isStillDownloading(context: Context, id: Long): Boolean {
-        return try {
-            val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-            dm.query(DownloadManager.Query().setFilterById(id)).use { c ->
-                if (!c.moveToFirst()) return false
-                when (c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))) {
-                    DownloadManager.STATUS_PENDING,
-                    DownloadManager.STATUS_RUNNING,
-                    DownloadManager.STATUS_PAUSED -> true
-                    else -> false
-                }
-            }
-        } catch (e: Exception) {
-            false
+    /** DownloadManager status, or null if Android no longer has a row for it. */
+    private fun status(context: Context, id: Long): Int? = try {
+        val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+        dm.query(DownloadManager.Query().setFilterById(id)).use { c ->
+            if (!c.moveToFirst()) null
+            else c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
+        }
+    } catch (_: Exception) { null }
+
+    fun isInFlight(context: Context, id: Long): Boolean = when (status(context, id)) {
+        DownloadManager.STATUS_PENDING,
+        DownloadManager.STATUS_RUNNING,
+        DownloadManager.STATUS_PAUSED -> true
+        else -> false
+    }
+
+    /** A partial file is NOT a finished download. If DownloadManager has purged
+     * its old row, an existing non-empty file is accepted as legacy-complete. */
+    fun isReady(context: Context, item: Item): Boolean {
+        val f = File(item.path)
+        if (!f.exists() || f.length() <= 0L) return false
+        return when (status(context, item.id)) {
+            DownloadManager.STATUS_SUCCESSFUL -> true
+            DownloadManager.STATUS_PENDING, DownloadManager.STATUS_RUNNING, DownloadManager.STATUS_PAUSED -> false
+            DownloadManager.STATUS_FAILED -> false
+            else -> true
         }
     }
+
+    fun hasInFlight(context: Context, prefs: SharedPreferences): Boolean =
+        load(prefs).any { isInFlight(context, it.id) }
 
     /**
      * Housekeeping at app start:
@@ -122,8 +136,8 @@ object DownloadStore {
             val hasFile = f.exists() && f.length() > 0
             when {
                 item.expires != Long.MAX_VALUE && item.expires < now -> runCatching { f.delete() } // retention elapsed
-                hasFile -> keep.add(item)                                  // downloaded and working
-                isStillDownloading(context, item.id) -> keep.add(item)     // still coming in
+                isInFlight(context, item.id) -> keep.add(item)            // still coming in
+                isReady(context, item) -> keep.add(item)                   // downloaded and working
                 else -> runCatching { f.delete() }                         // failed/dead — drop it
             }
         }
@@ -163,19 +177,18 @@ object DownloadStore {
         title.replace(Regex("[^A-Za-z0-9 _.-]"), "").trim().replace(' ', '_').take(48)
             .ifBlank { "video" }
 
-    /** Cancel every download still in progress (Simple Mode). Finished files stay. */
+    /** Cancel every download still in progress. Finished files stay. */
     fun cancelInFlight(context: Context, prefs: SharedPreferences): Int {
         val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
         var n = 0
         val keep = load(prefs).filter { d ->
-            val f = File(d.path)
-            val done = f.exists() && f.length() > 0
-            if (!done) {
+            val active = isInFlight(context, d.id)
+            if (active) {
                 runCatching { dm.remove(d.id) }
-                runCatching { f.delete() }
+                runCatching { File(d.path).delete() }
                 n++
-            }
-            done
+                false
+            } else true
         }
         save(prefs, keep)
         return n
@@ -193,6 +206,14 @@ object DownloadStore {
     /** Starts a system download. Returns a message to show the user. */
     fun start(context: Context, prefs: SharedPreferences, title: String, url: String): String {
         return try {
+            // This provider is known to enforce one stream connection. Never
+            // start a background VOD download beside live TV or a recording.
+            if (Recorder.activeName.value != null)
+                return "Stop the recording before starting a download — your IPTV service allows one connection."
+            val activeOther = load(prefs).firstOrNull { isInFlight(context, it.id) }
+            if (activeOther != null)
+                return "${activeOther.title} is already downloading. EZTV runs one provider download at a time so the service doesn't kill either connection."
+
             // Storage guard: require 3 GB free on whichever drive is active
             // (external SSD/USB if enabled and present, else internal).
             val free = freeBytes(context, prefs)
@@ -206,10 +227,10 @@ object DownloadStore {
             if (existing != null) {
                 val f = File(existing.path)
                 when {
-                    f.exists() && f.length() > 0 ->
-                        return "\"$title\" is already downloaded — find it in Downloads."
-                    isStillDownloading(context, existing.id) ->
+                    isInFlight(context, existing.id) ->
                         return "\"$title\" is already downloading — check Downloads for progress."
+                    isReady(context, existing) ->
+                        return "\"$title\" is already downloaded — find it in Downloads."
                     else -> {
                         // Old attempt died — clear it out and start fresh.
                         runCatching { f.delete() }
@@ -230,12 +251,16 @@ object DownloadStore {
                 .addRequestHeader("User-Agent", Net.UA)
                 .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
                 .setDestinationUri(Uri.fromFile(dest))
+            var usbFallback = false
+            val stoppedPlayback = Playback.player != null
+            if (stoppedPlayback) Playback.releaseAll()
             val (id, path) = try {
                 dm.enqueue(buildReq(destFile)) to destFile.absolutePath
             } catch (e: Exception) {
                 // Some Fire OS builds reject a removable-drive destination. Fall
                 // back to internal so the download still works, and tell the user.
                 if (onDrive) {
+                    usbFallback = true
                     val internal = File(
                         (context.getExternalFilesDir("downloads") ?: context.filesDir), fname
                     )
@@ -252,8 +277,10 @@ object DownloadStore {
             save(prefs, load(prefs) + Item(id, title, path, expires))
             val where = if (onDrive && path.startsWith(destDir.absolutePath)) " to your external drive" else ""
             val keep = retentionDays(prefs)
-            if (keep <= 0) "Downloading \"$title\"$where — it stays until you delete it."
-            else "Downloading \"$title\"$where — kept for $keep day${if (keep == 1) "" else "s"}."
+            val base = if (keep <= 0) "Downloading \"$title\"$where — it stays until you delete it."
+                else "Downloading \"$title\"$where — kept for $keep day${if (keep == 1) "" else "s"}."
+            val connectionNote = if (stoppedPlayback) " Live/on-demand playback was stopped so the download can use your provider's one connection." else ""
+            if (usbFallback) "$base Fire OS rejected the USB destination for Download Manager, so this one is saving on the Fire Stick instead.$connectionNote" else base + connectionNote
         } catch (e: Exception) {
             "Couldn't start that download. (${e.message})"
         }

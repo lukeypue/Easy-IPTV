@@ -727,7 +727,10 @@ object EpgStore {
 
                 val now = System.currentTimeMillis()
                 val windowStart = now - 60L * 60 * 1000            // keep last hour
-                val windowEnd = now + 7L * 24 * 60 * 60 * 1000     // ...through the next 7 days
+                // Fire Stick memory guard: keep only the useful near-term guide
+                // in RAM. Two days is enough for now/next + short planning/search
+                // without holding a giant 7-day XMLTV object graph on ~1 GB boxes.
+                val windowEnd = now + 48L * 60 * 60 * 1000
                 val programmes = HashMap<String, ArrayList<EpgEntry>>()
                 val names = HashMap<String, String>()
                 val idNames = HashMap<String, String>()
@@ -773,7 +776,7 @@ object EpgStore {
                                     }
                                 }
                                 2 -> progTitle = (progTitle + (parser.text ?: "")).trim()
-                                3 -> { /* descriptions skipped: keeps a 7-day guide light in memory */ }
+                                3 -> { /* descriptions skipped: keeps the guide light in memory */ }
                             }
                             org.xmlpull.v1.XmlPullParser.END_TAG -> when (parser.name) {
                                 "channel" -> curChannelId = null
