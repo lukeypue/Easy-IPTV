@@ -38,6 +38,8 @@ import java.util.Locale
 object Recorder {
     /** Name of what's currently recording, or null. Compose-observable. */
     val activeName = androidx.compose.runtime.mutableStateOf<String?>(null)
+    /** Last user-facing recording result/status. Compose-observable. */
+    val lastStatus = androidx.compose.runtime.mutableStateOf<String?>(null)
 
     fun recordingsDir(context: Context): File {
         val prefs = context.getSharedPreferences("easyiptv", Context.MODE_PRIVATE)
@@ -140,6 +142,7 @@ class RecordingService : Service() {
                 val simple = getSharedPreferences("easyiptv", Context.MODE_PRIVATE)
                     .getBoolean("simple_mode", true)
                 if (simple) {
+                    Recorder.lastStatus.value = "Recording is off in Smooth Live. Switch to DVR Live, then press Record again."
                     stopSelf()
                     return START_NOT_STICKY
                 }
@@ -210,6 +213,7 @@ class RecordingService : Service() {
     private fun beginRecording(url: String, name: String, stopAt: Long?, tee: Boolean) {
         job?.cancel()
         Recorder.activeName.value = name
+        Recorder.lastStatus.value = "Recording: $name"
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "EasyIPTV:record").apply {
             // Cap the wakelock at 6 hours as a safety net.
@@ -278,12 +282,28 @@ class RecordingService : Service() {
                 }
             } catch (e: Exception) {
                 // Stream closed or network error — keep any non-empty partial
-                // recording because it may still be playable.
+                // recording because it may still be playable, but tell the user.
+                val partialBytes = currentFile?.takeIf { it.exists() }?.length() ?: 0L
+                Recorder.lastStatus.value = if (partialBytes > 0L) {
+                    val mb = partialBytes / (1024.0 * 1024.0)
+                    "Recording stopped early — saved ${String.format(Locale.US, "%.1f", mb)} MB."
+                } else {
+                    "Recording failed — no video data was received. ${e.message ?: "Check the channel and try again."}"
+                }
             } finally {
                 // Never leave a fake 0 MB recording behind after a 403, dead
                 // socket, or failed storage open. This was confusing in v4.17.
                 currentFile?.let { f ->
-                    if (f.exists() && f.length() == 0L) runCatching { f.delete() }
+                    val bytes = if (f.exists()) f.length() else 0L
+                    if (bytes == 0L) {
+                        runCatching { f.delete() }
+                        if (Recorder.lastStatus.value?.startsWith("Recording failed") != true) {
+                            Recorder.lastStatus.value = "Recording failed — no video data was saved."
+                        }
+                    } else if (Recorder.lastStatus.value?.startsWith("Recording stopped early") != true) {
+                        val mb = bytes / (1024.0 * 1024.0)
+                        Recorder.lastStatus.value = "Saved recording: ${String.format(Locale.US, "%.1f", mb)} MB"
+                    }
                 }
                 Recorder.activeName.value = null
                 stopSelf()
