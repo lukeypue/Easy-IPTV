@@ -11,6 +11,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.annotation.OptIn
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -89,7 +90,9 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.key.Key
@@ -206,6 +209,30 @@ private fun Modifier.tvFocus(shape: RoundedCornerShape = RoundedCornerShape(14.d
                 shape = shape
             )
     }
+
+/**
+ * Fire TV's View focus search can climb from Media3's seek bar to the playback
+ * row and then get "stuck" there. Wire every visible stock-controller button
+ * DOWN to the progress bar, and the progress bar UP to Play/Pause. This affects
+ * only VOD / saved recordings / downloads; live TV uses EZTV's own controller.
+ */
+@OptIn(UnstableApi::class)
+private fun wireStockPlayerDpad(root: PlayerView) {
+    val progress = root.findViewById<android.view.View>(androidx.media3.ui.R.id.exo_progress) ?: return
+    val play = root.findViewById<android.view.View>(androidx.media3.ui.R.id.exo_play_pause)
+    if (progress.id != android.view.View.NO_ID && play != null && play.id != android.view.View.NO_ID) {
+        progress.nextFocusUpId = play.id
+    }
+    fun walk(v: android.view.View) {
+        if (v is android.view.ViewGroup) {
+            for (i in 0 until v.childCount) walk(v.getChildAt(i))
+        }
+        if (v !== progress && v.isFocusable && v.id != android.view.View.NO_ID && progress.id != android.view.View.NO_ID) {
+            v.nextFocusDownId = progress.id
+        }
+    }
+    walk(root)
+}
 
 /** One inexpensive CC switch for embedded/subtitle tracks Media3 already exposes. */
 private fun applyCaptionPreference(player: Player?, enabled: Boolean) {
@@ -2320,7 +2347,16 @@ object Playback {
     }
     internal fun noteLiveFail(): Boolean {
         liveFails++
-        if (liveFails >= 3 && !directLive) {
+        // If the DVR writer is still receiving bytes, give the LOCAL playback
+        // path more chances before abandoning DVR. v4.21 could silently fall
+        // into DIRECT RESCUE after three extractor/reopen errors even though the
+        // timeshift file itself was healthy — which disabled rewind/FF while the
+        // button still misleadingly said DVR LIVE.
+        val writerHealthy = Timeshift.active &&
+            Timeshift.bytesWritten > 188L * 50L &&
+            (System.currentTimeMillis() - Timeshift.lastByteAt) < 5_000L
+        val rescueAfter = if (writerHealthy) 6 else 3
+        if (liveFails >= rescueAfter && !directLive) {
             directLive = true
             return true
         }
@@ -2516,6 +2552,20 @@ object Playback {
         directLive -> "DIRECT RESCUE"
         liveMode -> "DVR LIVE"
         else -> "ON DEMAND"
+    }
+
+    /** User-visible escape from DIRECT RESCUE back to the selected DVR mode.
+     *  This restarts only the current live channel/timeshift path; it does not
+     *  rebuild the Activity or touch Smooth Live/VOD. */
+    fun retryDvrLive(): Boolean {
+        if (!liveMode || simpleRaw || queue.isEmpty()) return false
+        directLive = false
+        liveFails = 0
+        retriesP = 0
+        streamDeadC.value = false
+        startGovernor()
+        zapTo(currentIdxC.intValue)
+        return true
     }
 
     /** Provider-connection accounting for the user-selected 1/2/3 stream budget. */
@@ -4503,7 +4553,9 @@ fun PlayerScreen(
                     setControllerVisibilityListener(
                         PlayerView.ControllerVisibilityListener { vis ->
                             overlayVisible = !current.isLive && vis == android.view.View.VISIBLE
-                            if (vis != android.view.View.VISIBLE) {
+                            if (vis == android.view.View.VISIBLE && !current.isLive) {
+                                pv.post { wireStockPlayerDpad(pv) }
+                            } else if (vis != android.view.View.VISIBLE) {
                                 pv.post { pv.requestFocus() }
                             }
                         }
@@ -4515,6 +4567,11 @@ fun PlayerScreen(
                     // bridge the main play row <-> progress bar so the viewer can
                     // always get back to the bottom timeline.
                     if (!current.isLive) {
+                        // v4.22: wire the actual Android View focus graph instead
+                        // of hoping the PlayerView parent receives child key
+                        // events. This fixes the Fire OS trap where UP reaches
+                        // Play/FF/RW/title but DOWN can never return to the bar.
+                        post { wireStockPlayerDpad(this) }
                         setOnKeyListener { _, keyCode, event ->
                             if (event.action != android.view.KeyEvent.ACTION_DOWN) {
                                 false
@@ -4590,17 +4647,26 @@ fun PlayerScreen(
                     },
                     onResize = { cyclePictureSize() },
                     onToggleLiveMode = {
-                    val nextSmooth = !Playback.simpleRaw
-                    if (nextSmooth && Recorder.activeName.value != null) {
-                        toast(context, "Stop recording before switching to Smooth Live.")
-                    } else {
-                        Playback.setSmoothLive(nextSmooth, context)
-                    }
-                    if (!nextSmooth && !Storage.usingDrive(context, prefs)) {
-                        toast(context, "DVR Live is on. A verified USB drive is recommended for long pause/rewind/recording sessions.")
-                    }
-                    miniGuideOpen = false
-                },
+                        when {
+                            Playback.directLive -> {
+                                if (Playback.retryDvrLive()) {
+                                    toast(context, "Retrying DVR Live…")
+                                }
+                            }
+                            else -> {
+                                val nextSmooth = !Playback.simpleRaw
+                                if (nextSmooth && Recorder.activeName.value != null) {
+                                    toast(context, "Stop recording before switching to Smooth Live.")
+                                } else {
+                                    Playback.setSmoothLive(nextSmooth, context)
+                                }
+                                if (!nextSmooth && !Storage.usingDrive(context, prefs)) {
+                                    toast(context, "DVR Live is on. A verified USB drive is recommended for long pause/rewind/recording sessions.")
+                                }
+                            }
+                        }
+                        miniGuideOpen = false
+                    },
                 onTune = { ch ->
                     if (Recorder.activeName.value != null && ch.url != current.url && ProviderStreams.max(prefs) < 2) {
                         toast(context, "Changing channels while recording needs 2 provider streams. Your EZTV setting is 1.")
@@ -4961,8 +5027,7 @@ private fun MiniGuide(
         out
     }
 
-    // Everything below exists ONLY while the guide is on-screen. No hidden
-    // polling is added to normal live playback.
+    // Everything below exists ONLY while the guide is visible.
     var playerBufferMs by remember { mutableLongStateOf(0L) }
     var playerPosMs by remember { mutableLongStateOf(0L) }
     var dvrWindowMs by remember { mutableLongStateOf(0L) }
@@ -4970,6 +5035,7 @@ private fun MiniGuide(
     var displayHz by remember { mutableFloatStateOf(0f) }
     var isPlaying by remember { mutableStateOf(player?.isPlaying == true) }
     var isSeekable by remember { mutableStateOf(Playback.canSeekDvr()) }
+
     LaunchedEffect(Unit) {
         while (true) {
             playerBufferMs = player?.totalBufferedDuration ?: 0L
@@ -4993,36 +5059,40 @@ private fun MiniGuide(
         }
     }
 
-    // Explicit D-pad map. Relying on Compose's geometric focus search was the
-    // reason FF/RW sometimes still activated Play/Pause and why users could go
-    // up but not reliably come back down.
+    // A literal TV-remote "keyboard" focus grid:
+    // row 1 = RW | PLAY | FF | REC | SIZE
+    // row 2 = CC | AFR | MODE | RETRY | SETTINGS
+    // row 3 = show/DVR timeline
+    // row 4 = recent channels
+    // No geometric guesswork and no dead-end disabled buttons.
     val rewFocus = remember { FocusRequester() }
     val playFocus = remember { FocusRequester() }
     val ffFocus = remember { FocusRequester() }
+    val recFocus = remember { FocusRequester() }
+    val sizeFocus = remember { FocusRequester() }
     val ccFocus = remember { FocusRequester() }
     val afrFocus = remember { FocusRequester() }
     val modeFocus = remember { FocusRequester() }
-    val recFocus = remember { FocusRequester() }
-    val sizeFocus = remember { FocusRequester() }
     val retryFocus = remember { FocusRequester() }
     val settingsFocus = remember { FocusRequester() }
     val timelineFocus = remember { FocusRequester() }
     val recentFocus = remember { FocusRequester() }
 
     LaunchedEffect(Unit) {
-        kotlinx.coroutines.delay(100)
+        kotlinx.coroutines.delay(120)
         runCatching { playFocus.requestFocus() }
     }
 
     fun touch() { lastTouch = System.currentTimeMillis() }
+
     fun seekDvr(deltaMs: Long) {
         touch()
-        if (Playback.simpleRaw || Playback.directLive || current?.isLive != true) {
-            toast(context, "Rewind needs DVR Live.")
-            return
-        }
-        if (!Playback.seekDvrBy(deltaMs)) {
-            toast(context, "DVR is still building its first few seconds — try again shortly.")
+        when {
+            Playback.simpleRaw -> toast(context, "Rewind needs DVR Live.")
+            Playback.directLive -> toast(context, "DVR is in Direct Rescue. Select DVR RETRY first.")
+            current?.isLive != true -> toast(context, "DVR controls are only for Live TV.")
+            !Playback.seekDvrBy(deltaMs) ->
+                toast(context, "DVR is still building its first few seconds — try again shortly.")
         }
     }
 
@@ -5030,10 +5100,13 @@ private fun MiniGuide(
     val bufferGoalMs = (lockMs * 2L).coerceAtLeast(8_000L)
     val bufferProgress = (playerBufferMs.toFloat() / bufferGoalMs.toFloat()).coerceIn(0f, 1f)
     val sourceFps = Playback.videoFpsC.floatValue
-    val dvrActive = current?.isLive == true && !Playback.simpleRaw && !Playback.directLive && Timeshift.file != null
-    val dvrProgress = if (dvrWindowMs > 0L) (playerPosMs.toFloat() / dvrWindowMs.toFloat()).coerceIn(0f, 1f) else 1f
+    val dvrActive = current?.isLive == true &&
+        !Playback.simpleRaw && !Playback.directLive &&
+        Timeshift.file != null && Timeshift.active
+    val dvrProgress = if (dvrWindowMs > 0L)
+        (playerPosMs.toFloat() / dvrWindowMs.toFloat()).coerceIn(0f, 1f)
+    else 1f
     val behindMs = (dvrWindowMs - playerPosMs).coerceAtLeast(0L)
-    val downFromControls = if (dvrActive) timelineFocus else recentFocus
 
     fun shortTime(ms: Long): String {
         val sec = (ms / 1000L).coerceAtLeast(0L)
@@ -5041,6 +5114,12 @@ private fun MiniGuide(
         val m = (sec % 3600) / 60
         val ss = sec % 60
         return if (h > 0) "%d:%02d:%02d".format(h, m, ss) else "%d:%02d".format(m, ss)
+    }
+
+    val modeLabel = when {
+        Playback.simpleRaw -> "SMOOTH"
+        Playback.directLive -> "DVR RETRY"
+        else -> "DVR LIVE"
     }
 
     Column(
@@ -5055,9 +5134,10 @@ private fun MiniGuide(
                     listOf(Color(0x22000000), Color(0xFA000000))
                 )
             )
-            .padding(top = 16.dp, bottom = 14.dp, start = 16.dp, end = 16.dp)
+            .padding(top = 14.dp, bottom = 14.dp, start = 16.dp, end = 16.dp)
     ) {
-        // One live-TV controller only: title/status plus all live actions.
+        // Information only — no focus targets here, so the D-pad can never get
+        // trapped in the title/header region.
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (current != null) {
                 ChannelIcon(current.name, current.artwork, 40.dp)
@@ -5082,71 +5162,35 @@ private fun MiniGuide(
                     )
                 }
             }
-
-            if (canRecord) {
-                MiniGuideChip(
-                    if (recordingThis) "■ STOP REC" else "● REC",
-                    Modifier
-                        .focusRequester(recFocus)
-                        .focusProperties {
-                            left = modeFocus
-                            right = sizeFocus
-                            down = playFocus
-                        },
-                    color = Live
-                ) { touch(); onRecord() }
-                Spacer(Modifier.width(6.dp))
-            }
-            MiniGuideChip(
-                "SIZE",
-                Modifier
-                    .focusRequester(sizeFocus)
-                    .focusProperties {
-                        left = if (canRecord) recFocus else modeFocus
-                        right = retryFocus
-                        down = playFocus
-                    }
-            ) { touch(); onResize() }
-            Spacer(Modifier.width(6.dp))
-            MiniGuideChip(
-                "↻",
-                Modifier.focusRequester(retryFocus).focusProperties {
-                    left = sizeFocus
-                    right = settingsFocus
-                    down = playFocus
-                }
-            ) { touch(); onRetry() }
-            Spacer(Modifier.width(6.dp))
-            MiniGuideChip(
-                "⚙",
-                Modifier.focusRequester(settingsFocus).focusProperties {
-                    left = retryFocus
-                    down = playFocus
-                }
-            ) { touch(); onOpenSettings() }
+            Text(
+                ProviderStreams.label(prefs),
+                color = Muted, fontSize = 9.sp, modifier = Modifier.padding(start = 8.dp)
+            )
         }
 
         Spacer(Modifier.height(8.dp))
 
-        Row(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically) {
+        // Row 1: primary playback actions.
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             MiniGuideControl(
                 "↶ 30",
                 enabled = dvrActive && isSeekable,
-                modifier = Modifier.focusRequester(rewFocus).focusProperties {
+                modifier = Modifier.weight(1f).focusRequester(rewFocus).focusProperties {
                     right = playFocus
-                    down = downFromControls
-                    up = if (canRecord) recFocus else sizeFocus
+                    down = ccFocus
                 }
             ) { seekDvr(-30_000L) }
 
             MiniGuideControl(
-                if (isPlaying) "❚❚" else "▶",
-                enabled = true,
-                modifier = Modifier.focusRequester(playFocus).focusProperties {
+                if (isPlaying) "❚❚ PAUSE" else "▶ PLAY",
+                modifier = Modifier.weight(1f).focusRequester(playFocus).focusProperties {
                     left = rewFocus
                     right = ffFocus
-                    down = downFromControls
-                    up = if (canRecord) recFocus else sizeFocus
+                    down = afrFocus
                 }
             ) {
                 touch()
@@ -5157,122 +5201,215 @@ private fun MiniGuide(
             MiniGuideControl(
                 "30 ↷",
                 enabled = dvrActive && isSeekable,
-                modifier = Modifier.focusRequester(ffFocus).focusProperties {
+                modifier = Modifier.weight(1f).focusRequester(ffFocus).focusProperties {
                     left = playFocus
-                    right = ccFocus
-                    down = downFromControls
-                    up = sizeFocus
+                    right = recFocus
+                    down = modeFocus
                 }
             ) { seekDvr(30_000L) }
 
             MiniGuideControl(
-                if (ccEnabled) "CC ON" else "CC",
-                modifier = Modifier.focusRequester(ccFocus).focusProperties {
+                if (recordingThis) "■ STOP REC" else "● REC",
+                enabled = canRecord,
+                activeColor = Live,
+                modifier = Modifier.weight(1f).focusRequester(recFocus).focusProperties {
                     left = ffFocus
+                    right = sizeFocus
+                    down = retryFocus
+                }
+            ) {
+                touch()
+                if (canRecord) onRecord() else toast(context, "Recording is not available for this channel.")
+            }
+
+            MiniGuideControl(
+                "SIZE",
+                modifier = Modifier.weight(1f).focusRequester(sizeFocus).focusProperties {
+                    left = recFocus
+                    down = settingsFocus
+                }
+            ) { touch(); onResize() }
+        }
+
+        Spacer(Modifier.height(6.dp))
+
+        // Row 2: secondary actions; same five columns as row 1.
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            MiniGuideControl(
+                if (ccEnabled) "CC ON" else "CC",
+                modifier = Modifier.weight(1f).focusRequester(ccFocus).focusProperties {
+                    up = rewFocus
                     right = afrFocus
-                    down = downFromControls
-                    up = sizeFocus
+                    down = timelineFocus
                 }
             ) { touch(); onToggleCc() }
 
             MiniGuideControl(
                 if (afrEnabled) "AFR ON" else "AFR",
-                modifier = Modifier.focusRequester(afrFocus).focusProperties {
+                modifier = Modifier.weight(1f).focusRequester(afrFocus).focusProperties {
+                    up = playFocus
                     left = ccFocus
                     right = modeFocus
-                    down = downFromControls
-                    up = retryFocus
+                    down = timelineFocus
                 }
             ) { touch(); onToggleAfr() }
 
             MiniGuideControl(
-                if (Playback.simpleRaw) "SMOOTH" else "DVR LIVE",
-                modifier = Modifier.focusRequester(modeFocus).focusProperties {
+                modeLabel,
+                modifier = Modifier.weight(1f).focusRequester(modeFocus).focusProperties {
+                    up = ffFocus
                     left = afrFocus
-                    right = if (canRecord) recFocus else sizeFocus
-                    down = downFromControls
-                    up = if (canRecord) recFocus else sizeFocus
-                }
+                    right = retryFocus
+                    down = timelineFocus
+                },
+                activeColor = if (Playback.directLive) Accent else Ink
             ) { touch(); onToggleLiveMode() }
 
-            Text(
-                ProviderStreams.label(prefs),
-                color = Muted, fontSize = 9.sp, modifier = Modifier.padding(start = 4.dp)
-            )
-        }
+            MiniGuideControl(
+                "↻ RETRY",
+                modifier = Modifier.weight(1f).focusRequester(retryFocus).focusProperties {
+                    up = recFocus
+                    left = modeFocus
+                    right = settingsFocus
+                    down = timelineFocus
+                }
+            ) { touch(); onRetry() }
 
-        Spacer(Modifier.height(8.dp))
+            MiniGuideControl(
+                "⚙ SETTINGS",
+                modifier = Modifier.weight(1f).focusRequester(settingsFocus).focusProperties {
+                    up = sizeFocus
+                    left = retryFocus
+                    down = timelineFocus
+                }
+            ) { touch(); onOpenSettings() }
+        }
 
         if (recordingThis) {
-            Text("● Recording this channel", color = Live, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(3.dp))
+            Spacer(Modifier.height(4.dp))
+            Text("● Recording this channel — REC above stops it", color = Live, fontSize = 10.sp, fontWeight = FontWeight.Bold)
         }
 
-        if (dvrActive) {
-            Text(
-                buildString {
-                    append("DVR started ")
-                    if (Timeshift.startedAtWallMs > 0L) append(fmt.format(Date(Timeshift.startedAtWallMs))) else append("now")
-                    append("  •  ")
-                    append(shortTime(playerPosMs))
-                    append(" watched  •  ")
-                    append(shortTime(behindMs))
-                    append(" behind LIVE")
-                    if (!isSeekable) append("  •  building rewind buffer")
-                },
-                color = Muted, fontSize = 10.sp
-            )
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .height(24.dp)
-                    .tvFocus(RoundedCornerShape(8.dp))
-                    .focusRequester(timelineFocus)
-                    .focusProperties { up = playFocus; down = recentFocus }
-                    .focusable()
-                    .onPreviewKeyEvent { ev ->
-                        if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                        when (ev.key) {
-                            Key.DirectionLeft -> { seekDvr(-30_000L); true }
-                            Key.DirectionRight -> { seekDvr(30_000L); true }
-                            else -> false
-                        }
+        Spacer(Modifier.height(7.dp))
+
+        // X1-style program/DVR line. The entire track is the CURRENT SHOW.
+        // Gold = elapsed program time; cyan = the portion EZTV actually has in
+        // its DVR file; pink dot = where the viewer is currently watching.
+        val showStart = nowShow?.startMs ?: 0L
+        val showEnd = nowShow?.endMs ?: 0L
+        val showDuration = (showEnd - showStart).coerceAtLeast(0L)
+        val hasProgramWindow = showDuration > 1_000L
+        val dvrStartWall = Timeshift.startedAtWallMs
+        val playWall = if (dvrStartWall > 0L) dvrStartWall + playerPosMs else nowMs
+        val programLiveFraction = if (hasProgramWindow)
+            ((nowMs - showStart).toFloat() / showDuration.toFloat()).coerceIn(0f, 1f)
+        else dvrProgress
+        val programPlayFraction = if (hasProgramWindow)
+            ((playWall - showStart).toFloat() / showDuration.toFloat()).coerceIn(0f, 1f)
+        else dvrProgress
+        val dvrStartFraction = if (hasProgramWindow && dvrStartWall > 0L)
+            ((maxOf(dvrStartWall, showStart) - showStart).toFloat() / showDuration.toFloat()).coerceIn(0f, 1f)
+        else 0f
+        val dvrEndFraction = if (hasProgramWindow && dvrActive)
+            ((minOf(nowMs, showEnd) - showStart).toFloat() / showDuration.toFloat()).coerceIn(0f, 1f)
+        else if (dvrActive) 1f else 0f
+
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(64.dp)
+                .tvFocus(RoundedCornerShape(9.dp))
+                .focusRequester(timelineFocus)
+                .focusProperties {
+                    up = modeFocus
+                    if (entries.isNotEmpty()) down = recentFocus
+                }
+                .focusable()
+                .onPreviewKeyEvent { ev ->
+                    if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                    when (ev.key) {
+                        Key.DirectionLeft -> { seekDvr(-30_000L); true }
+                        Key.DirectionRight -> { seekDvr(30_000L); true }
+                        else -> false
                     }
-                    .padding(vertical = 8.dp)
-            ) {
-                LinearProgressIndicator(
-                    progress = { dvrProgress },
-                    color = Accent,
-                    trackColor = Color(0x554A4E5C),
-                    modifier = Modifier.fillMaxWidth().height(7.dp).clip(RoundedCornerShape(4.dp))
-                )
+                }
+                .padding(horizontal = 8.dp, vertical = 5.dp)
+        ) {
+            Column(Modifier.fillMaxWidth()) {
+                Row(Modifier.fillMaxWidth()) {
+                    Text(
+                        if (hasProgramWindow) fmt.format(Date(showStart))
+                        else if (Timeshift.startedAtWallMs > 0L) fmt.format(Date(Timeshift.startedAtWallMs)) else "DVR START",
+                        color = Muted, fontSize = 9.sp
+                    )
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        if (hasProgramWindow) fmt.format(Date(showEnd)) else "LIVE",
+                        color = Muted, fontSize = 9.sp
+                    )
+                }
+                Canvas(Modifier.fillMaxWidth().height(18.dp)) {
+                    val y = size.height / 2f
+                    val w = size.width
+                    drawLine(
+                        color = Color(0xFF454958),
+                        start = Offset(0f, y),
+                        end = Offset(w, y),
+                        strokeWidth = 8f,
+                        cap = StrokeCap.Round
+                    )
+                    // How far the scheduled show has progressed.
+                    drawLine(
+                        color = Accent.copy(alpha = 0.85f),
+                        start = Offset(0f, y),
+                        end = Offset(w * programLiveFraction, y),
+                        strokeWidth = 8f,
+                        cap = StrokeCap.Round
+                    )
+                    // What part of that show is actually stored in EZTV's DVR.
+                    if (dvrActive && dvrEndFraction > dvrStartFraction) {
+                        drawLine(
+                            color = Color(0xFF33E1FF),
+                            start = Offset(w * dvrStartFraction, y),
+                            end = Offset(w * dvrEndFraction, y),
+                            strokeWidth = 8f,
+                            cap = StrokeCap.Round
+                        )
+                    }
+                    drawCircle(
+                        color = FocusPink,
+                        radius = 7f,
+                        center = Offset(w * programPlayFraction, y)
+                    )
+                }
+                val timelineText = when {
+                    Playback.directLive ->
+                        "DIRECT RESCUE — DVR controls unavailable • choose DVR RETRY above"
+                    Playback.simpleRaw ->
+                        "SMOOTH LIVE • buffer ${String.format(java.util.Locale.US, "%.1f", playerBufferMs / 1000.0)}s"
+                    dvrActive && hasProgramWindow -> {
+                        val startTxt = fmt.format(Date(maxOf(Timeshift.startedAtWallMs, showStart)))
+                        "DVR buffer starts $startTxt • ${shortTime(behindMs)} behind LIVE • ←/→ jumps 30 sec"
+                    }
+                    dvrActive ->
+                        "DVR ${shortTime(playerPosMs)} / ${shortTime(dvrWindowMs)} • ${shortTime(behindMs)} behind LIVE • ←/→ jumps 30 sec"
+                    else ->
+                        "${Playback.livePathLabel()} • live buffer ${String.format(java.util.Locale.US, "%.1f", playerBufferMs / 1000.0)}s"
+                }
+                Text(timelineText, color = Muted, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            Row(Modifier.fillMaxWidth()) {
-                Text("DVR START", color = Muted, fontSize = 9.sp)
-                Spacer(Modifier.weight(1f))
-                Text(
-                    if (behindMs < 1500L) "LIVE" else "${shortTime(behindMs)} behind LIVE",
-                    color = if (behindMs < 1500L) Live else Muted,
-                    fontSize = 9.sp
-                )
-            }
-        } else {
-            LinearProgressIndicator(
-                progress = { bufferProgress },
-                color = Accent,
-                trackColor = Color(0x55202634),
-                modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp))
-            )
-            Text(
-                "${Playback.livePathLabel()}  •  live buffer ${String.format(java.util.Locale.US, "%.1f", playerBufferMs / 1000.0)}s",
-                color = Muted, fontSize = 10.sp
-            )
         }
 
-        Row(Modifier.fillMaxWidth().padding(top = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(
                 "${Playback.livePathLabel()}  •  DVR ${String.format(java.util.Locale.US, "%.0f", dvrBytes / 1_048_576.0)} MB",
-                color = Muted, fontSize = 9.sp, modifier = Modifier.weight(1f)
+                color = if (Playback.directLive) Accent else Muted,
+                fontSize = 9.sp,
+                modifier = Modifier.weight(1f)
             )
             Text(
                 if (afrEnabled) {
@@ -5285,9 +5422,9 @@ private fun MiniGuide(
         }
 
         if (entries.isNotEmpty()) {
-            Spacer(Modifier.height(9.dp))
+            Spacer(Modifier.height(7.dp))
             Text("Recent channels", color = Muted, fontSize = 10.sp)
-            Spacer(Modifier.height(4.dp))
+            Spacer(Modifier.height(3.dp))
             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 itemsIndexed(entries) { itemIndex, ch ->
                     val recentNow = remember(ch.url, EpgStore.loaded.value) {
@@ -5298,7 +5435,7 @@ private fun MiniGuide(
                         Modifier
                             .width(210.dp)
                             .then(if (itemIndex == 0) Modifier.focusRequester(recentFocus) else Modifier)
-                            .focusProperties { up = if (dvrActive) timelineFocus else playFocus }
+                            .focusProperties { up = timelineFocus }
                             .tvFocus(RoundedCornerShape(10.dp))
                             .background(Color(0x55202634), RoundedCornerShape(10.dp))
                             .clickable { touch(); onTune(ch) }
@@ -5337,18 +5474,22 @@ private fun MiniGuideControl(
     label: String,
     enabled: Boolean = true,
     modifier: Modifier = Modifier,
+    activeColor: Color = Ink,
     onClick: () -> Unit
 ) {
     Text(
         label,
-        color = if (enabled) Ink else Muted.copy(alpha = 0.55f),
+        color = if (enabled) activeColor else Muted.copy(alpha = 0.62f),
         fontSize = 12.sp,
         fontWeight = FontWeight.Bold,
         modifier = modifier
             .tvFocus(RoundedCornerShape(20.dp))
             .background(Color(0x66202634), RoundedCornerShape(20.dp))
-            .clickable(enabled = enabled) { onClick() }
-            .padding(horizontal = 13.dp, vertical = 8.dp)
+            // Keep unavailable buttons focusable so the D-pad grid never hits
+            // a dead end. Pressing one gives the user the reason it is
+            // unavailable (for example DIRECT RESCUE vs DVR Live).
+            .clickable { onClick() }
+            .padding(horizontal = 10.dp, vertical = 8.dp)
     )
 }
 
