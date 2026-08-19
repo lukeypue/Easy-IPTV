@@ -133,7 +133,7 @@ class RecordingService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle("Recording: $name")
-            .setContentText("EZTV is recording in the background.")
+            .setContentText("Zako is recording in the background.")
             .setOngoing(true)
             .setContentIntent(open)
             .addAction(android.R.drawable.ic_media_pause, "Stop recording", stop)

@@ -35,13 +35,13 @@ import java.util.concurrent.TimeUnit
  * v4.20 download engine.
  *
  * New IPTV downloads no longer use Android DownloadManager. On the tested Fire
- * TV, EZTV itself can write recordings to the removable USB, while the system
+ * TV, Zako itself can write recordings to the removable USB, while the system
  * DownloadManager job stayed stuck after enqueue(). Keep networking + storage in
- * EZTV's own process: one foreground service, one socket, one streaming file
+ * Zako's own process: one foreground service, one socket, one streaming file
  * copy, no whole-file RAM buffer.
  *
  * DownloadManager remains referenced ONLY so completed downloads created by an
- * older EZTV version can be recognized during migration instead of being erased.
+ * older Zako version can be recognized during migration instead of being erased.
  */
 object DownloadStore {
     const val KEEP_FOREVER = 0
@@ -80,7 +80,7 @@ object DownloadStore {
     }
 
     /**
-     * One-time v4.20 migration from system DownloadManager to EZTV's own
+     * One-time v4.20 migration from system DownloadManager to Zako's own
      * downloader. Preserve genuinely completed files; cancel/remove old jobs
      * that were pending/running/paused/failed so a v4.19 zombie cannot block
      * the first v4.20 download forever.
@@ -187,7 +187,7 @@ object DownloadStore {
     private fun hasNativeState(context: Context, id: Long): Boolean =
         appPrefs(context).contains(stateKey(id))
 
-    /** Older EZTV builds used DownloadManager. Read its old row only for migration. */
+    /** Older Zako builds used DownloadManager. Read its old row only for migration. */
     private fun legacyManagerStatus(context: Context, id: Long): Int? = try {
         val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
         dm.query(DownloadManager.Query().setFilterById(id)).use { c ->
@@ -320,7 +320,7 @@ object DownloadStore {
         title.replace(Regex("[^A-Za-z0-9 _.-]"), "").trim().replace(' ', '_').take(48)
             .ifBlank { "video" }
 
-    /** Cancel every EZTV/provider download still in progress. Finished files stay. */
+    /** Cancel every Zako/provider download still in progress. Finished files stay. */
     fun cancelInFlight(context: Context, prefs: SharedPreferences): Int {
         val active = load(prefs).filter { isInFlight(context, it.id) }
         if (active.isEmpty()) return 0
@@ -366,7 +366,7 @@ object DownloadStore {
             }
 
             if (url.substringBefore('?').endsWith(".m3u8", ignoreCase = true)) {
-                return "This provider is delivering that title as HLS. EZTV downloads direct movie/episode files; HLS offline saving is not enabled yet."
+                return "This provider is delivering that title as HLS. Zako downloads direct movie/episode files; HLS offline saving is not enabled yet."
             }
 
             val extRaw = url.substringBefore('?').substringAfterLast('.', "mp4")

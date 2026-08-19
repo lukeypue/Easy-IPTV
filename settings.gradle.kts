@@ -19,5 +19,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "EasyIPTV"
+rootProject.name = "Zako"
 include(":app")

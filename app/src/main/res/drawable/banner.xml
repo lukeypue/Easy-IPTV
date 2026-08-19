@@ -1,34 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Fire TV banner: gradient, play badge, and bold EZTV lettering. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:aapt="http://schemas.android.com/aapt"
     android:width="320dp" android:height="180dp"
     android:viewportWidth="320" android:viewportHeight="180">
     <path android:pathData="M0,0h320v180h-320z">
         <aapt:attr name="android:fillColor">
-            <gradient
-                android:startColor="#2B0A5E"
-                android:centerColor="#8A1FA8"
-                android:endColor="#FF6A2B"
-                android:startX="0" android:startY="180"
-                android:endX="320" android:endY="0"
-                android:type="linear" />
+            <gradient android:startColor="#070B13" android:centerColor="#0C1630" android:endColor="#111C3C"
+                android:startX="0" android:startY="180" android:endX="320" android:endY="0" android:type="linear" />
         </aapt:attr>
     </path>
-    <path android:fillColor="#33FFFFFF" android:pathData="M0,150h320v30h-320z"/>
-    <path android:fillColor="#FFFFFF" android:pathData="M62,90m-36,0a36,36 0 1,1 72,0a36,36 0 1,1 -72,0"/>
-    <path android:fillColor="#8A1FA8" android:pathData="M50,68l40,22l-40,22z"/>
-    <!-- E -->
-    <path android:fillColor="#FFFFFF"
-        android:pathData="M115,70 h26 v9 h-17 v6.5 h14 v9 h-14 v6.5 h17 v9 h-26 Z"/>
-    <!-- Z -->
-    <path android:fillColor="#FFFFFF"
-        android:pathData="M148,70 h26 v8 l-15,23 h15 v9 h-26 v-8 l15,-23 h-15 Z"/>
-    <!-- T -->
-    <path android:fillColor="#FFFFFF"
-        android:pathData="M181,70 h26 v9 h-8.5 v31 h-9 v-31 h-8.5 Z"/>
-    <!-- V -->
-    <path android:fillColor="#FFFFFF"
-        android:pathData="M212,70 h9.5 l6.5,27 l6.5,-27 h9.5 l-11,40 h-10 Z"/>
-    <path android:fillColor="#FFD9B8" android:pathData="M115,116h129v4h-129z"/>
+    <!-- Zako mark -->
+    <path android:fillType="evenOdd" android:fillColor="#5C78D8FF"
+        android:pathData="M72,40 A50,50 0,1 1 71.99,40 Z M72,47 A43,43 0,1 0 72.01,47 Z" />
+    <path android:pathData="M42,66 C51,56 66,54 88,56 L96,66 C84,66 71,67 58,70 L91,71 C99,71 104,75 105,81 C94,88 84,95 73,102 C64,108 57,114 52,120 C64,115 81,116 95,124 L86,137 C74,131 57,131 44,139 L36,126 C43,115 57,104 75,93 L96,80 L51,79 C43,79 39,75 39,70 Z">
+        <aapt:attr name="android:fillColor"><gradient android:startX="38" android:startY="132" android:endX="104" android:endY="55" android:startColor="#70DFFF" android:centerColor="#FFFFFF" android:endColor="#496EFF" android:type="linear" /></aapt:attr>
+    </path>
+    <!-- ZAKO wordmark, block geometry -->
+    <path android:fillColor="#F4F7FF" android:pathData="M137,70 h34 v8 l-22,26 h22 v9 h-36 v-8 l22,-26 h-20 Z" />
+    <path android:fillType="evenOdd" android:fillColor="#F4F7FF" android:pathData="M180,113 L194,70 h12 l14,43 h-10 l-3,-10 h-15 l-3,10 Z M195,95 h10 l-5,-17 Z" />
+    <path android:fillColor="#F4F7FF" android:pathData="M228,70 h10 v17 l14,-17 h12 l-17,20 l18,23 h-12 l-15,-20 v20 h-10 Z" />
+    <path android:fillType="evenOdd" android:fillColor="#F4F7FF" android:pathData="M272,70 h18 c13,0 20,8 20,21 c0,14 -7,22 -20,22 h-18 Z M282,79 v25 h7 c7,0 11,-4 11,-13 c0,-8 -4,-12 -11,-12 Z" />
+    <path android:fillColor="#6CCBFF" android:pathData="M137,124h171v3h-171z" />
 </vector>
