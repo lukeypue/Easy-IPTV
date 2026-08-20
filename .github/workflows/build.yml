@@ -16,6 +16,7 @@ jobs:
 
       - name: Apply Zako v4.24 source patch
         run: |
+          python3 tools/fix_v424_patcher_source.py
           python3 tools/apply_v424.py
           python3 tools/apply_v424_post.py
           grep -q "SearchTvKeyboardField" app/src/main/java/com/easyiptv/player/MainActivity.kt
