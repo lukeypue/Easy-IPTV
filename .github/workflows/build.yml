@@ -3,6 +3,8 @@ name: Build Easy IPTV APK
 on:
   push:
     branches: [ "main", "master", "zako-v4.24-polish" ]
+  pull_request:
+    branches: [ "main", "master" ]
   workflow_dispatch:
 
 jobs:
