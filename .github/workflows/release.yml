@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   release:
@@ -142,6 +142,28 @@ jobs:
           EXPECTED="8EF5FE2873F7A9D40302E722822C05B37B471AB08DF23785FA0A1AEB19A2C165"
           test -n "$ACTUAL"
           test "$ACTUAL" = "$EXPECTED"
+
+      - name: Prepare updater APK
+        if: env.ZAKO_SIGNING_CONFIGURED == 'true'
+        run: |
+          APK="$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)"
+          test -n "$APK"
+          cp "$APK" app/build/outputs/apk/release/Zako-v4.25.apk
+
+      - name: Publish updater test prerelease
+        if: env.ZAKO_SIGNING_CONFIGURED == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v4.25 >/dev/null 2>&1; then
+            gh release upload v4.25 app/build/outputs/apk/release/Zako-v4.25.apk --clobber
+          else
+            gh release create v4.25 app/build/outputs/apk/release/Zako-v4.25.apk \
+              --target "$GITHUB_SHA" \
+              --title "Zako 4.25 Test" \
+              --notes "Tester build for validating Zako's manual in-app update flow. No playlists or content included." \
+              --prerelease
+          fi
 
       - name: Upload release candidate
         uses: actions/upload-artifact@v4
