@@ -37,13 +37,17 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Restore permanent Zako signing key
-        if: ${{ secrets.ZAKO_RELEASE_KEYSTORE_B64 != '' }}
+      - name: Restore permanent Zako signing key when configured
         env:
           KEYSTORE_B64: ${{ secrets.ZAKO_RELEASE_KEYSTORE_B64 }}
         run: |
-          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/zako-release.jks"
-          chmod 600 "$RUNNER_TEMP/zako-release.jks"
+          if [ -n "$KEYSTORE_B64" ]; then
+            printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/zako-release.jks"
+            chmod 600 "$RUNNER_TEMP/zako-release.jks"
+            echo "ZAKO_SIGNING_CONFIGURED=true" >> "$GITHUB_ENV"
+          else
+            echo "ZAKO_SIGNING_CONFIGURED=false" >> "$GITHUB_ENV"
+          fi
 
       - name: Build release APK
         env:
@@ -66,9 +70,12 @@ jobs:
             exit 1
           fi
 
-      - name: Verify permanent signing certificate
-        if: ${{ secrets.ZAKO_RELEASE_KEYSTORE_B64 != '' }}
+      - name: Verify permanent signing certificate when configured
         run: |
+          if [ "$ZAKO_SIGNING_CONFIGURED" != "true" ]; then
+            echo "Signing secrets are not configured yet; unsigned release candidate accepted for local signing."
+            exit 0
+          fi
           APK="$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)"
           test -n "$APK"
           APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
