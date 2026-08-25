@@ -23,8 +23,8 @@ android {
         applicationId = "com.easyiptv.player"
         minSdk = 26
         targetSdk = 34
-        versionCode = 49
-        versionName = "4.24"
+        versionCode = 50
+        versionName = "4.25"
     }
 
     signingConfigs {
