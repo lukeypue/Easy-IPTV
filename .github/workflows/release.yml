@@ -1,0 +1,189 @@
+name: Build Zako Release APK
+
+on:
+  push:
+    branches: [ "zako-v4.24-polish" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Apply Zako v4.26+ source patches
+        run: |
+          python3 tools/fix_v424_patcher_source.py
+          python3 tools/apply_v424.py
+          python3 tools/apply_v424_post.py
+          python3 tools/apply_v425.py
+          python3 tools/apply_v425_remote_info.py
+          python3 tools/apply_v426_updater.py
+          python3 tools/verify_v425.py
+          python3 tools/verify_v426_updater.py
+          grep -q "SearchTvKeyboardField" app/src/main/java/com/easyiptv/player/MainActivity.kt
+          grep -q "DvrSeekAccelerator" app/src/main/java/com/easyiptv/player/MainActivity.kt
+          grep -q "LiveGridGuide" app/src/main/java/com/easyiptv/player/MainActivity.kt
+          grep -q "ZAKO_V425_REMOTE_INFO" app/src/main/java/com/easyiptv/player/MainActivity.kt
+          grep -q "ZAKO_V426_NATIVE_UPDATER" app/src/main/java/com/easyiptv/player/MainActivity.kt
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Restore permanent Zako signing key when configured
+        env:
+          KEYSTORE_B64: ${{ secrets.ZAKO_RELEASE_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/zako-release.jks"
+            chmod 600 "$RUNNER_TEMP/zako-release.jks"
+            echo "ZAKO_SIGNING_CONFIGURED=true" >> "$GITHUB_ENV"
+          else
+            echo "ZAKO_SIGNING_CONFIGURED=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build release APK
+        env:
+          ZAKO_KEYSTORE_PATH: ${{ runner.temp }}/zako-release.jks
+          ZAKO_STORE_PASSWORD: ${{ secrets.ZAKO_STORE_PASSWORD }}
+          ZAKO_KEY_ALIAS: ${{ secrets.ZAKO_KEY_ALIAS }}
+          ZAKO_KEY_PASSWORD: ${{ secrets.ZAKO_KEY_PASSWORD }}
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Verify release manifest
+        run: |
+          python3 - <<'PY'
+          import glob
+          import xml.etree.ElementTree as ET
+
+          candidates = glob.glob(
+              "app/build/intermediates/merged_manifests/release/**/AndroidManifest.xml",
+              recursive=True,
+          )
+          if not candidates:
+              candidates = glob.glob(
+                  "app/build/intermediates/**/release/**/AndroidManifest.xml",
+                  recursive=True,
+              )
+          if not candidates:
+              raise SystemExit("Could not find the merged release manifest")
+
+          manifest = candidates[0]
+          root = ET.parse(manifest).getroot()
+          android = "{http://schemas.android.com/apk/res/android}"
+          application = root.find("application")
+          if application is None:
+              raise SystemExit("Merged release manifest has no application element")
+
+          if application.get(android + "debuggable") == "true":
+              raise SystemExit("Release manifest is debuggable; refusing artifact")
+
+          requested = {
+              element.get(android + "name")
+              for element in root
+              if element.tag.endswith("uses-permission")
+          }
+          if "android.permission.DUMP" in requested:
+              raise SystemExit("Zako unexpectedly requests android.permission.DUMP")
+          if "android.permission.REQUEST_INSTALL_PACKAGES" not in requested:
+              raise SystemExit("Native updater permission missing from release manifest")
+
+          providers = [
+              element for element in application
+              if element.tag.endswith("provider") and
+              element.get(android + "name") == "androidx.core.content.FileProvider"
+          ]
+          if not providers:
+              raise SystemExit("Native updater FileProvider missing from release manifest")
+
+          guarded = [
+              element.get(android + "name")
+              for element in root.iter()
+              if element.get(android + "permission") == "android.permission.DUMP"
+          ]
+          if guarded:
+              print("DUMP is only used as a caller restriction by merged component(s):")
+              for name in guarded:
+                  print(f"  - {name or '<unnamed component>'}")
+
+          print(f"Release manifest verified: {manifest}")
+          print("  debuggable: false")
+          print("  requested DUMP permission: no")
+          print("  native updater permission/provider: yes")
+          PY
+
+      - name: Prepare one-time local-signing bootstrap tools
+        run: |
+          if [ "$ZAKO_SIGNING_CONFIGURED" = "true" ]; then
+            exit 0
+          fi
+          mkdir -p "$RUNNER_TEMP/zako-bootstrap"
+          APK="$(find app/build/outputs/apk/release -name '*unsigned*.apk' | head -n 1)"
+          test -n "$APK"
+          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          test -x "$BUILD_TOOLS/zipalign"
+          test -f "$BUILD_TOOLS/lib/apksigner.jar"
+          "$BUILD_TOOLS/zipalign" -P 16 -f 4 "$APK" "$RUNNER_TEMP/zako-bootstrap/Zako-v4.27-aligned-unsigned.apk"
+          cp "$BUILD_TOOLS/lib/apksigner.jar" "$RUNNER_TEMP/zako-bootstrap/apksigner.jar"
+
+      - name: Verify permanent signing certificate when configured
+        run: |
+          if [ "$ZAKO_SIGNING_CONFIGURED" != "true" ]; then
+            echo "Signing secrets are not configured yet; unsigned release candidate accepted for local signing."
+            exit 0
+          fi
+          APK="$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)"
+          test -n "$APK"
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          test -x "$APKSIGNER"
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
+          ACTUAL="$("$APKSIGNER" verify --print-certs "$APK" | sed -nE 's/^(V[0-9.]+ Signer: |Signer #1 )certificate SHA-256 digest: //p' | head -n 1 | tr '[:lower:]' '[:upper:]')"
+          EXPECTED="8EF5FE2873F7A9D40302E722822C05B37B471AB08DF23785FA0A1AEB19A2C165"
+          test -n "$ACTUAL"
+          test "$ACTUAL" = "$EXPECTED"
+
+      - name: Prepare updater APK
+        if: env.ZAKO_SIGNING_CONFIGURED == 'true'
+        run: |
+          APK="$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)"
+          test -n "$APK"
+          cp "$APK" app/build/outputs/apk/release/Zako-v4.27.apk
+
+      - name: Publish updater test prerelease
+        if: env.ZAKO_SIGNING_CONFIGURED == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v4.27 >/dev/null 2>&1; then
+            gh release upload v4.27 app/build/outputs/apk/release/Zako-v4.27.apk --clobber
+          else
+            gh release create v4.27 app/build/outputs/apk/release/Zako-v4.27.apk \
+              --target "$GITHUB_SHA" \
+              --title "Zako 4.27 Updater Loop Test" \
+              --notes "Version-bump tester build for validating the native Zako 4.26-to-4.27 in-app update path. No playlists or content included." \
+              --prerelease
+          fi
+
+      - name: Upload release candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: Zako-v4.27-release
+          path: |
+            app/build/outputs/apk/release/*.apk
+            ${{ runner.temp }}/zako-bootstrap/*
+          if-no-files-found: error
