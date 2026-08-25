@@ -15,18 +15,21 @@ jobs:
       - name: Get the code
         uses: actions/checkout@v4
 
-      - name: Apply Zako v4.25 source patches
+      - name: Apply Zako v4.26 source patches
         run: |
           python3 tools/fix_v424_patcher_source.py
           python3 tools/apply_v424.py
           python3 tools/apply_v424_post.py
           python3 tools/apply_v425.py
           python3 tools/apply_v425_remote_info.py
+          python3 tools/apply_v426_updater.py
           python3 tools/verify_v425.py
+          python3 tools/verify_v426_updater.py
           grep -q "SearchTvKeyboardField" app/src/main/java/com/easyiptv/player/MainActivity.kt
           grep -q "DvrSeekAccelerator" app/src/main/java/com/easyiptv/player/MainActivity.kt
           grep -q "LiveGridGuide" app/src/main/java/com/easyiptv/player/MainActivity.kt
           grep -q "ZAKO_V425_REMOTE_INFO" app/src/main/java/com/easyiptv/player/MainActivity.kt
+          grep -q "ZAKO_V426_NATIVE_UPDATER" app/src/main/java/com/easyiptv/player/MainActivity.kt
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -97,6 +100,16 @@ jobs:
           }
           if "android.permission.DUMP" in requested:
               raise SystemExit("Zako unexpectedly requests android.permission.DUMP")
+          if "android.permission.REQUEST_INSTALL_PACKAGES" not in requested:
+              raise SystemExit("Native updater permission missing from release manifest")
+
+          providers = [
+              element for element in application
+              if element.tag.endswith("provider") and
+              element.get(android + "name") == "androidx.core.content.FileProvider"
+          ]
+          if not providers:
+              raise SystemExit("Native updater FileProvider missing from release manifest")
 
           guarded = [
               element.get(android + "name")
@@ -111,6 +124,7 @@ jobs:
           print(f"Release manifest verified: {manifest}")
           print("  debuggable: false")
           print("  requested DUMP permission: no")
+          print("  native updater permission/provider: yes")
           PY
 
       - name: Prepare one-time local-signing bootstrap tools
@@ -124,7 +138,7 @@ jobs:
           BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
           test -x "$BUILD_TOOLS/zipalign"
           test -f "$BUILD_TOOLS/lib/apksigner.jar"
-          "$BUILD_TOOLS/zipalign" -P 16 -f 4 "$APK" "$RUNNER_TEMP/zako-bootstrap/Zako-v4.25-aligned-unsigned.apk"
+          "$BUILD_TOOLS/zipalign" -P 16 -f 4 "$APK" "$RUNNER_TEMP/zako-bootstrap/Zako-v4.26-aligned-unsigned.apk"
           cp "$BUILD_TOOLS/lib/apksigner.jar" "$RUNNER_TEMP/zako-bootstrap/apksigner.jar"
 
       - name: Verify permanent signing certificate when configured
@@ -148,27 +162,27 @@ jobs:
         run: |
           APK="$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)"
           test -n "$APK"
-          cp "$APK" app/build/outputs/apk/release/Zako-v4.25.apk
+          cp "$APK" app/build/outputs/apk/release/Zako-v4.26.apk
 
       - name: Publish updater test prerelease
         if: env.ZAKO_SIGNING_CONFIGURED == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view v4.25 >/dev/null 2>&1; then
-            gh release upload v4.25 app/build/outputs/apk/release/Zako-v4.25.apk --clobber
+          if gh release view v4.26 >/dev/null 2>&1; then
+            gh release upload v4.26 app/build/outputs/apk/release/Zako-v4.26.apk --clobber
           else
-            gh release create v4.25 app/build/outputs/apk/release/Zako-v4.25.apk \
+            gh release create v4.26 app/build/outputs/apk/release/Zako-v4.26.apk \
               --target "$GITHUB_SHA" \
-              --title "Zako 4.25 Test" \
-              --notes "Tester build for validating Zako's manual in-app update flow. No playlists or content included." \
+              --title "Zako 4.26 Native Updater Test" \
+              --notes "Tester build that downloads Zako updates inside the app, verifies the permanent signing certificate, and hands the APK directly to Android/Fire TV's installer. No playlists or content included." \
               --prerelease
           fi
 
       - name: Upload release candidate
         uses: actions/upload-artifact@v4
         with:
-          name: Zako-v4.25-release
+          name: Zako-v4.26-release
           path: |
             app/build/outputs/apk/release/*.apk
             ${{ runner.temp }}/zako-bootstrap/*
