@@ -21,10 +21,12 @@ jobs:
           python3 tools/apply_v424.py
           python3 tools/apply_v424_post.py
           python3 tools/apply_v425.py
+          python3 tools/apply_v425_remote_info.py
           python3 tools/verify_v425.py
           grep -q "SearchTvKeyboardField" app/src/main/java/com/easyiptv/player/MainActivity.kt
           grep -q "DvrSeekAccelerator" app/src/main/java/com/easyiptv/player/MainActivity.kt
           grep -q "LiveGridGuide" app/src/main/java/com/easyiptv/player/MainActivity.kt
+          grep -q "ZAKO_V425_REMOTE_INFO" app/src/main/java/com/easyiptv/player/MainActivity.kt
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
