@@ -61,7 +61,6 @@ jobs:
         run: |
           python3 - <<'PY'
           import glob
-          import sys
           import xml.etree.ElementTree as ET
 
           candidates = glob.glob(
@@ -109,6 +108,20 @@ jobs:
           print("  requested DUMP permission: no")
           PY
 
+      - name: Prepare one-time local-signing bootstrap tools
+        run: |
+          if [ "$ZAKO_SIGNING_CONFIGURED" = "true" ]; then
+            exit 0
+          fi
+          mkdir -p "$RUNNER_TEMP/zako-bootstrap"
+          APK="$(find app/build/outputs/apk/release -name '*unsigned*.apk' | head -n 1)"
+          test -n "$APK"
+          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          test -x "$BUILD_TOOLS/zipalign"
+          test -f "$BUILD_TOOLS/lib/apksigner.jar"
+          "$BUILD_TOOLS/zipalign" -P 16 -f 4 "$APK" "$RUNNER_TEMP/zako-bootstrap/Zako-v4.24-aligned-unsigned.apk"
+          cp "$BUILD_TOOLS/lib/apksigner.jar" "$RUNNER_TEMP/zako-bootstrap/apksigner.jar"
+
       - name: Verify permanent signing certificate when configured
         run: |
           if [ "$ZAKO_SIGNING_CONFIGURED" != "true" ]; then
@@ -128,5 +141,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Zako-v4.24-release
-          path: app/build/outputs/apk/release/*.apk
+          path: |
+            app/build/outputs/apk/release/*.apk
+            ${{ runner.temp }}/zako-bootstrap/*
           if-no-files-found: error
