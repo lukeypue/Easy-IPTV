@@ -32,6 +32,12 @@ Implementation direction:
 - Use explicit per-card focus relationships where needed.
 - Audit Movies, Series, Series Detail, Search result rows, Downloads, Recordings, and Live TV for D-pad dead ends.
 
+Poster actions:
+- The poster itself remains the horizontal grid focus target.
+- On Fire TV, Down from a focused poster enters a tiny action row for that poster (`ⓘ INFO` and download where available); Left/Right moves only inside that action row, and Up returns to the poster.
+- On Android touch, the Info/download controls are directly tappable.
+- Hold-OK download remains supported as a shortcut.
+
 ## 2. Live category wraparound
 
 Live channel lists should behave like a cable lineup:
@@ -84,6 +90,11 @@ Data behavior:
 
 Add a lightweight X1/TiviMate-style time grid while retaining the existing per-channel expanded schedule button.
 
+Entry point:
+- Add one compact, focusable `GRID GUIDE`/guide action at the top of the Live TV pane.
+- The normal channel list remains the default Live TV view.
+- Back from the grid returns to the normal channel list at the same category/nearby channel position.
+
 Layout:
 - Channels vertically.
 - Time horizontally.
@@ -93,8 +104,8 @@ Layout:
 Navigation:
 - Up/Down moves between channel rows.
 - Left/Right moves through program/time cells.
-- Selecting a currently airing show offers Watch/Info/Record as applicable.
-- Selecting a future show offers Info and Schedule Recording where recording is supported.
+- Selecting a currently airing show opens a lightweight program action card with Watch, Info, and Record where applicable.
+- Selecting a future show opens the same card with Info and Schedule Recording where supported.
 
 Memory strategy:
 - Reuse the current `EpgStore` data.
@@ -104,18 +115,19 @@ Memory strategy:
 
 ## 6. Movie and Series info
 
-Add an `ⓘ`/Info action associated with movie titles/posters.
+Add an `ⓘ INFO` action next to the poster/title actions for movies and series.
 
-For Xtream playlists:
+For Xtream movies:
 - Fetch detailed VOD info only when the user opens Info.
 - Display description/plot and optional provider-supplied metadata such as year/rating when present.
 - Provide Play, Download, and Close actions.
 
 For Series:
-- Reuse or extend the existing series-info request when practical, but keep it lazy.
+- Fetch/reuse series info lazily when Info is opened, without bulk-fetching all series metadata.
+- Display provider-supplied series description and available metadata.
 
 For M3U or providers that do not supply metadata:
-- Show a simple 'No description supplied by this playlist/provider' state.
+- Show a simple `No description supplied by this playlist/provider` state.
 
 Do not bulk-fetch descriptions for the entire catalog.
 
@@ -123,12 +135,11 @@ Do not bulk-fetch descriptions for the entire catalog.
 
 Use the same underlying Zako live-DVR/timeshift engine on Android touch devices rather than creating a second DVR path.
 
-Add touch-accessible live controls:
-- Rewind.
-- Pause/Play.
-- Fast Forward.
-- Return to Live.
-- Record.
+Touch behavior:
+- On touch-capable Android devices, tapping live video reveals a compact touch control row.
+- Controls: Rewind, Pause/Play, Fast Forward, Return to Live, Record.
+- The row auto-hides after inactivity like normal playback controls.
+- Fire TV remote behavior and Mini Guide controls remain unchanged.
 
 These controls call the same `Playback.seekDvrBy`, playback, and recording functions used by the Fire TV experience.
 
@@ -142,9 +153,9 @@ Hardening work:
 - Move recording-directory scan/sort work off the main thread.
 - Reduce unnecessary refresh frequency while recording.
 - Ensure entering Recordings does not create a second player or provider stream.
-- When memory pressure is likely during an active recording, avoid rendering an unnecessary live preview SurfaceView in the home/recordings context; show a lightweight recording-status card instead.
+- During an active recording, avoid rendering an unnecessary live preview SurfaceView in the home/recordings context; show a lightweight `Recording in progress` status card instead while keeping the actual recording/DVR stream alive.
 - Review lifecycle cancellation for periodic UI loops.
-- Add memory-trim handling for disposable image/cache resources where safe.
+- Add Android memory-trim handling for disposable image/cache resources where safe.
 - Preserve the existing foreground `RecordingService`, provider-stream budgeting, storage guards, and same-channel DVR tee behavior.
 
 ## 9. Verification
@@ -157,6 +168,7 @@ Before calling the change complete:
 4. Exercise deterministic focus cases:
    - Movies/Series row Left/Right across all five positions.
    - Column-1 Left to categories.
+   - Poster Down -> action row -> Up back to poster.
    - Live list first/last wraparound.
    - Mini Guide three-row navigation.
    - Full guide Up/Down/Left/Right.
