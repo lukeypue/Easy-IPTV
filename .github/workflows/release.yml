@@ -59,16 +59,55 @@ jobs:
 
       - name: Verify release manifest
         run: |
-          MANIFEST="$(find app/build/intermediates -path '*release*' -name AndroidManifest.xml | head -n 1)"
-          test -n "$MANIFEST"
-          if grep -q 'android:debuggable="true"' "$MANIFEST"; then
-            echo "Release manifest is debuggable; refusing artifact."
-            exit 1
-          fi
-          if grep -q 'android.permission.DUMP' "$MANIFEST"; then
-            echo "Unexpected DUMP permission found in release manifest."
-            exit 1
-          fi
+          python3 - <<'PY'
+          import glob
+          import sys
+          import xml.etree.ElementTree as ET
+
+          candidates = glob.glob(
+              "app/build/intermediates/merged_manifests/release/**/AndroidManifest.xml",
+              recursive=True,
+          )
+          if not candidates:
+              candidates = glob.glob(
+                  "app/build/intermediates/**/release/**/AndroidManifest.xml",
+                  recursive=True,
+              )
+          if not candidates:
+              raise SystemExit("Could not find the merged release manifest")
+
+          manifest = candidates[0]
+          root = ET.parse(manifest).getroot()
+          android = "{http://schemas.android.com/apk/res/android}"
+          application = root.find("application")
+          if application is None:
+              raise SystemExit("Merged release manifest has no application element")
+
+          if application.get(android + "debuggable") == "true":
+              raise SystemExit("Release manifest is debuggable; refusing artifact")
+
+          requested = {
+              element.get(android + "name")
+              for element in root
+              if element.tag.endswith("uses-permission")
+          }
+          if "android.permission.DUMP" in requested:
+              raise SystemExit("Zako unexpectedly requests android.permission.DUMP")
+
+          guarded = [
+              element.get(android + "name")
+              for element in root.iter()
+              if element.get(android + "permission") == "android.permission.DUMP"
+          ]
+          if guarded:
+              print("DUMP is only used as a caller restriction by merged component(s):")
+              for name in guarded:
+                  print(f"  - {name or '<unnamed component>'}")
+
+          print(f"Release manifest verified: {manifest}")
+          print("  debuggable: false")
+          print("  requested DUMP permission: no")
+          PY
 
       - name: Verify permanent signing certificate when configured
         run: |
