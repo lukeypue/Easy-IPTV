@@ -24,6 +24,9 @@ jobs:
           python3 tools/apply_v425_remote_info.py
           python3 tools/apply_v426_updater.py
           python3 tools/apply_v428.py
+          python3 tools/verify_v425.py
+          python3 tools/verify_v426_updater.py
+          python3 tools/verify_v428.py
           if python3 tools/verify_v429.py; then
             echo "ERROR: v4.29 verifier passed before v4.29 patch"
             exit 1
@@ -33,7 +36,6 @@ jobs:
           python3 tools/apply_v429.py
           python3 tools/verify_v425.py
           python3 tools/verify_v426_updater.py
-          python3 tools/verify_v428.py
           python3 tools/verify_v429.py
 
       - name: Set up Java 17
