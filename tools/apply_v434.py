@@ -142,7 +142,7 @@ new='''        // ZAKO_V434_MINI_HEADER: keep channel identity on the left and g
                 Spacer(Modifier.width(8.dp))
             }
             Row(
-                modifier = Modifier.widthIn(max = 210.dp),
+                modifier = Modifier.then(Modifier.width(210.dp)),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
@@ -190,8 +190,7 @@ main=once(main,
 
             MiniGuideControl(
                 "PREVIOUS",
-                modifier = Modifier
-                    .weight(1f)
+                modifier = Modifier.weight(1f)
                     .focusRequester(previousFocus)
                     .focusProperties { left = sizeFocus; right = settingsFocus; down = timelineFocus }
 ''',
@@ -217,8 +216,7 @@ main=once(main,
 
             MiniGuideControl(
                 "PREVIOUS",
-                modifier = Modifier
-                    .weight(0.92f)
+                modifier = Modifier.weight(0.92f)
                     .focusRequester(previousFocus)
                     .focusProperties { left = infoFocus; right = settingsFocus; down = timelineFocus }
 ''','info control')
