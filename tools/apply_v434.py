@@ -190,7 +190,8 @@ main=once(main,
 
             MiniGuideControl(
                 "PREVIOUS",
-                modifier = Modifier.weight(1f)
+                modifier = Modifier
+                    .weight(1f)
                     .focusRequester(previousFocus)
                     .focusProperties { left = sizeFocus; right = settingsFocus; down = timelineFocus }
 ''',
@@ -216,7 +217,8 @@ main=once(main,
 
             MiniGuideControl(
                 "PREVIOUS",
-                modifier = Modifier.weight(0.92f)
+                modifier = Modifier
+                    .weight(0.92f)
                     .focusRequester(previousFocus)
                     .focusProperties { left = infoFocus; right = settingsFocus; down = timelineFocus }
 ''','info control')
