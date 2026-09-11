@@ -58,14 +58,18 @@ main = once(main,
 '''                        MediaRow(\n                            name = if (ep.plot.isBlank()) label else "$label  •  ${ep.plot}",\n                            icon = null,\n''','episode description row')
 
 # Bright yellow program titles separate them from the blue guide chrome.
-old_live = 'color = Accent, fontSize = 12.sp,\n                                        maxLines = 1, overflow = TextOverflow.Ellipsis'
-if old_live in main:
-    main = main.replace(old_live,'color = Color(0xFFFFE45C), fontSize = 12.sp,\n                                        maxLines = 1, overflow = TextOverflow.Ellipsis',1)
-    changes.append('bright live guide title')
-old_mini = 'color = Accent, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis'
-if old_mini in main:
-    main = main.replace(old_mini,'color = Color(0xFFFFE45C), fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis',1)
-    changes.append('bright mini-guide now title')
+main = once(main,
+'color = ProgramCyan, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,',
+'color = Color(0xFFFFE45C), fontSize = 12.sp, fontWeight = FontWeight.SemiBold,',
+'bright live list program title')
+main = once(main,
+'color = if (airing) ProgramCyan else Ink,\n                                        fontSize = 10.sp,',
+'color = Color(0xFFFFE45C),\n                                        fontSize = 10.sp,',
+'bright grid guide program title')
+main = once(main,
+'color = ProgramCyan, fontSize = 8.sp, fontWeight = FontWeight.SemiBold,',
+'color = Color(0xFFFFE45C), fontSize = 8.sp, fontWeight = FontWeight.SemiBold,',
+'bright mini-guide program title')
 
 # LEFT on full-screen Live TV opens Zako's guide instead of stock player controls.
 old='''                android.view.KeyEvent.KEYCODE_DPAD_UP,\n                android.view.KeyEvent.KEYCODE_DPAD_DOWN,\n                android.view.KeyEvent.KEYCODE_DPAD_LEFT,\n                android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> {\n                    // Let the recent-channel LazyRow own D-pad focus.\n                    if (miniGuideOpen) false else { pvRef?.showController(); true }\n                }'''
