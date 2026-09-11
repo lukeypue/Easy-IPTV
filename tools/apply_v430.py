@@ -29,51 +29,47 @@ data = once(data,
 
 data = once(data,
 '''                val title = o.optString("title", info?.optString("title", "") ?: "").ifBlank { "Episode $num" }\n                out.getOrPut(season) { ArrayList() }.add(\n                    Episode(id, title, season, num, "$base/series/$user/$pass/$id.$ext")\n                )''',
-'''                val title = o.optString("title", info?.optString("title", "") ?: "").ifBlank { "Episode $num" }\n                val plot = o.optString(\n                    "plot",\n                    o.optString("description", info?.optString("plot", info.optString("description", "")) ?: "")\n                ).trim()\n                out.getOrPut(season) { ArrayList() }.add(\n                    Episode(id, title, season, num, "$base/series/$user/$pass/$id.$ext", plot)\n                )''','parse episode plot')
+'''                val title = o.optString("title", info?.optString("title", "") ?: "").ifBlank { "Episode $num" }\n                val infoPlot = info?.optString("plot", info?.optString("description", "") ?: "") ?: ""\n                val plot = o.optString("plot", o.optString("description", infoPlot)).trim()\n                out.getOrPut(season) { ArrayList() }.add(\n                    Episode(id, title, season, num, "$base/series/$user/$pass/$id.$ext", plot)\n                )''','parse episode plot')
 
-# The full merged cache duplicates a huge catalog in memory during JSON serialization.
-# Avoid that peak on Fire TV; live data remains cached, and VOD refreshes on demand.
+# Avoid a second giant in-memory JSON copy while Live TV may still own decoder buffers.
 main = once(main,
 '''            if (cacheKey != null) kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {\n                DataCache.save(context, cacheKey, merged)\n            }''',
-'''            // ZAKO_V430_LOW_MEMORY_CATALOG: do not serialize the giant merged VOD catalog\n            // while Live TV may still own decoder/buffer memory. This avoids a second full\n            // in-memory JSON copy. Live startup data remains cached separately.\n''','remove VOD cache serialization spike')
+'''            // ZAKO_V430_LOW_MEMORY_CATALOG: skip serializing the giant merged VOD catalog\n            // here. Re-encoding it duplicates the catalog in RAM at the worst possible moment.\n''','remove VOD cache serialization spike')
 
-# Progressive reveal constants.
 main = once(main,
 '''private const val DVR_PRIME_BYTES = 512L * 1024L\n''',
 '''private const val DVR_PRIME_BYTES = 512L * 1024L\nprivate const val BROWSE_PAGE_SIZE = 40\n''','browse page size')
 
-# Movies: current page + one page ahead, reveal another page as the user approaches it.
+# Movies: reveal current page plus one page ahead; add another 40 as the user nears the end.
 main = once(main,
 '''    val targetFocus = remember(selectedCat, restoreUrl) { FocusRequester() }\n    val gridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState()\n''',
 '''    val targetFocus = remember(selectedCat, restoreUrl) { FocusRequester() }\n    val gridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState()\n    var visibleMovieCount by remember(selectedCat, filtered.size) {\n        mutableIntStateOf(minOf(filtered.size, maxOf(BROWSE_PAGE_SIZE * 2, targetIdx + BROWSE_PAGE_SIZE)))\n    }\n    val visibleMovies = filtered.take(visibleMovieCount)\n    LaunchedEffect(gridState, filtered.size) {\n        androidx.compose.runtime.snapshotFlow { gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }\n            .collect { last ->\n                if (last >= visibleMovieCount - 10 && visibleMovieCount < filtered.size) {\n                    visibleMovieCount = minOf(filtered.size, visibleMovieCount + BROWSE_PAGE_SIZE)\n                }\n            }\n    }\n''','movies progressive reveal')
 main = once(main,'gridItemsIndexed(filtered, key = { _, item -> item.url }) { index, m ->','gridItemsIndexed(visibleMovies, key = { _, item -> item.url }) { index, m ->','movies visible page')
 
-# Series: same paging and duplicate-safe key so bad provider IDs cannot crash Compose.
+# Series: same paging; include index in key so duplicate provider IDs cannot crash Compose.
 main = once(main,
 '''    val targetFocus = remember(selectedCat, restoreId) { FocusRequester() }\n    val gridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState()\n''',
 '''    val targetFocus = remember(selectedCat, restoreId) { FocusRequester() }\n    val gridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState()\n    var visibleSeriesCount by remember(selectedCat, filtered.size) {\n        mutableIntStateOf(minOf(filtered.size, maxOf(BROWSE_PAGE_SIZE * 2, targetIdx + BROWSE_PAGE_SIZE)))\n    }\n    val visibleSeries = filtered.take(visibleSeriesCount)\n    LaunchedEffect(gridState, filtered.size) {\n        androidx.compose.runtime.snapshotFlow { gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }\n            .collect { last ->\n                if (last >= visibleSeriesCount - 10 && visibleSeriesCount < filtered.size) {\n                    visibleSeriesCount = minOf(filtered.size, visibleSeriesCount + BROWSE_PAGE_SIZE)\n                }\n            }\n    }\n''','series progressive reveal')
 main = once(main,'gridItemsIndexed(filtered, key = { _, item -> item.id }) { index, item ->','gridItemsIndexed(visibleSeries, key = { index, item -> "${item.id}:$index" }) { index, item ->','series visible page duplicate-safe key')
 
-# Media rows can show a second information line (used for episode descriptions).
-main = once(main,
-'''private fun MediaRow(\n    name: String,\n    icon: String?,\n    modifier: Modifier = Modifier,\n''',
-'''private fun MediaRow(\n    name: String,\n    icon: String?,\n    subtitle: String? = null,\n    modifier: Modifier = Modifier,\n''','MediaRow subtitle signature')
-main = once(main,
-'''        Text(\n            name,\n            modifier = Modifier.weight(1f),\n            color = Ink,\n            fontSize = 15.sp,\n            fontWeight = FontWeight.SemiBold,\n            maxLines = 1,\n            overflow = TextOverflow.Ellipsis\n        )''',
-'''        Column(Modifier.weight(1f)) {\n            Text(\n                name, color = Ink, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,\n                maxLines = 1, overflow = TextOverflow.Ellipsis\n            )\n            if (!subtitle.isNullOrBlank()) {\n                Text(subtitle, color = Muted, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)\n            }\n        }''','MediaRow subtitle body')
+# Show episode information without changing the shared MediaRow API used elsewhere.
 main = once(main,
 '''                        MediaRow(\n                            name = label,\n                            icon = null,\n''',
-'''                        MediaRow(\n                            name = label,\n                            icon = null,\n                            subtitle = ep.plot.ifBlank { "Season $season • Episode ${ep.episodeNum}" },\n''','episode description row')
+'''                        MediaRow(\n                            name = if (ep.plot.isBlank()) label else "$label  •  ${ep.plot}",\n                            icon = null,\n''','episode description row')
 
-# Live guide titles: bright yellow for separation from the blue shell.
-main = main.replace('color = Accent, fontSize = 12.sp,\n                                        maxLines = 1, overflow = TextOverflow.Ellipsis','color = Color(0xFFFFE45C), fontSize = 12.sp,\n                                        maxLines = 1, overflow = TextOverflow.Ellipsis',1)
-changes.append('bright live guide title')
-main = main.replace('color = Accent, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis','color = Color(0xFFFFE45C), fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis',1)
-changes.append('bright mini-guide now title')
+# Bright yellow program titles separate them from the blue guide chrome.
+old_live = 'color = Accent, fontSize = 12.sp,\n                                        maxLines = 1, overflow = TextOverflow.Ellipsis'
+if old_live in main:
+    main = main.replace(old_live,'color = Color(0xFFFFE45C), fontSize = 12.sp,\n                                        maxLines = 1, overflow = TextOverflow.Ellipsis',1)
+    changes.append('bright live guide title')
+old_mini = 'color = Accent, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis'
+if old_mini in main:
+    main = main.replace(old_mini,'color = Color(0xFFFFE45C), fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis',1)
+    changes.append('bright mini-guide now title')
 
 # LEFT on full-screen Live TV opens Zako's guide instead of stock player controls.
 old='''                android.view.KeyEvent.KEYCODE_DPAD_UP,\n                android.view.KeyEvent.KEYCODE_DPAD_DOWN,\n                android.view.KeyEvent.KEYCODE_DPAD_LEFT,\n                android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> {\n                    // Let the recent-channel LazyRow own D-pad focus.\n                    if (miniGuideOpen) false else { pvRef?.showController(); true }\n                }'''
-new='''                android.view.KeyEvent.KEYCODE_DPAD_LEFT -> {\n                    if (miniGuideOpen) false\n                    else if (current.isLive) {\n                        pvRef?.hideController()\n                        overlayVisible = false\n                        miniGuideOpen = true\n                        true\n                    } else { pvRef?.showController(); true }\n                }\n                android.view.KeyEvent.KEYCODE_DPAD_UP,\n                android.view.KeyEvent.KEYCODE_DPAD_DOWN,\n                android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> {\n                    // Let the recent-channel LazyRow own D-pad focus.\n                    if (miniGuideOpen) false else { pvRef?.showController(); true }\n                }'''
+new='''                android.view.KeyEvent.KEYCODE_DPAD_LEFT -> {\n                    if (miniGuideOpen) false\n                    else if (current.isLive) {\n                        pvRef?.hideController()\n                        overlayVisible = false\n                        miniGuideOpen = true\n                        true\n                    } else { pvRef?.showController(); true }\n                }\n                android.view.KeyEvent.KEYCODE_DPAD_UP,\n                android.view.KeyEvent.KEYCODE_DPAD_DOWN,\n                android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> {\n                    if (miniGuideOpen) false else { pvRef?.showController(); true }\n                }'''
 main = once(main,old,new,'Left opens live guide')
 
 main = main.replace('Zako 4.29','Zako 4.30')
