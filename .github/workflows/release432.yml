@@ -1,8 +1,6 @@
 name: Build Zako 4.32 Release APK
 
 on:
-  push:
-    branches: [ "zako-v4.24-polish" ]
   workflow_dispatch:
 
 permissions:
