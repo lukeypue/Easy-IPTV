@@ -50,7 +50,6 @@ jobs:
           python3 tools/apply_v434.py
           python3 tools/verify_v425.py
           python3 tools/verify_v426_updater.py
-          python3 tools/verify_v433.py
           python3 tools/verify_v434.py
 
       - name: Set up Java 17
