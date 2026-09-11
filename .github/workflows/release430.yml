@@ -24,10 +24,12 @@ jobs:
           python3 tools/apply_v425_remote_info.py
           python3 tools/apply_v426_updater.py
           python3 tools/apply_v428.py
-          python3 tools/apply_v429.py
           python3 tools/verify_v425.py
           python3 tools/verify_v426_updater.py
           python3 tools/verify_v428.py
+          python3 tools/apply_v429.py
+          python3 tools/verify_v425.py
+          python3 tools/verify_v426_updater.py
           python3 tools/verify_v429.py
           if python3 tools/verify_v430.py; then
             echo "ERROR: v4.30 verifier passed before v4.30 patch"
@@ -38,7 +40,6 @@ jobs:
           python3 tools/apply_v430.py
           python3 tools/verify_v425.py
           python3 tools/verify_v426_updater.py
-          python3 tools/verify_v429.py
           python3 tools/verify_v430.py
 
       - name: Set up Java 17
