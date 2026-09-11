@@ -36,6 +36,13 @@ jobs:
           else
             echo "Expected RED: v4.32 behavior absent before patch"
           fi
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tools/apply_v432.py')
+          t = p.read_text()
+          t = t.replace("search_key_marker = '@Composable\\nprivate fun SearchKey('", "search_key_marker = '@Composable\\nprivate fun androidx.compose.foundation.layout.RowScope.SearchKey('")
+          p.write_text(t)
+          PY
           python3 tools/apply_v432.py
           python3 tools/verify_v425.py
           python3 tools/verify_v426_updater.py
