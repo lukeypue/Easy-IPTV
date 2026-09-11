@@ -10,7 +10,7 @@ checks = {
     'movie paging': 'visibleMovieCount' in main and 'gridItemsIndexed(visibleMovies' in main,
     'series paging': 'visibleSeriesCount' in main and 'gridItemsIndexed(visibleSeries' in main,
     'duplicate-safe series key': '"${item.id}:$index"' in main,
-    'episode plot': 'val plot: String = ""' in data and 'subtitle = ep.plot.ifBlank' in main,
+    'episode plot': 'val plot: String = ""' in data and 'ep.plot.isBlank()' in main,
     'left opens live guide': 'android.view.KeyEvent.KEYCODE_DPAD_LEFT -> {' in main and 'miniGuideOpen = true' in main,
     'bright guide titles': '0xFFFFE45C' in main,
 }
