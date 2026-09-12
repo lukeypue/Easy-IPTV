@@ -3,8 +3,7 @@ from pathlib import Path
 p = Path('tools/apply_v436.py')
 t = p.read_text()
 
-# v4.29 added searchMeta to the generated cache rows, so v4.36 must target
-# that exact generated 4.35 shape rather than the older base-source shape.
+# v4.29 added searchMeta to generated cache rows; target that generated shape.
 t = t.replace(
     '.put("c", m.categoryId ?: "").put("u", m.url)\\n',
     '.put("c", m.categoryId ?: "").put("u", m.url).put("sm", m.searchMeta)\\n',
@@ -16,14 +15,14 @@ t = t.replace(
     1,
 )
 
-# Preserve search metadata in the SQLite sidecar too.
+# Preserve search metadata in the SQLite sidecar.
 t = t.replace(
     'url TEXT NOT NULL, PRIMARY KEY(k,id))',
-    'url TEXT NOT NULL, search_meta TEXT NOT NULL DEFAULT \'\', PRIMARY KEY(k,id))',
+    "url TEXT NOT NULL, search_meta TEXT NOT NULL DEFAULT '', PRIMARY KEY(k,id))",
 )
 t = t.replace(
     'cat TEXT, PRIMARY KEY(k,id))',
-    'cat TEXT, search_meta TEXT NOT NULL DEFAULT \'\', PRIMARY KEY(k,id))',
+    "cat TEXT, search_meta TEXT NOT NULL DEFAULT '', PRIMARY KEY(k,id))",
 )
 t = t.replace(
     'INSERT OR REPLACE INTO movies(k,id,name,icon,cat,url) VALUES(?,?,?,?,?,?)',
@@ -58,31 +57,29 @@ t = t.replace(
     'SeriesItem(c.getString(0), c.getString(1), c.getString(2), c.getString(3), c.getString(4))',
 )
 
-# v4.30 intentionally removed the giant JSON save after catalog loading. 4.36
-# restores that call only after DataCache.save has been converted to slim JSON
-# + SQLite, so it no longer recreates the old memory spike.
-needle = "'''            // ZAKO_V430_LOW_MEMORY_CATALOG: skip serializing the giant merged VOD catalog\\n            // here. Re-encoding it duplicates the catalog in RAM at the worst possible moment.\\n''',"
-replacement = "'''            // ZAKO_V430_LOW_MEMORY_CATALOG: skip serializing the giant merged VOD catalog\\n            // here. Re-encoding it duplicates the catalog in RAM at the worst possible moment.\\n''',"
-# The main patch is inserted after the DataCache transformation using a direct
-# generated-source replacement appended to apply_v436.py.
-append = r'''
+# v4.30 removed the giant post-load cache save. After v4.36 slims DataCache,
+# restore that save so the catalog reaches SQLite without recreating giant JSON.
+old_comment = (
+    '            // ZAKO_V430_LOW_MEMORY_CATALOG: skip serializing the giant merged VOD catalog\\n'
+    '            // here. Re-encoding it duplicates the catalog in RAM at the worst possible moment.\\n'
+)
+new_comment = (
+    '            // ZAKO_V436_SQLITE_CATALOG_SAVE: the JSON part is now slim; VOD rows go to SQLite.\\n'
+    '            if (cacheKey != null) kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {\\n'
+    '                DataCache.save(context, cacheKey, merged)\\n'
+    '            }\\n'
+)
 
-# With the cache now slim, persist the freshly loaded catalog to SQLite on IO.
-main = once(main,
-'''            // ZAKO_V430_LOW_MEMORY_CATALOG: skip serializing the giant merged VOD catalog
-            // here. Re-encoding it duplicates the catalog in RAM at the worst possible moment.
-''',
-'''            // ZAKO_V436_SQLITE_CATALOG_SAVE: the JSON part is now slim; VOD rows go to SQLite.
-            if (cacheKey != null) kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                DataCache.save(context, cacheKey, merged)
-            }
-''', 'restore slim catalog persistence')
-'''
-# Insert before final writes so the modified main is actually written.
-write_marker = "MAIN.write_text(main)\\nDATA.write_text(data)\\nGRADLE.write_text(gradle)"
+append = (
+    '\n# With the cache now slim, persist the freshly loaded catalog to SQLite on IO.\n'
+    'main = once(main,\n'
+    "'''" + old_comment.replace('\\n', '\n') + "''',\n"
+    "'''" + new_comment.replace('\\n', '\n') + "''', 'restore slim catalog persistence')\n"
+)
+write_marker = 'MAIN.write_text(main)\nDATA.write_text(data)\nGRADLE.write_text(gradle)'
 if write_marker not in t:
     raise SystemExit('v4.36 patcher write marker missing')
-t = t.replace(write_marker, append + "\\n" + write_marker, 1)
+t = t.replace(write_marker, append + '\n' + write_marker, 1)
 
 p.write_text(t)
 print('aligned v4.36 patcher with generated v4.35 source')
