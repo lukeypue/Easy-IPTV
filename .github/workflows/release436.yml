@@ -51,6 +51,7 @@ jobs:
           else
             echo "Expected RED: v4.36 stability contracts absent before patch"
           fi
+          python3 tools/fix_v436_patcher.py
           python3 tools/apply_v436.py
           python3 tools/verify_v425.py
           python3 tools/verify_v426_updater.py
