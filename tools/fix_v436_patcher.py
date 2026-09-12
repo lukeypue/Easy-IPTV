@@ -68,6 +68,72 @@ t = t.replace(
     1,
 )
 
+# v4.25 already owns MainActivity.onTrimMemory(). Make v4.36 extend that exact
+# lifecycle hook instead of generating a second overload that Kotlin rejects.
+old_memory_patch = r'''main = once(main,
+'''    override fun onDestroy() {
+        Playback.releaseAll()
+        super.onDestroy()
+    }
+''',
+'''    override fun onTrimMemory(level: Int) {
+        StabilityCore.onTrimMemory(level)
+        super.onTrimMemory(level)
+    }
+
+    override fun onLowMemory() {
+        StabilityCore.onLowMemory()
+        super.onLowMemory()
+    }
+
+    override fun onDestroy() {
+        Playback.releaseAll()
+        StabilityCore.shutdown()
+        super.onDestroy()
+    }
+''', 'memory lifecycle')'''
+new_memory_patch = r'''main = once(main,
+'''    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+            // Posters can consume a meaningful chunk of RAM on Fire TV. They are
+            // disposable network/cache images, so drop only Coil's MEMORY cache
+            // when Android says pressure is building. Disk cache and playback stay.
+            runCatching { coil.Coil.imageLoader(this).memoryCache?.clear() }
+        }
+    }
+
+    override fun onDestroy() {
+        Playback.releaseAll()
+        super.onDestroy()
+    }
+''',
+'''    override fun onTrimMemory(level: Int) {
+        StabilityCore.onTrimMemory(level)
+        super.onTrimMemory(level)
+        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+            // Posters can consume a meaningful chunk of RAM on Fire TV. They are
+            // disposable network/cache images, so drop only Coil's MEMORY cache
+            // when Android says pressure is building. Disk cache and playback stay.
+            runCatching { coil.Coil.imageLoader(this).memoryCache?.clear() }
+        }
+    }
+
+    override fun onLowMemory() {
+        StabilityCore.onLowMemory()
+        super.onLowMemory()
+    }
+
+    override fun onDestroy() {
+        Playback.releaseAll()
+        StabilityCore.shutdown()
+        super.onDestroy()
+    }
+''', 'memory lifecycle')'''
+if old_memory_patch not in t:
+    raise SystemExit('v4.36 memory lifecycle patch target missing')
+t = t.replace(old_memory_patch, new_memory_patch, 1)
+
 # v4.30 removed the giant catalog save call. Once DataCache.save becomes slim
 # JSON + SQLite, restoring the save no longer creates the old JSON memory spike.
 append = r"""
