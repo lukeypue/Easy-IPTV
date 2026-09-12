@@ -70,7 +70,7 @@ t = t.replace(
 
 # v4.30 removed the giant catalog save call. Once DataCache.save becomes slim
 # JSON + SQLite, restoring the save no longer creates the old JSON memory spike.
-append = r'''
+append = r"""
 
 # With the cache now slim, persist the freshly loaded catalog to SQLite on IO.
 main = once(main,
@@ -82,7 +82,7 @@ main = once(main,
                 DataCache.save(context, cacheKey, merged)
             }
 ''', 'restore slim catalog persistence')
-'''
+"""
 write_marker = "MAIN.write_text(main)\nDATA.write_text(data)\nGRADLE.write_text(gradle)"
 if write_marker not in t:
     raise SystemExit('v4.36 patcher write marker missing')
