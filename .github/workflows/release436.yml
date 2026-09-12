@@ -1,0 +1,161 @@
+name: Build Zako 4.36 Stability Release
+
+on:
+  push:
+    branches: [ "zako-v4.36-stability-core" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release436:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Apply and verify Zako 4.36 source patches
+        run: |
+          python3 tools/fix_v424_patcher_source.py
+          python3 tools/apply_v424.py
+          python3 tools/apply_v424_post.py
+          python3 tools/apply_v425.py
+          python3 tools/apply_v425_remote_info.py
+          python3 tools/apply_v426_updater.py
+          python3 tools/apply_v428.py
+          python3 tools/apply_v429.py
+          python3 tools/apply_v430.py
+          python3 tools/apply_v431.py
+          python3 tools/verify_v425.py
+          python3 tools/verify_v426_updater.py
+          python3 tools/verify_v431.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tools/apply_v432.py')
+          t = p.read_text()
+          t = t.replace("search_key_marker = '@Composable\\nprivate fun SearchKey('", "search_key_marker = '@Composable\\nprivate fun androidx.compose.foundation.layout.RowScope.SearchKey('")
+          p.write_text(t)
+          PY
+          python3 tools/apply_v432.py
+          python3 tools/verify_v432.py
+          python3 tools/apply_v433.py
+          python3 tools/verify_v433.py
+          python3 tools/apply_v434.py
+          python3 tools/verify_v434.py
+          python3 tools/apply_v435.py
+          python3 tools/verify_v435.py
+          if python3 tools/verify_v436.py; then
+            echo "ERROR: v4.36 verifier passed before v4.36 patch"
+            exit 1
+          else
+            echo "Expected RED: v4.36 stability contracts absent before patch"
+          fi
+          python3 tools/apply_v436.py
+          python3 tools/verify_v425.py
+          python3 tools/verify_v426_updater.py
+          python3 tools/verify_v436.py
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Restore permanent Zako signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ZAKO_RELEASE_KEYSTORE_B64 }}
+        run: |
+          test -n "$KEYSTORE_B64"
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/zako-release.jks"
+          chmod 600 "$RUNNER_TEMP/zako-release.jks"
+
+      - name: Build signed release APK
+        env:
+          ZAKO_KEYSTORE_PATH: ${{ runner.temp }}/zako-release.jks
+          ZAKO_STORE_PASSWORD: ${{ secrets.ZAKO_STORE_PASSWORD }}
+          ZAKO_KEY_ALIAS: ${{ secrets.ZAKO_KEY_ALIAS }}
+          ZAKO_KEY_PASSWORD: ${{ secrets.ZAKO_KEY_PASSWORD }}
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Verify APK identity and signing
+        run: |
+          APK="$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)"
+          test -n "$APK"
+          AAPT="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -n 1)"
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          "$AAPT" dump badging "$APK" | grep "versionCode='61'" | grep "versionName='4.36'"
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
+          ACTUAL="$("$APKSIGNER" verify --print-certs "$APK" | sed -nE 's/^(V[0-9.]+ Signer: |Signer #1 )certificate SHA-256 digest: //p' | head -n 1 | tr '[:lower:]' '[:upper:]')"
+          EXPECTED="8EF5FE2873F7A9D40302E722822C05B37B471AB08DF23785FA0A1AEB19A2C165"
+          test "$ACTUAL" = "$EXPECTED"
+          cp "$APK" app/build/outputs/apk/release/Zako-v4.36.apk
+
+      - name: Package generated source for AI review
+        run: |
+          rm -rf review-package
+          mkdir -p review-package
+          cp -R app review-package/
+          cp build.gradle.kts settings.gradle.kts gradle.properties gradlew gradlew.bat review-package/ 2>/dev/null || true
+          cp -R gradle review-package/ 2>/dev/null || true
+          cp -R tools review-package/
+          find review-package -type d -name build -prune -exec rm -rf {} + || true
+          (cd review-package && zip -qr ../Zako-v4.36-source.zip .)
+          test -s Zako-v4.36-source.zip
+
+      - name: Publish Zako 4.36 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v4.36 >/dev/null 2>&1; then
+            gh release upload v4.36 app/build/outputs/apk/release/Zako-v4.36.apk Zako-v4.36-source.zip --clobber
+            gh release edit v4.36 --prerelease=false --latest
+          else
+            gh release create v4.36 app/build/outputs/apk/release/Zako-v4.36.apk Zako-v4.36-source.zip \
+              --target "$GITHUB_SHA" \
+              --title "Zako 4.36 Stability Core" \
+              --notes "Behind-the-scenes stability release. Adds bounded crash/memory diagnostics, supervised catalog work, and a SQLite-backed VOD/Series cache while preserving the Zako 4.35 UI, controls, mini guide, recording, downloads, and playback behavior. No playlists or content included." \
+              --latest
+          fi
+
+      - name: Point in-app updater to 4.36
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > /tmp/latest.json <<'JSON'
+          {
+            "versionCode": 61,
+            "versionName": "4.36",
+            "downloadUrl": "https://github.com/lukeypue/Easy-IPTV/releases/download/v4.36/Zako-v4.36.apk"
+          }
+          JSON
+          CONTENT="$(base64 -w0 /tmp/latest.json)"
+          for attempt in 1 2 3 4 5; do
+            SHA="$(gh api repos/lukeypue/Easy-IPTV/contents/latest.json?ref=main --jq .sha)"
+            if gh api --method PUT repos/lukeypue/Easy-IPTV/contents/latest.json \
+              -f message='Point updater to Zako 4.36' \
+              -f content="$CONTENT" \
+              -f sha="$SHA" \
+              -f branch='main'; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          exit 1
+
+      - name: Upload release candidate and source
+        uses: actions/upload-artifact@v4
+        with:
+          name: Zako-v4.36-release
+          path: |
+            app/build/outputs/apk/release/Zako-v4.36.apk
+            Zako-v4.36-source.zip
+          if-no-files-found: error
