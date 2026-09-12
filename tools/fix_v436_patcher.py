@@ -70,7 +70,7 @@ t = t.replace(
 
 # v4.25 already owns MainActivity.onTrimMemory(). Make v4.36 extend that exact
 # lifecycle hook instead of generating a second overload that Kotlin rejects.
-old_memory_patch = r'''main = once(main,
+old_memory_patch = r"""main = once(main,
 '''    override fun onDestroy() {
         Playback.releaseAll()
         super.onDestroy()
@@ -91,8 +91,8 @@ old_memory_patch = r'''main = once(main,
         StabilityCore.shutdown()
         super.onDestroy()
     }
-''', 'memory lifecycle')'''
-new_memory_patch = r'''main = once(main,
+''', 'memory lifecycle')"""
+new_memory_patch = r"""main = once(main,
 '''    override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
         if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
@@ -129,7 +129,7 @@ new_memory_patch = r'''main = once(main,
         StabilityCore.shutdown()
         super.onDestroy()
     }
-''', 'memory lifecycle')'''
+''', 'memory lifecycle')"""
 if old_memory_patch not in t:
     raise SystemExit('v4.36 memory lifecycle patch target missing')
 t = t.replace(old_memory_patch, new_memory_patch, 1)
