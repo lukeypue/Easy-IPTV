@@ -23,6 +23,8 @@ checks = {
     'deferred reclaim': 'pendingDelete' in ring,
     'bounded segment queue': 'ArrayDeque<SegmentMeta>' in ring,
     'reader crosses segment boundaries': 'openReader(virtualOffset: Long)' in ring and 'nextReadableSegment' in ring,
+    'ring byte budget parameter': 'private val maxBytes: Long' in ring and 'maxBytes: Long' in ring,
+    'ring byte budget reclaim': 'overByteBudget' in ring and 'totalBytesOnDiskLocked() > maxBytes' in ring,
     'USB storage kind': 'StorageKind.USB' in storage,
     'internal storage kind': 'StorageKind.INTERNAL' in storage,
     'USB preferred': 'getExternalFilesDirs(null)' in storage,
@@ -30,7 +32,10 @@ checks = {
     'invalid externalFilesDirs property absent': 'context.externalFilesDirs' not in storage,
     'write delete probe': 'probe.writeBytes' in storage and 'probe.delete()' in storage,
     'internal fallback': 'context.filesDir' in storage,
-    'free space floor': 'MIN_FREE_BYTES' in storage,
+    'free space floor': 'RESERVE_FREE_BYTES' in storage,
+    'storage target carries ring budget': 'val maxRingBytes: Long' in storage,
+    'USB ring budget bounded': 'USB_MAX_RING_BYTES' in storage,
+    'internal ring budget bounded': 'INTERNAL_MAX_RING_BYTES' in storage,
     'search movie details marker': 'ZAKO_V440_SEARCH_MOVIE_DETAILS' in main,
     'SearchTab receives source': re.search(r'fun SearchTab\(\s*source: Source\?', main) is not None,
     'SearchTab caller passes source': 'section == "search" -> SearchTab(\n                            source, prefs, safeData' in main,
@@ -69,10 +74,11 @@ checks['segment target near 8 MiB'] = TARGET - aligned_target < TS
 # Pure policy checks for the reclaim rule: active readers can never be eligible.
 for finalized in (False, True):
     for outside_window in (False, True):
-        for active_readers in (0, 1, 2):
-            eligible = finalized and outside_window and active_readers == 0
-            if active_readers > 0 and eligible:
-                checks[f'active reader reclaim {finalized}/{outside_window}/{active_readers}'] = False
+        for over_budget in (False, True):
+            for active_readers in (0, 1, 2):
+                eligible = finalized and (outside_window or over_budget) and active_readers == 0
+                if active_readers > 0 and eligible:
+                    checks[f'active reader reclaim {finalized}/{outside_window}/{over_budget}/{active_readers}'] = False
 
 failed = [name for name, ok in checks.items() if not ok]
 if failed:
