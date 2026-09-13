@@ -20,7 +20,7 @@ internal object LiveStorageManager {
     const val MIN_FREE_BYTES = 512L * 1024L * 1024L
 
     fun choose(context: Context): LiveStorageTarget? {
-        val removable = context.externalFilesDirs
+        val removable = context.getExternalFilesDirs(null)
             .filterNotNull()
             .filter { dir -> runCatching { Environment.isExternalStorageRemovable(dir) }.getOrDefault(false) }
 
