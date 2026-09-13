@@ -57,6 +57,7 @@ jobs:
           else
             echo "Expected RED: segmented ring and USB/internal selector absent"
           fi
+          python3 tools/fix_v440_patcher.py
           python3 tools/apply_v440.py
           python3 tools/verify_v440.py
 
