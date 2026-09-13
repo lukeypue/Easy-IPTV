@@ -37,6 +37,20 @@ checks = {
     'search movie state exists': 'var searchInfoMovie by remember { mutableStateOf<Movie?>(null) }' in main,
     'search reuses movie info dialog': 'VodInfoDialog(\n            source = source, prefs = prefs, movie = movie, onPlay = onPlay,' in main,
     'search movie opens details': 'searchInfoMovie = m' in main,
+    # Stage B: the real live path must use the ring, not merely generate an unused class.
+    'ring ingest marker': 'ZAKO_V440_RING_INGEST' in main,
+    'storage selector drives ring': 'LiveStorageManager.choose(context)' in main,
+    'timeshift opens segmented ring': 'TimeshiftRing.open(target.root' in main,
+    'writer appends to ring': 'localRing.append(' in main,
+    'single growing timeshift file removed': 'File(dir, "timeshift.ts")' not in main,
+    'old hard cap removed': 'hitCap' not in main and 'capBytes' not in main,
+    'ring server marker': 'ZAKO_V440_RING_SERVER' in main,
+    'timeshift exposes ring reader': 'fun openReader(virtualOffset: Long): TimeshiftRing.RingReader?' in main,
+    'server opens virtual reader': 'Timeshift.openReader(target)' in main,
+    'server no longer reads one growing file': 'RandomAccessFile(myFile, "r")' not in main,
+    'ring tail waits for writer': 'if (n == 0 && Timeshift.active)' in main,
+    'DVR start can fail safely': 'fun start(context: Context, url: String, prefs: SharedPreferences? = null): Boolean' in main,
+    'DVR fallback on unavailable storage': 'dvr_storage_unavailable_direct' in main,
 }
 
 # The Search movie OK/click path must not directly launch playback anymore.
@@ -52,6 +66,7 @@ aligned_target = TARGET - (TARGET % TS)
 checks['segment target packet aligned'] = aligned_target % TS == 0 and aligned_target < TARGET
 checks['segment target near 8 MiB'] = TARGET - aligned_target < TS
 
+# Pure policy checks for the reclaim rule: active readers can never be eligible.
 for finalized in (False, True):
     for outside_window in (False, True):
         for active_readers in (0, 1, 2):
