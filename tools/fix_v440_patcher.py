@@ -85,6 +85,15 @@ new_seek = '''    fun seekDvrBy(deltaMs: Long): Boolean {
 if old_seek not in main:
     raise SystemExit('legacy seekDvrBy block not found')
 main = main.replace(old_seek, new_seek, 1)
+
+# The legacy 45-minute constant was also reused by three UI actions (including
+# the LIVE button) as a large seek delta. Let those actions use the current
+# timeshift session length instead, so they naturally follow USB/internal ring
+# retention rather than preserving a hidden 45-minute cap.
+remaining_history_refs = main.count('DVR_HISTORY_MS')
+if remaining_history_refs != 3:
+    raise SystemExit(f'expected 3 remaining DVR_HISTORY_MS refs, found {remaining_history_refs}')
+main = main.replace('DVR_HISTORY_MS', 'Timeshift.windowMs()')
 """
 
 t = t.replace(anchor, seek_patch + '\n' + anchor, 1)
