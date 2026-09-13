@@ -21,11 +21,14 @@ if n != 1: raise SystemExit('versionName')
 changes += ['versionCode 62', 'versionName 4.37']
 
 # Bound ExoPlayer's allocator on ~1 GB Fire TV hardware. Zako's DVR writer is
-# already a separate disk-backed cushion, so letting the player allocate an
-# unbounded track-derived target duplicates buffering without helping recovery.
+# already a separate disk-backed cushion, so the player's in-memory side should
+# stay intentionally small instead of competing with the OS/decoder for RAM.
+# v4.33 already introduced a low-RAM targetBufferBytes variable, so patch the
+# generated v4.36 source at the final builder calls rather than the older v4.32
+# C.LENGTH_UNSET block.
 main = once(main,
-'''            .setTargetBufferBytes(C.LENGTH_UNSET)\n            .setPrioritizeTimeOverSizeThresholds(true)\n''',
-'''            // ZAKO_V437_FIRETV_BUFFER_BUDGET: keep Media3's in-memory side bounded.\n            // The timeshift writer remains the long cushion; Media3 only needs enough\n            // RAM to decode smoothly and bridge short provider bursts.\n            .setTargetBufferBytes(32 * 1024 * 1024)\n            .setPrioritizeTimeOverSizeThresholds(false)\n''',
+'''            .setTargetBufferBytes(targetBufferBytes)\n            .setPrioritizeTimeOverSizeThresholds(true)\n''',
+'''            // ZAKO_V437_FIRETV_BUFFER_BUDGET: the DVR file is the long cushion.\n            // Keep Media3 bounded even when Fire OS does not classify the stick as\n            // low-RAM; this avoids duplicate 60-90s memory buffering on ~1 GB units.\n            .setTargetBufferBytes(32 * 1024 * 1024)\n            .setPrioritizeTimeOverSizeThresholds(false)\n''',
 'bounded Media3 allocator')
 
 # Steady recovery used Media3 seekTo() on an unknown-length, still-growing
