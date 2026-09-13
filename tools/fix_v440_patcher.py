@@ -11,6 +11,21 @@ if old not in t:
     raise SystemExit('v440 regex replacement target not found')
 t = t.replace(old, new, 1)
 
+# Expose a monotonic session generation to readers such as same-channel
+# recording. A channel change/stop increments gen and safely ends the old tee.
+old_reader_api = '''    fun oldestVirtualByte(): Long = snapshot()?.oldestVirtualByte ?: bytesWritten
+    fun newestVirtualByte(): Long = snapshot()?.newestVirtualByte ?: bytesWritten
+
+    fun openReader(virtualOffset: Long): TimeshiftRing.RingReader? ='''
+new_reader_api = '''    fun oldestVirtualByte(): Long = snapshot()?.oldestVirtualByte ?: bytesWritten
+    fun newestVirtualByte(): Long = snapshot()?.newestVirtualByte ?: bytesWritten
+    fun generation(): Long = gen
+
+    fun openReader(virtualOffset: Long): TimeshiftRing.RingReader? ='''
+if old_reader_api not in t:
+    raise SystemExit('v440 Timeshift reader API target not found')
+t = t.replace(old_reader_api, new_reader_api, 1)
+
 # Stage B seek integration: the generated player must seek across whatever
 # bytes the rolling ring still retains. This replaces the legacy fixed 45-min
 # UI wall while keeping the same bitrate-estimated cable-box controls.
@@ -18,7 +33,7 @@ anchor = "MAIN.write_text(main, encoding='utf-8')\n"
 if anchor not in t:
     raise SystemExit('v440 final write anchor not found')
 
-seek_patch = r"""
+stage_patch = r"""
 # ---------------------------------------------------------------------------
 # Stage B: make remote DVR seek follow the actual retained ring window.
 # ---------------------------------------------------------------------------
@@ -94,8 +109,70 @@ remaining_history_refs = main.count('DVR_HISTORY_MS')
 if remaining_history_refs != 3:
     raise SystemExit(f'expected 3 remaining DVR_HISTORY_MS refs, found {remaining_history_refs}')
 main = main.replace('DVR_HISTORY_MS', 'Timeshift.windowMs()')
+
+# ---------------------------------------------------------------------------
+# Stage C: same-channel recording reads the rolling ring at its live edge.
+# This consumes zero additional provider connections and follows segment
+# rollover using TimeshiftRing.RingReader rather than the removed timeshift.ts.
+# ---------------------------------------------------------------------------
+recording_path = Path('app/src/main/java/com/easyiptv/player/Recording.kt')
+recording = recording_path.read_text(encoding='utf-8')
+tee_start = recording.find('    private fun teeFromTimeshift(')
+tee_end = recording.find('    private fun beginRecording', tee_start)
+if tee_start < 0 or tee_end < 0:
+    raise SystemExit('legacy teeFromTimeshift block not found')
+legacy_tee = recording[tee_start:tee_end]
+if 'Timeshift.file' not in legacy_tee or 'RandomAccessFile' not in legacy_tee:
+    raise SystemExit('legacy single-file tee shape changed unexpectedly')
+
+ring_tee = '''    /**
+     * ZAKO_V440_RING_RECORDING: record the watched channel from the same rolling
+     * DVR ring the player already owns. Start at the current live edge; the
+     * RingReader transparently crosses physical segment boundaries and holds a
+     * reader lease so an in-use segment cannot be reclaimed underneath us.
+     * Returns true only when the live DVR session changed/stopped so the caller
+     * can decide whether a direct provider fallback is still appropriate.
+     */
+    private fun teeFromTimeshift(out: FileOutputStream, stopAt: Long?, isActive: () -> Boolean): Boolean {
+        val sessionGen = Timeshift.generation()
+        if (!Timeshift.active) return true
+        val liveEdge = Timeshift.newestVirtualByte()
+        val reader = Timeshift.openReader(liveEdge) ?: return true
+        return try {
+            reader.use { rr ->
+                val buf = ByteArray(64 * 1024)
+                var sinceCheck = 0L
+                while (isActive() && (stopAt == null || System.currentTimeMillis() < stopAt)) {
+                    if (!Timeshift.active || Timeshift.generation() != sessionGen) return true
+                    val n = rr.read(buf)
+                    if (n > 0) {
+                        out.write(buf, 0, n)
+                        sinceCheck += n
+                        if (sinceCheck > 32_000_000L) {
+                            sinceCheck = 0L
+                            val freeNow = runCatching {
+                                android.os.StatFs(Recorder.recordingsDir(this).absolutePath).availableBytes
+                            }.getOrDefault(Long.MAX_VALUE)
+                            if (freeNow < 2_000_000_000L) return false
+                        }
+                    } else if (n == 0 && Timeshift.active && Timeshift.generation() == sessionGen) {
+                        Thread.sleep(50)
+                    } else {
+                        return true
+                    }
+                }
+            }
+            false
+        } catch (_: Exception) {
+            true
+        }
+    }
+
+'''
+recording = recording[:tee_start] + ring_tee + recording[tee_end:]
+recording_path.write_text(recording, encoding='utf-8')
 """
 
-t = t.replace(anchor, seek_patch + '\n' + anchor, 1)
+t = t.replace(anchor, stage_patch + '\n' + anchor, 1)
 p.write_text(t, encoding='utf-8')
-print('Fixed v4.40 generator escapes + generated retained-ring DVR seek')
+print('Fixed v4.40 generator + retained-ring seek + same-channel ring recording')
