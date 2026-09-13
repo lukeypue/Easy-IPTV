@@ -65,12 +65,16 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          text = Path('app/src/main/java/com/easyiptv/player/MainActivity.kt').read_text()
-          for needle in ('fun seekDvrBy', 'object Recorder', 'Recorder.start', 'fun startRecording', 'activeName'):
-              i = text.find(needle)
-              print(f'=== {needle} @ {i} ===')
-              if i >= 0:
-                  print(text[max(0, i-1200):i+7000])
+          root = Path('app/src/main/java')
+          for p in sorted(root.rglob('*.kt')):
+              text = p.read_text(errors='replace')
+              hits = [x for x in ('object Recorder', 'class Recorder', 'activeName', 'fun start(', 'recordingSlots') if x in text]
+              if not hits or ('Recorder' not in text and 'activeName' not in text):
+                  continue
+              print(f'=== FILE {p} HITS {hits} ===')
+              positions = [text.find(x) for x in ('object Recorder', 'class Recorder', 'activeName') if text.find(x) >= 0]
+              i = min(positions) if positions else 0
+              print(text[max(0, i-1200):i+14000])
           PY
 
       - name: Set up Java 17
