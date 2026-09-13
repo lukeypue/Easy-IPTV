@@ -56,6 +56,13 @@ checks = {
     'ring tail waits for writer': 'if (n == 0 && Timeshift.active)' in main,
     'DVR start can fail safely': 'fun start(context: Context, url: String, prefs: SharedPreferences? = null): Boolean' in main,
     'DVR fallback on unavailable storage': 'dvr_storage_unavailable_direct' in main,
+    # The remote seek range must follow retained ring bytes, not the old 45-minute constant.
+    'ring seek window marker': 'ZAKO_V440_RING_SEEK_WINDOW' in main,
+    'fixed 45 minute seek wall removed': 'private const val DVR_HISTORY_MS = 45L * 60L * 1000L' not in main,
+    'seek reads retained oldest byte': 'val oldestByte = Timeshift.oldestVirtualByte()' in main,
+    'seek reads retained newest byte': 'val newestByte = Timeshift.newestVirtualByte()' in main,
+    'seek clamps target byte to retained range': 'coerceIn(oldestByte, liveSafeByte)' in main,
+    'old fixed oldestAllowed removed': 'oldestAllowed = (window - DVR_HISTORY_MS)' not in main,
 }
 
 # The Search movie OK/click path must not directly launch playback anymore.
