@@ -5,17 +5,20 @@ GRADLE = Path('app/build.gradle.kts')
 MAIN = Path('app/src/main/java/com/easyiptv/player/MainActivity.kt')
 RING = Path('app/src/main/java/com/easyiptv/player/TimeshiftRing.kt')
 STORAGE = Path('app/src/main/java/com/easyiptv/player/LiveStorageManager.kt')
+RECORDING = Path('app/src/main/java/com/easyiptv/player/Recording.kt')
 
 gradle = GRADLE.read_text(encoding='utf-8')
 main = MAIN.read_text(encoding='utf-8') if MAIN.exists() else ''
 ring = RING.read_text(encoding='utf-8') if RING.exists() else ''
 storage = STORAGE.read_text(encoding='utf-8') if STORAGE.exists() else ''
+recording = RECORDING.read_text(encoding='utf-8') if RECORDING.exists() else ''
 
 checks = {
     'versionCode 65': re.search(r'versionCode\s*=\s*65\b', gradle) is not None,
     'versionName 4.40': 'versionName = "4.40"' in gradle,
     'ring file exists': RING.exists(),
     'storage manager exists': STORAGE.exists(),
+    'recording file exists': RECORDING.exists(),
     '188 byte TS alignment': 'TS_PACKET_BYTES = 188' in ring,
     '8 MiB segment target': 'TARGET_SEGMENT_BYTES = 8L * 1024L * 1024L' in ring,
     'monotonic virtual offsets': 'virtualStartByte' in ring and 'virtualEndByte' in ring and 'nextVirtualByte' in ring,
@@ -63,7 +66,32 @@ checks = {
     'seek reads retained newest byte': 'val newestByte = Timeshift.newestVirtualByte()' in main,
     'seek clamps target byte to retained range': 'coerceIn(oldestByte, liveSafeByte)' in main,
     'old fixed oldestAllowed removed': 'oldestAllowed = (window - DVR_HISTORY_MS)' not in main,
+    # Stage C: recording the watched channel must consume the existing rolling ring,
+    # not reopen the provider or depend on the removed single timeshift file.
+    'ring recording marker': 'ZAKO_V440_RING_RECORDING' in recording,
+    'timeshift exposes session generation': 'fun generation(): Long = gen' in main,
+    'ring recording starts at live edge': 'Timeshift.newestVirtualByte()' in recording,
+    'ring recording opens virtual reader': 'Timeshift.openReader(' in recording,
+    'ring recording uses bounded 64K buffer': 'ByteArray(64 * 1024)' in recording,
+    'ring recording checks session generation': 'Timeshift.generation()' in recording,
+    'legacy recorder timeshift file removed': 'Timeshift.file' not in recording,
+    'legacy recorder RandomAccessFile removed': 'RandomAccessFile' not in recording,
+    'direct recording fallback remains': 'Net.streamClient.newCall(req).execute()' in recording,
+    'provider slot charged only for direct fallback': 'Recorder.usesProviderConnection = true' in recording,
 }
+
+# Scope the tee checks to teeFromTimeshift itself so the direct/different-channel
+# recording path can still legitimately use OkHttp after the ring tee ends.
+tee_match = re.search(
+    r'private fun teeFromTimeshift\(.*?\n    \}\n\n    private fun beginRecording',
+    recording,
+    re.S,
+)
+tee_block = tee_match.group(0) if tee_match else ''
+checks['ring tee function found'] = bool(tee_block)
+checks['ring tee reads ring reader'] = '.read(buf)' in tee_block
+checks['ring tee closes reader'] = '.use { rr ->' in tee_block
+checks['ring tee never opens provider HTTP'] = 'newCall(' not in tee_block and 'Request.Builder()' not in tee_block
 
 # The Search movie OK/click path must not directly launch playback anymore.
 movie_block = ''
