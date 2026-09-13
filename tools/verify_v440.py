@@ -2,10 +2,12 @@ from pathlib import Path
 import re
 
 GRADLE = Path('app/build.gradle.kts')
+MAIN = Path('app/src/main/java/com/easyiptv/player/MainActivity.kt')
 RING = Path('app/src/main/java/com/easyiptv/player/TimeshiftRing.kt')
 STORAGE = Path('app/src/main/java/com/easyiptv/player/LiveStorageManager.kt')
 
 gradle = GRADLE.read_text(encoding='utf-8')
+main = MAIN.read_text(encoding='utf-8') if MAIN.exists() else ''
 ring = RING.read_text(encoding='utf-8') if RING.exists() else ''
 storage = STORAGE.read_text(encoding='utf-8') if STORAGE.exists() else ''
 
@@ -29,7 +31,20 @@ checks = {
     'write delete probe': 'probe.writeBytes' in storage and 'probe.delete()' in storage,
     'internal fallback': 'context.filesDir' in storage,
     'free space floor': 'MIN_FREE_BYTES' in storage,
+    'search movie details marker': 'ZAKO_V440_SEARCH_MOVIE_DETAILS' in main,
+    'SearchTab receives source': re.search(r'fun SearchTab\(\s*source: Source\?', main) is not None,
+    'SearchTab caller passes source': 'section == "search" -> SearchTab(\n                            source, prefs, safeData' in main,
+    'search movie state exists': 'var searchInfoMovie by remember { mutableStateOf<Movie?>(null) }' in main,
+    'search reuses movie info dialog': 'VodInfoDialog(\n            source = source, prefs = prefs, movie = movie, onPlay = onPlay,' in main,
+    'search movie opens details': 'searchInfoMovie = m' in main,
 }
+
+# The Search movie OK/click path must not directly launch playback anymore.
+movie_block = ''
+marker = 'if (movieHits.isNotEmpty()) {'
+if marker in main:
+    movie_block = main.split(marker, 1)[1].split('if (seriesHits.isNotEmpty()) {', 1)[0]
+checks['search movie does not direct-play'] = 'onPlay(Playable(m.name, m.url' not in movie_block
 
 TS = 188
 TARGET = 8 * 1024 * 1024
