@@ -40,6 +40,10 @@ jobs:
           python3 tools/apply_v435.py
           python3 tools/fix_v436_patcher.py
           python3 tools/apply_v436.py
+          # First prove the generated baseline is still a valid 4.36 build.
+          python3 tools/verify_v425.py
+          python3 tools/verify_v426_updater.py
+          python3 tools/verify_v436.py
           if python3 tools/verify_v437.py; then
             echo "ERROR: v4.37 verifier passed before patch"
             exit 1
@@ -47,9 +51,6 @@ jobs:
             echo "Expected RED: v4.37 contracts absent before patch"
           fi
           python3 tools/apply_v437.py
-          python3 tools/verify_v425.py
-          python3 tools/verify_v426_updater.py
-          python3 tools/verify_v436.py
           python3 tools/verify_v437.py
 
       - name: Set up Java 17
