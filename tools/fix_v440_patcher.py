@@ -18,7 +18,7 @@ anchor = "MAIN.write_text(main, encoding='utf-8')\n"
 if anchor not in t:
     raise SystemExit('v440 final write anchor not found')
 
-seek_patch = r'''
+seek_patch = r"""
 # ---------------------------------------------------------------------------
 # Stage B: make remote DVR seek follow the actual retained ring window.
 # ---------------------------------------------------------------------------
@@ -85,7 +85,7 @@ new_seek = '''    fun seekDvrBy(deltaMs: Long): Boolean {
 if old_seek not in main:
     raise SystemExit('legacy seekDvrBy block not found')
 main = main.replace(old_seek, new_seek, 1)
-'''
+"""
 
 t = t.replace(anchor, seek_patch + '\n' + anchor, 1)
 p.write_text(t, encoding='utf-8')
