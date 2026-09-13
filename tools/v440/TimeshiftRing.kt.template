@@ -10,10 +10,12 @@ import java.util.concurrent.atomic.AtomicLong
 /**
  * Disk-first rolling MPEG-TS ring. Physical segment files may be deleted while
  * the virtual byte timeline remains monotonic for the lifetime of the ring.
+ * Retention is bounded by both wall-clock history and a storage byte budget.
  */
 internal class TimeshiftRing private constructor(
     private val root: File,
     private val historyMs: Long,
+    private val maxBytes: Long,
 ) : Closeable {
     companion object {
         const val TS_PACKET_BYTES = 188
@@ -21,11 +23,12 @@ internal class TimeshiftRing private constructor(
         private val ALIGNED_TARGET_BYTES = TARGET_SEGMENT_BYTES - (TARGET_SEGMENT_BYTES % TS_PACKET_BYTES)
         private val ids = AtomicLong(0L)
 
-        fun open(root: File, historyMs: Long): TimeshiftRing {
+        fun open(root: File, historyMs: Long, maxBytes: Long): TimeshiftRing {
             require(historyMs > 0L) { "historyMs must be positive" }
+            require(maxBytes >= ALIGNED_TARGET_BYTES) { "maxBytes must fit at least one segment" }
             if (!root.exists() && !root.mkdirs()) error("Unable to create timeshift directory: $root")
             require(root.isDirectory) { "Timeshift root is not a directory: $root" }
-            return TimeshiftRing(root, historyMs)
+            return TimeshiftRing(root, historyMs, maxBytes)
         }
     }
 
@@ -56,27 +59,31 @@ internal class TimeshiftRing private constructor(
     private var closed = false
 
     @Synchronized
-    fun append(packetBytes: ByteArray, length: Int) {
+    fun append(packetBytes: ByteArray, length: Int) = append(packetBytes, 0, length)
+
+    @Synchronized
+    fun append(packetBytes: ByteArray, offset: Int, length: Int) {
         check(!closed) { "TimeshiftRing is closed" }
-        require(length >= 0 && length <= packetBytes.size) { "Invalid length" }
+        require(offset >= 0 && length >= 0 && offset + length <= packetBytes.size) { "Invalid append range" }
         require(length % TS_PACKET_BYTES == 0) { "append length must contain whole MPEG-TS packets" }
-        var offset = 0
-        while (offset < length) {
+        var sourceOffset = offset
+        var remaining = length
+        while (remaining > 0) {
             ensureCurrentSegment()
             val seg = current ?: error("No current segment")
             val room = (ALIGNED_TARGET_BYTES - seg.byteLength).coerceAtLeast(TS_PACKET_BYTES.toLong())
-            val remaining = length - offset
             val writeLen = minOf(remaining.toLong(), room).toInt()
             val alignedWrite = writeLen - (writeLen % TS_PACKET_BYTES)
             if (alignedWrite <= 0) {
                 finalizeCurrent()
                 continue
             }
-            currentOut!!.write(packetBytes, offset, alignedWrite)
+            currentOut!!.write(packetBytes, sourceOffset, alignedWrite)
             seg.byteLength += alignedWrite
             nextVirtualByte += alignedWrite
             seg.virtualEndByte = nextVirtualByte
-            offset += alignedWrite
+            sourceOffset += alignedWrite
+            remaining -= alignedWrite
             if (seg.byteLength >= ALIGNED_TARGET_BYTES) finalizeCurrent()
         }
         reclaimExpired(elapsedMs())
@@ -89,7 +96,7 @@ internal class TimeshiftRing private constructor(
             oldestVirtualByte = first?.virtualStartByte ?: nextVirtualByte,
             newestVirtualByte = nextVirtualByte,
             segmentCount = segments.size,
-            totalBytesOnDisk = segments.sumOf { it.byteLength },
+            totalBytesOnDisk = totalBytesOnDiskLocked(),
         )
     }
 
@@ -155,13 +162,16 @@ internal class TimeshiftRing private constructor(
         current = null
     }
 
+    private fun totalBytesOnDiskLocked(): Long = segments.sumOf { it.byteLength }
+
     @Synchronized
     private fun reclaimExpired(nowMs: Long) {
         while (true) {
             val first = segments.peekFirst() ?: return
             if (!first.finalized) return
             val outsideWindow = first.closedElapsedMs > 0L && nowMs - first.closedElapsedMs > historyMs
-            if (!outsideWindow) return
+            val overByteBudget = totalBytesOnDiskLocked() > maxBytes
+            if (!outsideWindow && !overByteBudget) return
             if (first.activeReaders > 0) {
                 first.pendingDelete = true
                 return
@@ -205,6 +215,10 @@ internal class TimeshiftRing private constructor(
         }
         private var closed = false
 
+        /**
+         * Returns >0 for bytes read, 0 when temporarily at the live writer tail,
+         * and -1 only after the reader itself has been closed/no segment remains.
+         */
         fun read(buffer: ByteArray, offset: Int = 0, length: Int = buffer.size - offset): Int {
             if (closed) return -1
             require(offset >= 0 && length >= 0 && offset + length <= buffer.size)
