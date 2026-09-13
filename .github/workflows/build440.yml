@@ -61,6 +61,18 @@ jobs:
           python3 tools/apply_v440.py
           python3 tools/verify_v440.py
 
+      - name: Show generated DVR seek code
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          text = Path('app/src/main/java/com/easyiptv/player/MainActivity.kt').read_text()
+          for needle in ('DVR_HISTORY_MS', 'fun seekDvrBy'):
+              i = text.find(needle)
+              print(f'=== {needle} @ {i} ===')
+              if i >= 0:
+                  print(text[max(0, i-500):i+2400])
+          PY
+
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
