@@ -14,6 +14,9 @@ checks = {
     'no recursive zap in steady hls error': 'steady_hls_fallback' not in MAIN,
     'steady start diagnostic': 'steady_start_safe_ts' in MAIN,
     'player error diagnostic': 'steady_player_error_safe' in MAIN,
+    'stream reconnect retained': 'ZAKO_V437_STREAM_RECONNECT' in MAIN,
+    'speed governor removal retained': 'ZAKO_V437_NO_SPEED_GOVERNOR' in MAIN,
+    'live edge recovery retained': 'ZAKO_V437_LIVE_EDGE_RECOVERY' in MAIN,
 }
 
 failed = [name for name, ok in checks.items() if not ok]
