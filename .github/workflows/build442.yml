@@ -12,7 +12,7 @@ jobs:
       - name: Get the code
         uses: actions/checkout@v4
 
-      - name: Generate proven Zako 4.41 baseline
+      - name: Generate Zako 4.41 baseline and verify 4.42 RED
         run: |
           python3 tools/fix_v424_patcher_source.py
           python3 tools/apply_v424.py
@@ -56,80 +56,18 @@ jobs:
           python3 tools/verify_v440.py
           python3 tools/apply_v441.py
           python3 tools/verify_v441.py
-
-      - name: RED verify 4.42 is not already present
-        run: |
           if grep -q 'Preparing your TV experience' app/src/main/java/com/easyiptv/player/MainActivity.kt; then
-            echo 'ERROR: 4.42 startup lock unexpectedly present before 4.42 patch'
+            echo "ERROR: 4.42 startup lock already present"
             exit 1
           fi
           if grep -q 'private fun SearchLiveCard' app/src/main/java/com/easyiptv/player/MainActivity.kt; then
-            echo 'ERROR: 4.42 compact live cards unexpectedly present before 4.42 patch'
+            echo "ERROR: 4.42 compact Live cards already present"
             exit 1
           fi
-          echo 'Expected RED: 4.42 behavior absent on the 4.41 baseline'
+          echo "Expected RED: 4.42 behavior is absent from the verified 4.41 baseline"
 
-      - name: Apply Zako 4.42
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          main = Path('app/src/main/java/com/easyiptv/player/MainActivity.kt')
-          s = main.read_text()
-          v441 = '''            // ZAKO_V441_SEARCH_VISUAL_PARITY: Search now looks like the Movies/Series shelves.
-          if (liveHits.isNotEmpty()) {
-              item { SectionHeader("Live TV") }
-              item {
-                  LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                      items(liveHits) { ch ->
-                          PosterCard(ch.name, ch.icon) { saveRecent(q); playLiveHit(ch) }
-                      }
-                  }
-              }
-          }
-'''
-          base = '''            if (liveHits.isNotEmpty()) {
-              item { SectionHeader("Live TV") }
-              items(liveHits) { ch ->
-                  MediaRow(ch.name, ch.icon, onClick = { saveRecent(q); playLiveHit(ch) })
-              }
-          }
-'''
-          if v441 not in s:
-              raise SystemExit('Could not normalize the 4.41 Live search shelf for 4.42')
-          main.write_text(s.replace(v441, base, 1))
-
-          patcher = Path('scripts/apply_v442.py')
-          t = patcher.read_text()
-          t = t.replace('    // XMLTV can be huge.\n', '    // XMLTV can be huge. Never download/parse the full guide behind full-screen\n')
-          patcher.write_text(t)
-          PY
-          python3 scripts/apply_v442.py
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-          gradle = Path('app/build.gradle.kts')
-          g = gradle.read_text()
-          g, n1 = re.subn(r'versionCode\s*=\s*\d+', 'versionCode = 67', g, count=1)
-          g, n2 = re.subn(r'versionName\s*=\s*"[^"]+"', 'versionName = "4.42"', g, count=1)
-          if n1 != 1 or n2 != 1:
-              raise SystemExit('4.42 version bump failed')
-          gradle.write_text(g)
-          main = Path('app/src/main/java/com/easyiptv/player/MainActivity.kt')
-          s = main.read_text().replace('Zako 4.23 — plays the playlists you provide.', 'Zako 4.42 — plays the playlists you provide.')
-          main.write_text(s)
-          PY
-
-      - name: GREEN verify 4.42 behavior
-        run: |
-          grep -q 'Preparing your TV experience' app/src/main/java/com/easyiptv/player/MainActivity.kt
-          grep -q 'private fun SearchLiveCard' app/src/main/java/com/easyiptv/player/MainActivity.kt
-          grep -q 'Text("LIVE"' app/src/main/java/com/easyiptv/player/MainActivity.kt
-          grep -q 'AppInputGate.startupLocked' app/src/main/java/com/easyiptv/player/MainActivity.kt
-          grep -q '3D side-by-side correction on' app/src/main/java/com/easyiptv/player/MainActivity.kt
-          grep -q 'ZAKO_V441_TS_RESYNC' app/src/main/java/com/easyiptv/player/MainActivity.kt
-          grep -q 'versionCode = 67' app/build.gradle.kts
-          grep -q 'versionName = "4.42"' app/build.gradle.kts
-          echo 'Zako 4.42 verification GREEN'
+      - name: Apply and verify Zako 4.42
+        run: python3 scripts/prepare_v442_generated.py
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
