@@ -206,7 +206,8 @@ required = [
     '3D side-by-side correction on',
     'ZAKO_V441_TS_RESYNC',
     'val infoFocus = remember { FocusRequester() }',
-    'left = infoFocus; right = sbsFocus',
+    'left = sizeFocus; right = sbsFocus',
+    'left = infoFocus; right = previousFocus',
 ]
 final_main = MAIN.read_text(encoding='utf-8')
 missing = [marker for marker in required if marker not in final_main]
