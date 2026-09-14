@@ -1,0 +1,194 @@
+name: Release Zako 4.42 Startup + Search Polish
+
+on:
+  push:
+    branches: [ "zako-v4.42-search-startup" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release442:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Generate verified Zako 4.41 baseline
+        run: |
+          python3 tools/fix_v424_patcher_source.py
+          python3 tools/apply_v424.py
+          python3 tools/apply_v424_post.py
+          python3 tools/apply_v425.py
+          python3 tools/apply_v425_remote_info.py
+          python3 tools/apply_v426_updater.py
+          python3 tools/apply_v428.py
+          python3 tools/apply_v429.py
+          python3 tools/apply_v430.py
+          python3 tools/apply_v431.py
+          python3 tools/verify_v425.py
+          python3 tools/verify_v426_updater.py
+          python3 tools/verify_v431.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tools/apply_v432.py')
+          t = p.read_text()
+          t = t.replace("search_key_marker = '@Composable\\nprivate fun SearchKey('", "search_key_marker = '@Composable\\nprivate fun androidx.compose.foundation.layout.RowScope.SearchKey('")
+          p.write_text(t)
+          PY
+          python3 tools/apply_v432.py
+          python3 tools/verify_v432.py
+          python3 tools/apply_v433.py
+          python3 tools/verify_v433.py
+          python3 tools/apply_v434.py
+          python3 tools/verify_v434.py
+          python3 tools/apply_v435.py
+          python3 tools/verify_v435.py
+          python3 tools/fix_v436_patcher.py
+          python3 tools/apply_v436.py
+          python3 tools/verify_v436.py
+          python3 tools/apply_v437.py
+          python3 tools/verify_v437.py
+          python3 tools/apply_v438.py
+          python3 tools/verify_v438.py
+          python3 tools/apply_v439.py
+          python3 tools/verify_v439.py
+          python3 tools/fix_v440_patcher.py
+          python3 tools/apply_v440.py
+          python3 tools/verify_v440.py
+          python3 tools/apply_v441.py
+          python3 tools/verify_v441.py
+
+      - name: Verify expected 4.42 RED baseline
+        run: |
+          if grep -q 'Preparing your TV experience' app/src/main/java/com/easyiptv/player/MainActivity.kt; then
+            echo "ERROR: 4.42 startup lock already present before 4.42 patch"
+            exit 1
+          fi
+          if grep -q 'private fun SearchLiveCard' app/src/main/java/com/easyiptv/player/MainActivity.kt; then
+            echo "ERROR: 4.42 compact Live cards already present before 4.42 patch"
+            exit 1
+          fi
+          echo "Expected RED confirmed: 4.42 behavior absent from verified 4.41 baseline"
+
+      - name: Apply and verify Zako 4.42
+        run: python3 scripts/prepare_v442_generated.py
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Restore permanent Zako signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ZAKO_RELEASE_KEYSTORE_B64 }}
+        run: |
+          test -n "$KEYSTORE_B64"
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/zako-release.jks"
+          chmod 600 "$RUNNER_TEMP/zako-release.jks"
+
+      - name: Build signed release APK
+        env:
+          ZAKO_KEYSTORE_PATH: ${{ runner.temp }}/zako-release.jks
+          ZAKO_STORE_PASSWORD: ${{ secrets.ZAKO_STORE_PASSWORD }}
+          ZAKO_KEY_ALIAS: ${{ secrets.ZAKO_KEY_ALIAS }}
+          ZAKO_KEY_PASSWORD: ${{ secrets.ZAKO_KEY_PASSWORD }}
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Verify APK identity and signing
+        run: |
+          APK="$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)"
+          test -n "$APK"
+          AAPT="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -n 1)"
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          "$AAPT" dump badging "$APK" | grep "versionCode='67'" | grep "versionName='4.42'"
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
+          ACTUAL="$("$APKSIGNER" verify --print-certs "$APK" | sed -nE 's/^(V[0-9.]+ Signer: |Signer #1 )certificate SHA-256 digest: //p' | head -n 1 | tr '[:lower:]' '[:upper:]')"
+          EXPECTED="8EF5FE2873F7A9D40302E722822C05B37B471AB08DF23785FA0A1AEB19A2C165"
+          test "$ACTUAL" = "$EXPECTED"
+          cp "$APK" app/build/outputs/apk/release/Zako-v4.42.apk
+          sha256sum app/build/outputs/apk/release/Zako-v4.42.apk
+
+      - name: Package generated source for AI review
+        run: |
+          rm -rf review-package
+          mkdir -p review-package
+          cp -R app review-package/
+          cp build.gradle.kts settings.gradle.kts gradle.properties gradlew gradlew.bat review-package/ 2>/dev/null || true
+          cp -R gradle review-package/ 2>/dev/null || true
+          cp -R tools scripts review-package/ 2>/dev/null || true
+          find review-package -type d -name build -prune -exec rm -rf {} + || true
+          (cd review-package && zip -qr ../Zako-v4.42-source.zip .)
+          test -s Zako-v4.42-source.zip
+          sha256sum Zako-v4.42-source.zip
+
+      - name: Publish Zako 4.42 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NOTES="Startup now locks remote input behind a short Preparing your TV experience screen until the fresh Live lineup refresh settles, preventing navigation into half-loaded state. Search Live TV now uses compact logo-first channel cards instead of tall movie posters, with clean LIVE fallback and current-program text when guide data is already available. A manual per-channel 3D SBS to 2D player option fixes side-by-side provider feeds without risking normal split-screen channels. Zako keeps the 4.41 weak-channel MPEG-TS recovery and 4.40 rolling DVR/time-shift behavior intact, and keeps its playback cushion rather than trading stability for faster channel changes. Storage wording now works for Fire TV, Android phones/tablets, internal storage, and supported external drives. No playlists or content included."
+          if gh release view v4.42 >/dev/null 2>&1; then
+            gh release upload v4.42 app/build/outputs/apk/release/Zako-v4.42.apk Zako-v4.42-source.zip --clobber
+            gh release edit v4.42 --title "Zako 4.42 Startup + Search Polish" --notes "$NOTES" --prerelease=false --latest
+          else
+            gh release create v4.42 app/build/outputs/apk/release/Zako-v4.42.apk Zako-v4.42-source.zip \
+              --target "$GITHUB_SHA" \
+              --title "Zako 4.42 Startup + Search Polish" \
+              --notes "$NOTES" \
+              --latest
+          fi
+
+      - name: Point in-app updater to 4.42
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > /tmp/latest.json <<'JSON'
+          {
+            "versionCode": 67,
+            "versionName": "4.42",
+            "downloadUrl": "https://github.com/lukeypue/Easy-IPTV/releases/download/v4.42/Zako-v4.42.apk"
+          }
+          JSON
+          CONTENT="$(base64 -w0 /tmp/latest.json)"
+          for attempt in 1 2 3 4 5; do
+            SHA="$(gh api repos/lukeypue/Easy-IPTV/contents/latest.json?ref=main --jq .sha)"
+            if gh api --method PUT repos/lukeypue/Easy-IPTV/contents/latest.json \
+              -f message='Point updater to Zako 4.42' \
+              -f content="$CONTENT" \
+              -f sha="$SHA" \
+              -f branch='main'; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          exit 1
+
+      - name: Verify updater still points to 4.42
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sleep 5
+          RAW="$(gh api repos/lukeypue/Easy-IPTV/contents/latest.json?ref=main --jq .content | tr -d '\n' | base64 -d)"
+          printf '%s\n' "$RAW"
+          printf '%s' "$RAW" | grep '"versionCode": 67'
+          printf '%s' "$RAW" | grep '"versionName": "4.42"'
+          printf '%s' "$RAW" | grep 'releases/download/v4.42/Zako-v4.42.apk'
+
+      - name: Upload signed release and source
+        uses: actions/upload-artifact@v4
+        with:
+          name: Zako-v4.42-release
+          path: |
+            app/build/outputs/apk/release/Zako-v4.42.apk
+            Zako-v4.42-source.zip
+          if-no-files-found: error
