@@ -33,13 +33,22 @@ if v441_live not in main:
     raise SystemExit('Could not locate generated v4.41 Live search shelf')
 MAIN.write_text(main.replace(v441_live, base_live, 1), encoding='utf-8')
 
-# The base-source comment grew after the original patcher was authored. Make the
-# one-time patcher match the current generated baseline without weakening checks.
+# The v4.42 patcher was authored against the raw baseline. Earlier generated
+# versions deliberately changed two exact source shapes, so align ONLY those
+# expected targets before running the strict patcher.
 patcher = PATCHER.read_text(encoding='utf-8')
 patcher = patcher.replace(
     '    // XMLTV can be huge.\n',
     '    // XMLTV can be huge. Never download/parse the full guide behind full-screen\n'
 )
+
+# v4.24 made refresh failures visible even when cached data exists. Preserve that
+# behavior and teach both sides of the v4.42 finally-block replacement to expect it.
+old_refresh_line = '                if (data == null) loadError = e.message ?: "error"'
+new_refresh_line = '                loadError = e.message ?: "Provider refresh unavailable"'
+if patcher.count(old_refresh_line) != 2:
+    raise SystemExit(f'Expected two raw refresh targets in v4.42 patcher, found {patcher.count(old_refresh_line)}')
+patcher = patcher.replace(old_refresh_line, new_refresh_line)
 PATCHER.write_text(patcher, encoding='utf-8')
 
 runpy.run_path(str(PATCHER), run_name='__main__')
