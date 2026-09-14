@@ -1,0 +1,183 @@
+name: Release Zako 4.41 Search + Weak Channel
+
+on:
+  push:
+    branches: [ "zako-v4.41-search-weak-channel" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release441:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Apply and verify Zako 4.41 source patches
+        run: |
+          python3 tools/fix_v424_patcher_source.py
+          python3 tools/apply_v424.py
+          python3 tools/apply_v424_post.py
+          python3 tools/apply_v425.py
+          python3 tools/apply_v425_remote_info.py
+          python3 tools/apply_v426_updater.py
+          python3 tools/apply_v428.py
+          python3 tools/apply_v429.py
+          python3 tools/apply_v430.py
+          python3 tools/apply_v431.py
+          python3 tools/verify_v425.py
+          python3 tools/verify_v426_updater.py
+          python3 tools/verify_v431.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tools/apply_v432.py')
+          t = p.read_text()
+          t = t.replace("search_key_marker = '@Composable\\nprivate fun SearchKey('", "search_key_marker = '@Composable\\nprivate fun androidx.compose.foundation.layout.RowScope.SearchKey('")
+          p.write_text(t)
+          PY
+          python3 tools/apply_v432.py
+          python3 tools/verify_v432.py
+          python3 tools/apply_v433.py
+          python3 tools/verify_v433.py
+          python3 tools/apply_v434.py
+          python3 tools/verify_v434.py
+          python3 tools/apply_v435.py
+          python3 tools/verify_v435.py
+          python3 tools/fix_v436_patcher.py
+          python3 tools/apply_v436.py
+          python3 tools/verify_v436.py
+          python3 tools/apply_v437.py
+          python3 tools/verify_v437.py
+          python3 tools/apply_v438.py
+          python3 tools/verify_v438.py
+          python3 tools/apply_v439.py
+          python3 tools/verify_v439.py
+          python3 tools/fix_v440_patcher.py
+          python3 tools/apply_v440.py
+          python3 tools/verify_v440.py
+          if python3 tools/verify_v441.py; then
+            echo "ERROR: v4.41 verifier passed before v4.41 patch"
+            exit 1
+          else
+            echo "Expected RED: v4.41 search visual parity and weak-channel recovery absent"
+          fi
+          python3 tools/apply_v441.py
+          python3 tools/verify_v441.py
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Restore permanent Zako signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ZAKO_RELEASE_KEYSTORE_B64 }}
+        run: |
+          test -n "$KEYSTORE_B64"
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/zako-release.jks"
+          chmod 600 "$RUNNER_TEMP/zako-release.jks"
+
+      - name: Build signed release APK
+        env:
+          ZAKO_KEYSTORE_PATH: ${{ runner.temp }}/zako-release.jks
+          ZAKO_STORE_PASSWORD: ${{ secrets.ZAKO_STORE_PASSWORD }}
+          ZAKO_KEY_ALIAS: ${{ secrets.ZAKO_KEY_ALIAS }}
+          ZAKO_KEY_PASSWORD: ${{ secrets.ZAKO_KEY_PASSWORD }}
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Verify APK identity and signing
+        run: |
+          APK="$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)"
+          test -n "$APK"
+          AAPT="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -n 1)"
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          "$AAPT" dump badging "$APK" | grep "versionCode='66'" | grep "versionName='4.41'"
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
+          ACTUAL="$("$APKSIGNER" verify --print-certs "$APK" | sed -nE 's/^(V[0-9.]+ Signer: |Signer #1 )certificate SHA-256 digest: //p' | head -n 1 | tr '[:lower:]' '[:upper:]')"
+          EXPECTED="8EF5FE2873F7A9D40302E722822C05B37B471AB08DF23785FA0A1AEB19A2C165"
+          test "$ACTUAL" = "$EXPECTED"
+          cp "$APK" app/build/outputs/apk/release/Zako-v4.41.apk
+          sha256sum app/build/outputs/apk/release/Zako-v4.41.apk
+
+      - name: Package generated source for AI review
+        run: |
+          rm -rf review-package
+          mkdir -p review-package
+          cp -R app review-package/
+          cp build.gradle.kts settings.gradle.kts gradle.properties gradlew gradlew.bat review-package/ 2>/dev/null || true
+          cp -R gradle review-package/ 2>/dev/null || true
+          cp -R tools review-package/
+          find review-package -type d -name build -prune -exec rm -rf {} + || true
+          (cd review-package && zip -qr ../Zako-v4.41-source.zip .)
+          test -s Zako-v4.41-source.zip
+          sha256sum Zako-v4.41-source.zip
+
+      - name: Publish Zako 4.41 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v4.41 >/dev/null 2>&1; then
+            gh release upload v4.41 app/build/outputs/apk/release/Zako-v4.41.apk Zako-v4.41-source.zip --clobber
+            gh release edit v4.41 --prerelease=false --latest
+          else
+            gh release create v4.41 app/build/outputs/apk/release/Zako-v4.41.apk Zako-v4.41-source.zip \
+              --target "$GITHUB_SHA" \
+              --title "Zako 4.41 Search Shelves + Weak Channel Recovery" \
+              --notes "Search now presents Live TV, Movies, and Series in the same poster-style video-store shelves; Movies still open their full info/play/download dialog. Steady weak-channel mode now banks a larger startup cushion, records provider input-gap/reconnect diagnostics, and re-acquires MPEG-TS packet sync instead of continuing to feed bad framing after weak-stream corruption. Smooth/direct playback and the 4.40 rolling DVR remain intact. No playlists or content included."
+          fi
+
+      - name: Point in-app updater to 4.41
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > /tmp/latest.json <<'JSON'
+          {
+            "versionCode": 66,
+            "versionName": "4.41",
+            "downloadUrl": "https://github.com/lukeypue/Easy-IPTV/releases/download/v4.41/Zako-v4.41.apk"
+          }
+          JSON
+          CONTENT="$(base64 -w0 /tmp/latest.json)"
+          for attempt in 1 2 3 4 5; do
+            SHA="$(gh api repos/lukeypue/Easy-IPTV/contents/latest.json?ref=main --jq .sha)"
+            if gh api --method PUT repos/lukeypue/Easy-IPTV/contents/latest.json \
+              -f message='Point updater to Zako 4.41' \
+              -f content="$CONTENT" \
+              -f sha="$SHA" \
+              -f branch='main'; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          exit 1
+
+      - name: Verify updater still points to 4.41
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sleep 5
+          RAW="$(gh api repos/lukeypue/Easy-IPTV/contents/latest.json?ref=main --jq .content | tr -d '\n' | base64 -d)"
+          printf '%s\n' "$RAW"
+          printf '%s' "$RAW" | grep '"versionCode": 66'
+          printf '%s' "$RAW" | grep '"versionName": "4.41"'
+          printf '%s' "$RAW" | grep 'releases/download/v4.41/Zako-v4.41.apk'
+
+      - name: Upload signed release and source
+        uses: actions/upload-artifact@v4
+        with:
+          name: Zako-v4.41-release
+          path: |
+            app/build/outputs/apk/release/Zako-v4.41.apk
+            Zako-v4.41-source.zip
+          if-no-files-found: error
