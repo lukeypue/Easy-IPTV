@@ -6,13 +6,13 @@ on:
   workflow_dispatch:
 
 jobs:
-  verify441red:
+  build441:
     runs-on: ubuntu-latest
     steps:
       - name: Get the code
         uses: actions/checkout@v4
 
-      - name: Generate Zako 4.40 and prove 4.41 is RED
+      - name: Generate Zako 4.41 with RED to GREEN verification
         run: |
           python3 tools/fix_v424_patcher_source.py
           python3 tools/apply_v424.py
@@ -60,3 +60,29 @@ jobs:
           else
             echo "Expected RED: v4.41 search visual parity and weak-channel recovery are absent"
           fi
+          python3 tools/apply_v441.py
+          python3 tools/verify_v441.py
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Compile 4.41 debug APK
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Upload compile artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Zako-v4.41-debug
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
