@@ -20,7 +20,15 @@ jobs:
           fetch-depth: 0
 
       - name: Apply v4.42 source changes
-        run: python scripts/apply_v442.py
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/apply_v442.py')
+          s = p.read_text()
+          s = s.replace('    // XMLTV can be huge.\n', '    // XMLTV can be huge. Never download/parse the full guide behind full-screen\n')
+          p.write_text(s)
+          PY
+          python scripts/apply_v442.py
 
       - name: Commit transformed source
         run: |
