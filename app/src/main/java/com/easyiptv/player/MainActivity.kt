@@ -87,6 +87,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
@@ -94,6 +95,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.key.Key
@@ -323,6 +325,10 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        // A cached playlist may be visible before the fresh provider refresh is
+        // finished. During that short window, swallow remote input so nobody can
+        // drive into half-built lists and trigger the startup crash/glitch path.
+        if (AppInputGate.startupLocked) return true
         if (event.action == android.view.KeyEvent.ACTION_DOWN &&
             PlayerKeys.priority?.invoke(event.keyCode) == true
         ) return true
@@ -366,6 +372,9 @@ fun App() {
     var data by remember { mutableStateOf<AppData?>(null) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var reload by remember { mutableIntStateOf(0) }
+    // Cached data may paint immediately, but interaction stays locked until the
+    // fresh live refresh has completed (successfully or with a safe cached fallback).
+    var startupSettled by remember(activeIdx, reload) { mutableStateOf(false) }
 
     // Remembered across screens so "back" lands where you left off.
     var railSection by remember { mutableStateOf("live") }
@@ -391,7 +400,7 @@ fun App() {
         val asked = prefs.getBoolean("ext_prompt_shown", false)
         if (present && !Storage.isEnabled(prefs) && !asked) showDrivePrompt = true
     }
-    if (showDrivePrompt) {
+    if (showDrivePrompt && startupSettled) {
         val driveGb = remember { Storage.driveFreeBytes(context) }
         AlertDialog(
             onDismissRequest = {
@@ -507,7 +516,18 @@ fun App() {
         playlists.getOrNull(activeIdx)?.let { DataCache.keyFor(it) }
     }
 
+    LaunchedEffect(playlists.isEmpty(), startupSettled) {
+        AppInputGate.startupLocked = StartupPolicy.shouldBlockInput(
+            hasPlaylist = playlists.isNotEmpty(),
+            refreshSettled = startupSettled
+        )
+    }
+    DisposableEffect(Unit) {
+        onDispose { AppInputGate.startupLocked = false }
+    }
+
     LaunchedEffect(source, reload) {
+        startupSettled = source == null
         data = null
         loadError = null
         EpgStore.clear()
@@ -547,6 +567,11 @@ fun App() {
                 }
             } catch (e: Exception) {
                 if (data == null) loadError = e.message ?: "error"
+            } finally {
+                // Unlock only after the fresh provider attempt has finished. If
+                // it failed but a cache exists, the cache is now a deliberate
+                // fallback rather than an accidental half-loaded startup state.
+                startupSettled = true
             }
         }
     }
@@ -611,8 +636,8 @@ fun App() {
 
     // Cable-box behavior: the app opens straight onto the channel you were
     // last watching (Settings › "Start on last channel" turns this off).
-    LaunchedEffect(data) {
-        if (autoTuned || data == null || nav !is Nav.Home) return@LaunchedEffect
+    LaunchedEffect(data, startupSettled) {
+        if (!startupSettled || autoTuned || data == null || nav !is Nav.Home) return@LaunchedEffect
         autoTuned = true
         if (!prefs.getBoolean("autoplay_last", true)) return@LaunchedEffect
         val url = prefs.getString("last_live_url", null) ?: return@LaunchedEffect
@@ -641,6 +666,7 @@ fun App() {
 
     when {
         playlists.isEmpty() -> AddPlaylistScreen(first = true, onSaved = { addPlaylist(it) }, onBack = null)
+        !startupSettled -> StartupLoadingScreen(playlists.getOrNull(activeIdx)?.name.orEmpty())
         nav is Nav.AddPlaylist -> AddPlaylistScreen(first = false, onSaved = { addPlaylist(it) }, onBack = { nav = Nav.Home })
         nav is Nav.Play -> {
             val pl = nav as Nav.Play
@@ -1283,6 +1309,32 @@ private fun RailItem(label: String, active: Boolean, modifier: Modifier = Modifi
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(end = 6.dp)
         )
+    }
+}
+
+@Composable
+private fun StartupLoadingScreen(playlistName: String) {
+    Column(
+        Modifier.fillMaxSize().background(Bg).padding(32.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text("ZAKO", color = Accent, fontSize = 18.sp, fontWeight = FontWeight.ExtraBold)
+        Spacer(Modifier.height(18.dp))
+        CircularProgressIndicator(color = Accent)
+        Spacer(Modifier.height(18.dp))
+        Text("Preparing your TV experience…", color = Ink, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(7.dp))
+        Text(
+            "Please wait while Zako refreshes your channels and gets everything ready for smooth browsing and playback.",
+            color = Muted, fontSize = 13.sp
+        )
+        if (playlistName.isNotBlank()) {
+            Spacer(Modifier.height(5.dp))
+            Text(playlistName, color = Accent, fontSize = 11.sp)
+        }
+        Spacer(Modifier.height(7.dp))
+        Text("Usually only takes a few seconds.", color = Muted, fontSize = 10.sp)
     }
 }
 
@@ -3082,7 +3134,7 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         val internalFree = remember(storageRefresh) { Storage.internalFreeBytes(ctx) }
         val driveFree = remember(storageRefresh) { Storage.driveFreeBytes(ctx) }
         Text(
-            "Fire TV internal: ${if (internalFree >= 0) Storage.gb(internalFree) + " GB free" else "—"}" +
+            "Device storage: ${if (internalFree >= 0) Storage.gb(internalFree) + " GB free" else "—"}" +
                 if (drivePresent) "\nExternal drive: ${if (driveFree >= 0) Storage.gb(driveFree) + " GB free" else "detected"}"
                 else "\nNo external drive detected.",
             fontSize = 12.sp, color = Muted
@@ -3101,7 +3153,7 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         )
         Spacer(Modifier.height(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Chip("Fire Stick", !extOn) {
+            Chip("Device", !extOn) {
                 extOn = false; Storage.setEnabled(prefs, false)
             }
             Chip("External drive", extOn && drivePresent) {
@@ -3487,8 +3539,12 @@ fun SearchTab(
         ) {
             if (liveHits.isNotEmpty()) {
                 item { SectionHeader("Live TV") }
-                items(liveHits) { ch ->
-                    MediaRow(ch.name, ch.icon, onClick = { saveRecent(q); playLiveHit(ch) })
+                item {
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                        items(liveHits, key = { it.id }) { ch ->
+                            SearchLiveCard(ch) { saveRecent(q); playLiveHit(ch) }
+                        }
+                    }
                 }
             }
             if (movieHits.isNotEmpty()) {
@@ -3561,6 +3617,57 @@ fun SearchTab(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun SearchLiveCard(ch: LiveChannel, onClick: () -> Unit) {
+    val guideReady = EpgStore.loaded.value
+    val nowMs = System.currentTimeMillis()
+    val nowTitle = if (guideReady) {
+        EpgStore.guide(ch.epgId, ch.name)
+            .firstOrNull { nowMs in it.startMs until it.endMs }
+            ?.title
+    } else null
+
+    Column(
+        Modifier
+            .width(148.dp)
+            .tvFocus(RoundedCornerShape(12.dp))
+            .clickable { onClick() }
+            .padding(3.dp)
+    ) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(76.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(Surface2),
+            contentAlignment = Alignment.Center
+        ) {
+            if (!ch.icon.isNullOrBlank()) {
+                AsyncImage(
+                    model = ch.icon,
+                    contentDescription = ch.name,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize().padding(8.dp)
+                )
+            } else {
+                // Never turn a channel number into a giant fake poster ("2", "7", etc.).
+                Text("LIVE", color = Accent, fontSize = 16.sp, fontWeight = FontWeight.ExtraBold)
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(
+            ch.name, color = Ink, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+            maxLines = 1, overflow = TextOverflow.Ellipsis
+        )
+        if (!nowTitle.isNullOrBlank()) {
+            Text(
+                nowTitle, color = Accent, fontSize = 9.sp,
+                maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
         }
     }
 }
@@ -3743,7 +3850,7 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
         val onDrive = remember { Storage.usingDrive(context, prefs) }
         if (free >= 0) {
             Text(
-                (if (onDrive) "External drive: " else "Fire Stick storage: ") +
+                (if (onDrive) "External drive: " else "Device storage: ") +
                     "${String.format(java.util.Locale.US, "%.1f", free / 1_073_741_824.0)} GB free" +
                     if (free < 3_000_000_000L) "  •  Too low to start new downloads — free up 3 GB" else "",
                 fontSize = 12.sp,
@@ -3917,7 +4024,7 @@ fun RecordingsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
         val onDrive = remember { Storage.usingDrive(context, prefs) }
         if (free >= 0) {
             Text(
-                (if (onDrive) "External drive: " else "Fire Stick storage: ") +
+                (if (onDrive) "External drive: " else "Device storage: ") +
                     "${String.format(java.util.Locale.US, "%.1f", free / 1_073_741_824.0)} GB free (shared by recordings & downloads)" +
                     if (free < 2_500_000_000L) "  •  Too low to record safely" else "",
                 fontSize = 12.sp,
@@ -4411,6 +4518,8 @@ fun PlayerScreen(
     // Playback state lives in the shared one-stream engine.
     val currentIdx by Playback.currentIdxC
     val current = queue[currentIdx.coerceIn(0, queue.size - 1)]
+    val sbsPrefKey = remember(current.url) { "sbs_2d_${current.url.hashCode()}" }
+    var sbs2d by remember(current.url) { mutableStateOf(prefs.getBoolean(sbsPrefKey, false)) }
     var nowNext by remember { mutableStateOf<List<EpgEntry>>(emptyList()) }
     // VOD/recordings keep the legacy Media3 control overlay. Live TV has only
     // the Zako mini guide; starting this true on live was the reason the old
@@ -4749,6 +4858,16 @@ fun PlayerScreen(
         a != null && (a == current.name || a.endsWith("(${current.name})"))
     }
 
+    fun toggleSbs2d() {
+        sbs2d = !sbs2d
+        prefs.edit().putBoolean(sbsPrefKey, sbs2d).apply()
+        toast(
+            context,
+            if (sbs2d) "3D side-by-side correction on for this channel."
+            else "3D side-by-side correction off."
+        )
+    }
+
     fun cyclePictureSize() {
         val label: String
         if (superStretch) {
@@ -4781,6 +4900,7 @@ fun PlayerScreen(
         Modifier
             .fillMaxSize()
             .background(Color.Black)
+            .clipToBounds()
             // Phones & tablets: swipe up = previous channel in the list,
             // swipe down = next. Taps still work normally for the controls.
             .pointerInput(queue.size) {
@@ -4894,11 +5014,17 @@ fun PlayerScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .graphicsLayer(
-                    // FULL SCREEN mode: blow the picture up 34% past the edges —
-                    // wipes out black bars even when they're part of the channel's
-                    // own picture. Old-school edge-to-edge TV.
-                    scaleX = if (superStretch) 1.34f else 1f,
-                    scaleY = if (superStretch) 1.34f else 1f
+                    // SBS 3D providers send left/right eye images squeezed into
+                    // one frame. Double from the LEFT edge to show the left eye as
+                    // ordinary 2D. This is manual/per-channel because metadata
+                    // cannot reliably distinguish SBS from a normal split-screen.
+                    scaleX = when {
+                        sbs2d -> 2f
+                        superStretch -> 1.34f
+                        else -> 1f
+                    },
+                    scaleY = if (superStretch && !sbs2d) 1.34f else 1f,
+                    transformOrigin = if (sbs2d) TransformOrigin(0f, 0.5f) else TransformOrigin.Center
                 )
         )
         // Cable-box clock (Settings › Clock while watching).
@@ -4913,7 +5039,9 @@ fun PlayerScreen(
                     fmt = fmt,
                     prefs = prefs,
                     ccEnabled = ccEnabled,
+                    sbs2d = sbs2d,
                     onToggleCc = { setCcEnabled(!ccEnabled) },
+                    onToggleSbs = { toggleSbs2d() },
                     afrEnabled = matchFps,
                     recordingThis = recordingThis,
                     canRecord = current.canRecord,
@@ -5276,7 +5404,9 @@ private fun MiniGuide(
     fmt: SimpleDateFormat,
     prefs: SharedPreferences,
     ccEnabled: Boolean,
+    sbs2d: Boolean,
     onToggleCc: () -> Unit,
+    onToggleSbs: () -> Unit,
     afrEnabled: Boolean,
     recordingThis: Boolean,
     canRecord: Boolean,
@@ -5339,6 +5469,7 @@ private fun MiniGuide(
     val ccFocus = remember { FocusRequester() }
     val modeFocus = remember { FocusRequester() }
     val sizeFocus = remember { FocusRequester() }
+    val sbsFocus = remember { FocusRequester() }
     val previousFocus = remember { FocusRequester() }
     val settingsFocus = remember { FocusRequester() }
     val timelineFocus = remember { FocusRequester() }
@@ -5503,16 +5634,24 @@ private fun MiniGuide(
             MiniGuideControl(
                 "SIZE",
                 modifier = Modifier.weight(0.8f).focusRequester(sizeFocus).focusProperties {
-                    left = modeFocus; right = previousFocus; down = timelineFocus
+                    left = modeFocus; right = sbsFocus; down = timelineFocus
                 }
             ) { touch(); onResize() }
+
+            MiniGuideControl(
+                if (sbs2d) "3D→2D" else "3D",
+                modifier = Modifier.weight(0.78f).focusRequester(sbsFocus).focusProperties {
+                    left = sizeFocus; right = previousFocus; down = timelineFocus
+                },
+                activeColor = if (sbs2d) Accent else Ink
+            ) { touch(); onToggleSbs() }
 
             MiniGuideControl(
                 "PREVIOUS",
                 modifier = Modifier
                     .weight(1f)
                     .focusRequester(previousFocus)
-                    .focusProperties { left = sizeFocus; right = settingsFocus; down = timelineFocus }
+                    .focusProperties { left = sbsFocus; right = settingsFocus; down = timelineFocus }
                     .onPreviewKeyEvent { ev ->
                         if (ev.type == KeyEventType.KeyDown && ev.key == Key.DirectionDown && entries.isNotEmpty()) {
                             showRecent = true; touch(); true
