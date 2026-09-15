@@ -1,0 +1,78 @@
+name: Build Zako 4.44 Candidate
+
+on:
+  push:
+    branches: [ "zako-v4.44-download-resume" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build444:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v5
+
+      - name: Verify expected 4.44 RED
+        run: |
+          if python3 tools/verify_v444.py; then
+            echo "ERROR: verifier unexpectedly passed before applying 4.44"
+            exit 1
+          else
+            echo "Expected RED confirmed"
+          fi
+
+      - name: Apply and verify Zako 4.44
+        run: |
+          python3 tools/apply_v444.py
+          python3 tools/verify_v444.py
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Restore permanent Zako signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ZAKO_RELEASE_KEYSTORE_B64 }}
+        run: |
+          test -n "$KEYSTORE_B64"
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/zako-release.jks"
+          chmod 600 "$RUNNER_TEMP/zako-release.jks"
+
+      - name: Build signed candidate
+        env:
+          ZAKO_KEYSTORE_PATH: ${{ runner.temp }}/zako-release.jks
+          ZAKO_STORE_PASSWORD: ${{ secrets.ZAKO_STORE_PASSWORD }}
+          ZAKO_KEY_ALIAS: ${{ secrets.ZAKO_KEY_ALIAS }}
+          ZAKO_KEY_PASSWORD: ${{ secrets.ZAKO_KEY_PASSWORD }}
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Verify APK identity and signing
+        run: |
+          APK="$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)"
+          test -n "$APK"
+          AAPT="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -n 1)"
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          "$AAPT" dump badging "$APK" | grep "package: name='com.easyiptv.player'" | grep "versionCode='69'" | grep "versionName='4.44'"
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
+          ACTUAL="$("$APKSIGNER" verify --print-certs "$APK" | sed -nE 's/^(V[0-9.]+ Signer: |Signer #1 )certificate SHA-256 digest: //p' | head -n 1 | tr '[:lower:]' '[:upper:]')"
+          EXPECTED="8EF5FE2873F7A9D40302E722822C05B37B471AB08DF23785FA0A1AEB19A2C165"
+          test "$ACTUAL" = "$EXPECTED"
+          cp "$APK" app/build/outputs/apk/release/Zako-v4.44.apk
+          sha256sum app/build/outputs/apk/release/Zako-v4.44.apk
+
+      - name: Upload signed candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: Zako-v4.44-candidate
+          path: app/build/outputs/apk/release/Zako-v4.44.apk
+          if-no-files-found: error
