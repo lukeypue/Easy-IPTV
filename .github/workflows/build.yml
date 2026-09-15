@@ -2,7 +2,7 @@ name: Build Easy IPTV APK
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: [ "main", "master", "zako-download-resume-v422" ]
   workflow_dispatch:
 
 jobs:
