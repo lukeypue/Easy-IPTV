@@ -11,11 +11,13 @@ resource_path = base / 'PlaybackResourcePolicy.kt'
 startup_path = base / 'StartupPolicy.kt'
 shell_path = base / 'TvShell.kt'
 overlay_path = base / 'LiveOverlay.kt'
+catalog_path = base / 'CatalogRuntimePolicy.kt'
 startup = startup_path.read_text() if startup_path.exists() else ''
 nav = nav_path.read_text() if nav_path.exists() else ''
 resource = resource_path.read_text() if resource_path.exists() else ''
 shell = shell_path.read_text() if shell_path.exists() else ''
 overlay = overlay_path.read_text() if overlay_path.exists() else ''
+catalog = catalog_path.read_text() if catalog_path.exists() else ''
 downloads = (base / 'Downloads.kt').read_text()
 
 checks = {
@@ -39,6 +41,12 @@ checks = {
     'previous channel action': 'PREVIOUS_CHANNEL' in overlay,
     'record action': 'RECORD' in overlay,
     'captions action': 'CAPTIONS' in overlay,
+    'catalog runtime policy exists': catalog_path.exists() and 'ZAKO_V447_CATALOG_RUNTIME' in catalog,
+    'catalog page bounded': 'pageSize = 40' in catalog,
+    'search debounce bounded': 'searchDebounceMs = 250L' in catalog,
+    'live catalog prefetch bounded': 'livePrefetchPages = 1' in catalog,
+    'idle catalog prefetch bounded': 'idlePrefetchPages = 2' in catalog,
+    'catalog pauses on live buffering': 'allowCatalogWork' in catalog and 'playerBuffering' in catalog,
     'compact mini guide marker': 'ZAKO_V447_COMPACT_MINI_GUIDE' in main,
     'three-row mini guide retained': 'ZAKO_V425_MINI_EPG' in main and 'rowProgram.title' in main,
     'mini guide OK tunes': '.clickable { touch(); onTune(ch) }' in main,
