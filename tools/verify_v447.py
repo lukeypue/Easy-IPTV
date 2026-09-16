@@ -5,13 +5,18 @@ import re
 root = Path(__file__).resolve().parents[1]
 main = (root / 'app/src/main/java/com/easyiptv/player/MainActivity.kt').read_text()
 gradle = (root / 'app/build.gradle.kts').read_text()
-nav_path = root / 'app/src/main/java/com/easyiptv/player/TvNavigationPolicy.kt'
-resource_path = root / 'app/src/main/java/com/easyiptv/player/PlaybackResourcePolicy.kt'
-startup_path = root / 'app/src/main/java/com/easyiptv/player/StartupPolicy.kt'
+base = root / 'app/src/main/java/com/easyiptv/player'
+nav_path = base / 'TvNavigationPolicy.kt'
+resource_path = base / 'PlaybackResourcePolicy.kt'
+startup_path = base / 'StartupPolicy.kt'
+shell_path = base / 'TvShell.kt'
+overlay_path = base / 'LiveOverlay.kt'
 startup = startup_path.read_text() if startup_path.exists() else ''
 nav = nav_path.read_text() if nav_path.exists() else ''
 resource = resource_path.read_text() if resource_path.exists() else ''
-downloads = (root / 'app/src/main/java/com/easyiptv/player/Downloads.kt').read_text()
+shell = shell_path.read_text() if shell_path.exists() else ''
+overlay = overlay_path.read_text() if overlay_path.exists() else ''
+downloads = (base / 'Downloads.kt').read_text()
 
 checks = {
     '4.47 full redesign marker': 'ZAKO_V447_FULL_REDESIGN' in main,
@@ -25,7 +30,16 @@ checks = {
     'startup gate state': 'StartupGateState' in startup,
     'startup input gate marker': 'ZAKO_V447_STARTUP_INPUT_GATE' in startup,
     'startup message': 'Please wait while we load your content fresh for a better experience' in startup,
-    'compact mini guide': 'ZAKO_V447_COMPACT_MINI_GUIDE' in main,
+    'TV shell exists': shell_path.exists() and 'ZAKO_V447_TV_SHELL' in shell,
+    'TV shell destinations': all(x in shell for x in ['LIVE', 'GUIDE', 'MOVIES', 'SERIES', 'SEARCH', 'LIBRARY', 'SETTINGS']),
+    'TV shell focus tokens': 'FocusToken' in shell and 'MAIN_NAV' in shell and 'CONTENT' in shell,
+    'live overlay policy exists': overlay_path.exists() and 'ZAKO_V447_LIVE_OVERLAY' in overlay,
+    'compact three row policy': 'visibleRowCount = 3' in overlay,
+    'accelerating seek policy': 'seekMultiplier' in overlay and '5 -> 1' in overlay,
+    'previous channel action': 'PREVIOUS_CHANNEL' in overlay,
+    'record action': 'RECORD' in overlay,
+    'captions action': 'CAPTIONS' in overlay,
+    'compact mini guide marker': 'ZAKO_V447_COMPACT_MINI_GUIDE' in main,
     'three-row mini guide retained': 'ZAKO_V425_MINI_EPG' in main and 'rowProgram.title' in main,
     'mini guide OK tunes': '.clickable { touch(); onTune(ch) }' in main,
     'fluid LEFT navigation retained': 'onBackToRoot()' in main and 'externalFocus.requestFocus()' in main,
