@@ -1,0 +1,2 @@
+Zako 4.46 release trigger
+Persistent Settings update button verification and signed APK build.
