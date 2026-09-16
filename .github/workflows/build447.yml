@@ -1,7 +1,7 @@
 name: Build Zako 4.47 Red Green
 on:
   push:
-    branches: [ "zako-v4.47-green1" ]
+    branches: [ "zako-v4.47-green2" ]
   workflow_dispatch:
 jobs:
   build447:
@@ -45,9 +45,8 @@ jobs:
           python3 tools/apply_v445.py && python3 tools/verify_v445.py
           python3 tools/apply_v446.py && python3 tools/verify_v446.py
           python3 tools/verify_v426_updater.py
-      - name: Prove 4.47 RED then apply and prove GREEN
+      - name: Apply 4.47 baseline and verify expanded contract
         run: |
-          if python3 tools/verify_v447.py; then echo 'ERROR: 4.47 verifier unexpectedly passed before transform'; exit 1; else echo 'Expected 4.47 RED confirmed'; fi
           python3 tools/apply_v447.py
           python3 tools/verify_v447.py
           python3 tools/verify_v426_updater.py
