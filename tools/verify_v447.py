@@ -12,13 +12,18 @@ startup_path = base / 'StartupPolicy.kt'
 shell_path = base / 'TvShell.kt'
 overlay_path = base / 'LiveOverlay.kt'
 catalog_path = base / 'CatalogRuntimePolicy.kt'
+runtime_path = base / 'MediaRuntimePolicy.kt'
 startup = startup_path.read_text() if startup_path.exists() else ''
 nav = nav_path.read_text() if nav_path.exists() else ''
 resource = resource_path.read_text() if resource_path.exists() else ''
 shell = shell_path.read_text() if shell_path.exists() else ''
 overlay = overlay_path.read_text() if overlay_path.exists() else ''
 catalog = catalog_path.read_text() if catalog_path.exists() else ''
+runtime = runtime_path.read_text() if runtime_path.exists() else ''
 downloads = (base / 'Downloads.kt').read_text()
+storage = (base / 'Storage.kt').read_text()
+streams = (base / 'ProviderStreams.kt').read_text()
+live_storage = (base / 'LiveStorageManager.kt').read_text()
 
 checks = {
     '4.47 full redesign marker': 'ZAKO_V447_FULL_REDESIGN' in main,
@@ -47,6 +52,20 @@ checks = {
     'live catalog prefetch bounded': 'livePrefetchPages = 1' in catalog,
     'idle catalog prefetch bounded': 'idlePrefetchPages = 2' in catalog,
     'catalog pauses on live buffering': 'allowCatalogWork' in catalog and 'playerBuffering' in catalog,
+    'media runtime policy exists': runtime_path.exists() and 'ZAKO_V447_MEDIA_RUNTIME' in runtime,
+    'one background download': 'maxConcurrentDownloads = 1' in runtime,
+    'one stream plan warning': 'oneStreamRecordingMessage' in runtime and '1-stream IPTV plan' in runtime,
+    'USB fallback policy': 'storageFallbackMessage' in runtime and 'internal storage' in runtime,
+    'download resume Range retained': 'header("Range", "bytes=$resumeFrom-")' in downloads,
+    'download 206 append retained': 'r.code == 206' in downloads and 'FileOutputStream(part, append)' in downloads,
+    'download 64KiB buffer retained': 'ByteArray(64 * 1024)' in downloads,
+    'failed partial preserved': 'STATE_FAILED' in downloads and '.part' in downloads,
+    'provider defaults one stream': 'prefs.getInt(KEY, 1)' in streams,
+    'same channel recording costs zero': 'if (Recorder.usesProviderConnection) 1 else 0' in streams,
+    'USB requires write probe': '.eztv_write_test' in storage and 'isWritable' in storage,
+    'saved media internal fallback': 'context.getExternalFilesDir(null) ?: context.filesDir' in storage,
+    'timeshift internal fallback': 'return context.cacheDir' in storage,
+    'bounded USB DVR ring': 'USB_MAX_RING_BYTES' in live_storage,
     'compact mini guide marker': 'ZAKO_V447_COMPACT_MINI_GUIDE' in main,
     'three-row mini guide retained': 'ZAKO_V425_MINI_EPG' in main and 'rowProgram.title' in main,
     'mini guide OK tunes': '.clickable { touch(); onTune(ch) }' in main,
