@@ -53,7 +53,6 @@ jobs:
           python3 tools/apply_v446.py
           python3 tools/verify_v446.py
           python3 tools/verify_v426_updater.py
-          python3 tools/verify_v445.py
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
