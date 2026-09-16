@@ -1,0 +1,126 @@
+name: Release Zako 4.46 Persistent Update Button
+on:
+  push:
+    branches: [ "zako-v4.46-update-button" ]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  release446:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Regenerate complete verified Zako source through 4.43
+        run: |
+          python3 tools/fix_v424_patcher_source.py
+          python3 tools/apply_v424.py
+          python3 tools/apply_v424_post.py
+          python3 tools/apply_v425.py
+          python3 tools/apply_v425_remote_info.py
+          python3 tools/apply_v426_updater.py
+          python3 tools/apply_v428.py
+          python3 tools/apply_v429.py
+          python3 tools/apply_v430.py
+          python3 tools/apply_v431.py
+          python3 tools/verify_v425.py
+          python3 tools/verify_v426_updater.py
+          python3 tools/verify_v431.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('tools/apply_v432.py'); t=p.read_text(); t=t.replace("search_key_marker = '@Composable\\nprivate fun SearchKey('", "search_key_marker = '@Composable\\nprivate fun androidx.compose.foundation.layout.RowScope.SearchKey('"); p.write_text(t)
+          PY
+          python3 tools/apply_v432.py && python3 tools/verify_v432.py
+          python3 tools/apply_v433.py && python3 tools/verify_v433.py
+          python3 tools/apply_v434.py && python3 tools/verify_v434.py
+          python3 tools/apply_v435.py && python3 tools/verify_v435.py
+          python3 tools/fix_v436_patcher.py
+          python3 tools/apply_v436.py && python3 tools/verify_v436.py
+          python3 tools/apply_v437.py && python3 tools/verify_v437.py
+          python3 tools/apply_v438.py && python3 tools/verify_v438.py
+          python3 tools/apply_v439.py && python3 tools/verify_v439.py
+          python3 tools/fix_v440_patcher.py
+          python3 tools/apply_v440.py && python3 tools/verify_v440.py
+          python3 tools/apply_v441.py && python3 tools/verify_v441.py
+          python3 scripts/prepare_v442_generated.py
+          python3 tools/apply_v443.py && python3 tools/verify_v443.py
+      - name: Retain 4.44 and 4.45 repairs
+        run: |
+          python3 tools/apply_v444.py && python3 tools/verify_v444.py
+          python3 tools/apply_v445.py && python3 tools/verify_v445.py
+      - name: Verify expected 4.46 RED then restore persistent updater
+        run: |
+          if python3 tools/verify_v446.py; then echo 'ERROR: v4.46 verifier unexpectedly passed'; exit 1; else echo 'Expected RED confirmed'; fi
+          python3 tools/apply_v446.py
+          python3 tools/verify_v446.py
+          python3 tools/verify_v426_updater.py
+          python3 tools/verify_v445.py
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Restore permanent signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ZAKO_RELEASE_KEYSTORE_B64 }}
+        run: |
+          test -n "$KEYSTORE_B64"
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/zako-release.jks"
+          chmod 600 "$RUNNER_TEMP/zako-release.jks"
+      - name: Build signed release
+        env:
+          ZAKO_KEYSTORE_PATH: ${{ runner.temp }}/zako-release.jks
+          ZAKO_STORE_PASSWORD: ${{ secrets.ZAKO_STORE_PASSWORD }}
+          ZAKO_KEY_ALIAS: ${{ secrets.ZAKO_KEY_ALIAS }}
+          ZAKO_KEY_PASSWORD: ${{ secrets.ZAKO_KEY_PASSWORD }}
+        run: gradle assembleRelease --no-daemon --stacktrace
+      - name: Verify APK identity and permanent signature
+        run: |
+          APK="$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)"
+          AAPT="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -n 1)"
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          "$AAPT" dump badging "$APK" | grep "package: name='com.easyiptv.player'" | grep "versionCode='71'" | grep "versionName='4.46'"
+          ACTUAL="$("$APKSIGNER" verify --print-certs "$APK" | sed -nE 's/^(V[0-9.]+ Signer: |Signer #1 )certificate SHA-256 digest: //p' | head -n 1 | tr '[:lower:]' '[:upper:]')"
+          test "$ACTUAL" = "8EF5FE2873F7A9D40302E722822C05B37B471AB08DF23785FA0A1AEB19A2C165"
+          cp "$APK" app/build/outputs/apk/release/Zako-v4.46.apk
+      - name: Package generated source
+        run: |
+          rm -rf review-package && mkdir review-package
+          cp -R app tools scripts review-package/
+          cp build.gradle.kts settings.gradle.kts gradle.properties review-package/
+          find review-package -type d -name build -prune -exec rm -rf {} + || true
+          (cd review-package && zip -qr ../Zako-v4.46-source.zip .)
+      - name: Publish 4.46
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NOTES="Restores a permanently visible Settings > Check for updates button and verifies the native signed updater remains intact. Keeps the complete 4.45 Mini Guide/navigation repair and 4.44 resumable downloads."
+          gh release create v4.46 app/build/outputs/apk/release/Zako-v4.46.apk Zako-v4.46-source.zip --target "$GITHUB_SHA" --title "Zako 4.46 Update Button Restore" --notes "$NOTES" --latest
+      - name: Point updater to 4.46
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s\n' '{' '  "versionCode": 71,' '  "versionName": "4.46",' '  "downloadUrl": "https://github.com/lukeypue/Easy-IPTV/releases/download/v4.46/Zako-v4.46.apk"' '}' > /tmp/latest.json
+          CONTENT="$(base64 -w0 /tmp/latest.json)"
+          for attempt in 1 2 3 4 5; do
+            SHA="$(gh api repos/lukeypue/Easy-IPTV/contents/latest.json?ref=main --jq .sha)"
+            if gh api --method PUT repos/lukeypue/Easy-IPTV/contents/latest.json -f message='Point updater to Zako 4.46' -f content="$CONTENT" -f sha="$SHA" -f branch=main; then exit 0; fi
+            sleep $((attempt * 2))
+          done
+          exit 1
+      - name: Verify published release and updater
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view v4.46 --json assets --jq '.assets[].name' | grep '^Zako-v4.46.apk$'
+          RAW="$(gh api repos/lukeypue/Easy-IPTV/contents/latest.json?ref=main --jq .content | tr -d '\n' | base64 -d)"
+          printf '%s' "$RAW" | grep '"versionCode": 71'
+          printf '%s' "$RAW" | grep 'releases/download/v4.46/Zako-v4.46.apk'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Zako-v4.46-release
+          path: |
+            app/build/outputs/apk/release/Zako-v4.46.apk
+            Zako-v4.46-source.zip
+          if-no-files-found: error
