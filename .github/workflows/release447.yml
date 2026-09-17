@@ -1,5 +1,7 @@
 name: Release Zako 4.47 Full Redesign
 on:
+  push:
+    branches: [ "zako-v4.47-release" ]
   workflow_dispatch:
 permissions:
   contents: write
