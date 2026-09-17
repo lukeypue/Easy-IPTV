@@ -1,7 +1,7 @@
 name: Build Zako 4.47 Red Green
 on:
   push:
-    branches: [ "zako-v4.47-green2", "zako-v4.47-green3", "zako-v4.47-green4" ]
+    branches: [ "zako-v4.47-green2", "zako-v4.47-green3", "zako-v4.47-green4", "zako-v4.47-runtime" ]
   workflow_dispatch:
 jobs:
   build447:
