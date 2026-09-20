@@ -76,7 +76,7 @@ new='''        // Future recording must never crash when Android exact-alarm acc
         val fmt = SimpleDateFormat("EEE h:mm a", Locale.getDefault())
         return when (result) {
             ScheduleResult.Scheduled ->
-                "Scheduled: \"$title\" on $channelName, ${fmt.format(Date(startMs))}. The device must be powered on at that time."
+                "Scheduled: " + title + " on " + channelName + ", " + fmt.format(Date(startMs)) + ". The device must be powered on at that time."
             ScheduleResult.PermissionRequired -> {
                 RecordingScheduler.requestExactAlarmAccess(context)
                 "Zako saved this recording. Allow Alarms & reminders, then return to Zako so it can schedule exactly."
