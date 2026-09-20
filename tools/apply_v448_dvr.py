@@ -82,8 +82,12 @@ print('Applied Zako 4.48 rolling DVR controller')
 # Remove stale pre-ring help text; the DVR now uses bounded rolling segments.
 main_path = base / 'MainActivity.kt'
 main = main_path.read_text()
-main = main.replace(
-    'DVR Live uses an append-only temporary buffer up to ~1 GB on Fire Stick storage or ~3.5 GB on a verified USB drive, then continues live directly if cap is reached.',
-    'DVR Live keeps a rolling local history while you stay on the channel. Zako uses verified USB storage when available and safely falls back to internal storage.'
+import re
+main, stale_count = re.subn(
+    r'DVR Live uses an append-only temporary buffer[^"]*',
+    'DVR Live keeps a rolling local history while you stay on the channel. Zako uses verified USB storage when available and safely falls back to internal storage.',
+    main,
 )
+if stale_count == 0:
+    print('No stale append-only DVR help text found')
 main_path.write_text(main)
