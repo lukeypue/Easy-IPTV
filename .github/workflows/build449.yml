@@ -62,6 +62,10 @@ jobs:
         run: python3 tools/verify_v449_screen.py
       - name: Apply 4.49 release metadata and startup recovery
         run: python3 tools/apply_v449_release.py
+      - name: Apply universal phone and Fire TV guide
+        run: python3 tools/apply_v450_universal_guide.py
+      - name: Verify universal guide and time recording
+        run: python3 tools/verify_v450_universal_guide.py
       - name: Verify 4.49 release metadata and startup recovery
         run: python3 tools/verify_v449.py
       - name: Verify 4.48 scheduler regression
