@@ -59,6 +59,12 @@ jobs:
         run: python3 tools/apply_v448_dvr.py
       - name: Verify mini-guide and DVR resilience
         run: python3 tools/verify_v448_ui_resilience.py
+      - name: Apply 4.48 release version
+        run: python3 tools/apply_v448_release.py
+      - name: Verify 4.48 release metadata
+        run: |
+          grep -q 'versionCode = 73' app/build.gradle.kts
+          grep -q 'versionName = "4.48"' app/build.gradle.kts
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
