@@ -49,6 +49,8 @@ jobs:
         run: python3 tools/apply_v448_dvr.py
       - name: Verify rolling DVR retained timeline
         run: python3 tools/verify_v448_dvr.py
+      - name: RED - same-channel recording must use rolling ring
+        run: python3 tools/verify_v448_recording_ownership.py
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
