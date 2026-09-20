@@ -64,6 +64,10 @@ jobs:
         run: python3 tools/apply_v449_release.py
       - name: Apply universal phone and Fire TV guide
         run: python3 tools/apply_v450_universal_guide.py
+      - name: Apply 4.50 release headroom optimization
+        run: python3 tools/apply_v450_headroom.py
+      - name: Apply 4.50 version metadata
+        run: python3 tools/apply_v450_release.py
       - name: Verify universal guide and time recording
         run: python3 tools/verify_v450_universal_guide.py
       - name: Verify 4.49 release metadata and startup recovery
@@ -85,8 +89,8 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
-      - name: Compile 4.49 debug APK
-        run: gradle assembleDebug --no-daemon --stacktrace
+      - name: Compile 4.50 debug and optimized release candidates
+        run: gradle assembleDebug assembleRelease --no-daemon --stacktrace
       - uses: actions/upload-artifact@v4
         with:
           name: Zako-v4.49-debug
