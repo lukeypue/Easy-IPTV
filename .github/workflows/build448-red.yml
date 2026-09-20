@@ -1,4 +1,4 @@
-name: Zako 4.48 RED Scheduler
+name: Zako 4.48 Scheduler Green
 on:
   push:
     branches: [ "zako-v4.48-dvr-stability" ]
