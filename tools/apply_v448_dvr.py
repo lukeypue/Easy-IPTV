@@ -16,6 +16,41 @@ internal object LiveDvrController {
         val atLiveEdge: Boolean,
     )
 
+    enum class TransportMode { PLAY, PAUSE, FAST_FORWARD, REWIND }
+
+    internal data class TransportState(
+        val mode: TransportMode = TransportMode.PLAY,
+        val rate: Int = 1,
+    )
+
+    private val steppedRates = intArrayOf(2, 4, 8, 16)
+    @Volatile private var transport = TransportState()
+
+    fun transportState(): TransportState = transport
+
+    fun pause(): TransportState {
+        transport = TransportState(TransportMode.PAUSE, 0)
+        return transport
+    }
+
+    fun play(): TransportState {
+        transport = TransportState(TransportMode.PLAY, 1)
+        return transport
+    }
+
+    fun fastForward(): TransportState = step(TransportMode.FAST_FORWARD)
+
+    fun rewind(): TransportState = step(TransportMode.REWIND)
+
+    private fun step(mode: TransportMode): TransportState {
+        val nextRate = if (transport.mode != mode) steppedRates[0] else {
+            val i = steppedRates.indexOf(transport.rate)
+            if (i < 0 || i == steppedRates.lastIndex) 1 else steppedRates[i + 1]
+        }
+        transport = if (nextRate == 1) TransportState() else TransportState(mode, nextRate)
+        return transport
+    }
+
     fun timeline(currentVirtualByte: Long? = null): Timeline? {
         val snap = Timeshift.snapshot() ?: return null
         val oldest = snap.oldestVirtualByte
@@ -36,7 +71,10 @@ internal object LiveDvrController {
         return requestedVirtualByte.coerceIn(snap.oldestVirtualByte, snap.newestVirtualByte)
     }
 
-    fun jumpLive(): Long = Timeshift.snapshot()?.newestVirtualByte ?: Timeshift.newestVirtualByte()
+    fun jumpLive(): Long {
+        play()
+        return Timeshift.snapshot()?.newestVirtualByte ?: Timeshift.newestVirtualByte()
+    }
 }
 ''')
 print('Applied Zako 4.48 rolling DVR controller')
