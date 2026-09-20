@@ -1,4 +1,5 @@
 name: Release Zako 4.49 Managed DVR
+# Signed release trigger
 on:
   push:
     branches: [ "zako-v4.49-release" ]
