@@ -60,3 +60,5 @@ jobs:
         run: python3 tools/apply_v449_screen.py
       - name: Verify Recordings screen integration
         run: python3 tools/verify_v449_screen.py
+      - name: RED - 4.49 release metadata and startup recovery
+        run: python3 tools/verify_v449.py
