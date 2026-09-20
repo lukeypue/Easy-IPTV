@@ -52,3 +52,5 @@ jobs:
         run: python3 tools/apply_v449_recovery.py
       - name: Verify reboot recovery
         run: python3 tools/verify_v449_recovery.py
+      - name: RED - verify managed DVR UI
+        run: python3 tools/verify_v449_ui.py
