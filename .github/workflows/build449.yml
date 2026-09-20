@@ -56,3 +56,5 @@ jobs:
         run: python3 tools/apply_v449_ui.py
       - name: Verify managed DVR UI
         run: python3 tools/verify_v449_ui.py
+      - name: RED - Recordings screen integration
+        run: python3 tools/verify_v449_screen.py
