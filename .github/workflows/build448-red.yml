@@ -74,3 +74,12 @@ jobs:
           gradle-version: '8.7'
       - name: Compile
         run: gradle assembleDebug --no-daemon --stacktrace
+      - name: Verify APK exists and hash it
+        run: |
+          test -s app/build/outputs/apk/debug/app-debug.apk
+          sha256sum app/build/outputs/apk/debug/app-debug.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Zako-v4.48-release-candidate
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
