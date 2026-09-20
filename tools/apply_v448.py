@@ -60,13 +60,12 @@ object RecordingScheduler {
 ''')
 
 text=rec.read_text()
-old='''        // Alarm-clock alarms are exact and fire even in power saving.
-        am.setAlarmClock(
-            AlarmManager.AlarmClockInfo(startMs - 60 * 1000, show),   // wake 1 min early
-            pending(context, s)
-        )
-        val fmt = SimpleDateFormat("EEE h:mm a", Locale.getDefault())
-        return "Scheduled: \"$title\" on $channelName, ${fmt.format(Date(startMs))}. The device must be powered on at that time."'''
+start_marker = '        // Alarm-clock alarms are exact and fire even in power saving.\n'
+end_marker = '    fun cancel(context: Context, prefs: SharedPreferences, id: Long) {\n'
+start = text.find(start_marker)
+end = text.find(end_marker, start)
+if start < 0 or end < 0:
+    raise SystemExit('v4.48 schedule target not found')
 new='''        // Future recording must never crash when Android exact-alarm access is off.
         val result = RecordingScheduler.schedule(
             context = context,
@@ -84,10 +83,11 @@ new='''        // Future recording must never crash when Android exact-alarm acc
             }
             is ScheduleResult.Failed ->
                 "Recording saved, but Android could not schedule it yet: ${result.message}"
-        }'''
-if old not in text:
-    raise SystemExit('v4.48 schedule target not found')
-text=text.replace(old,new,1)
+        }
+    }
+
+'''
+text = text[:start] + new + text[end:]
 # AlarmManager import remains needed by cancel().
 rec.write_text(text)
 
