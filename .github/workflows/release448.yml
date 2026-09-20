@@ -1,4 +1,5 @@
 name: Release Zako 4.48 Full Redesign
+# Trigger signed 4.48 publication
 on:
   push:
     branches: [ "zako-v4.48-release" ]
