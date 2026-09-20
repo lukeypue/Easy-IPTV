@@ -45,7 +45,9 @@ jobs:
         run: python3 tools/apply_v448.py
       - name: Verify scheduler hardening
         run: python3 tools/verify_v448_scheduler.py
-      - name: RED - rolling DVR must use retained ring timeline
+      - name: Apply rolling DVR controller
+        run: python3 tools/apply_v448_dvr.py
+      - name: Verify rolling DVR retained timeline
         run: python3 tools/verify_v448_dvr.py
       - uses: actions/setup-java@v5
         with:
