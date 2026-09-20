@@ -41,5 +41,16 @@ jobs:
           python3 tools/apply_v445.py
           python3 tools/apply_v446.py
           python3 tools/apply_v447.py
-      - name: RED - future recording must be capability safe
+      - name: Apply scheduler hardening
+        run: python3 tools/apply_v448.py
+      - name: Verify scheduler hardening
         run: python3 tools/verify_v448_scheduler.py
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Compile
+        run: gradle assembleDebug --no-daemon --stacktrace
