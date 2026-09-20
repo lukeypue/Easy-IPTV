@@ -55,6 +55,8 @@ jobs:
         run: python3 tools/apply_v448_dvr.py
       - name: Verify DVR transport state machine
         run: python3 tools/verify_v448_transport.py
+      - name: RED - mini-guide and DVR resilience cleanup
+        run: python3 tools/verify_v448_ui_resilience.py
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
