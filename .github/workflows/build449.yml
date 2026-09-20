@@ -44,5 +44,7 @@ jobs:
           python3 tools/apply_v448.py
           python3 tools/apply_v448_dvr.py
           python3 tools/apply_v448_release.py
+      - name: Apply 4.49 schedule core
+        run: python3 tools/apply_v449_core.py
       - name: Verify 4.49 schedule core
         run: python3 tools/verify_v449_schedule_core.py
