@@ -11,3 +11,5 @@ checks={
 }
 for k,v in checks.items(): print(('PASS: ' if v else 'FAIL: ')+k)
 raise SystemExit(0 if all(checks.values()) else 1)
+
+# compile-fix trigger: existing Playable model
