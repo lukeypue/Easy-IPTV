@@ -60,5 +60,31 @@ jobs:
         run: python3 tools/apply_v449_screen.py
       - name: Verify Recordings screen integration
         run: python3 tools/verify_v449_screen.py
-      - name: RED - 4.49 release metadata and startup recovery
+      - name: Apply 4.49 release metadata and startup recovery
+        run: python3 tools/apply_v449_release.py
+      - name: Verify 4.49 release metadata and startup recovery
         run: python3 tools/verify_v449.py
+      - name: Verify 4.48 scheduler regression
+        run: python3 tools/verify_v448_scheduler.py
+      - name: Verify continuous DVR regression
+        run: python3 tools/verify_v448_dvr.py
+      - name: Verify recording ownership regression
+        run: python3 tools/verify_v448_recording_ownership.py
+      - name: Verify DVR transport regression
+        run: python3 tools/verify_v448_transport.py
+      - name: Verify DVR UI resilience regression
+        run: python3 tools/verify_v448_ui_resilience.py
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Compile 4.49 debug APK
+        run: gradle assembleDebug --no-daemon --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Zako-v4.49-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
