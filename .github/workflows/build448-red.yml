@@ -51,7 +51,9 @@ jobs:
         run: python3 tools/verify_v448_dvr.py
       - name: RED - same-channel recording must use rolling ring
         run: python3 tools/verify_v448_recording_ownership.py
-      - name: RED - DVR transport state machine
+      - name: Re-apply DVR controller with transport
+        run: python3 tools/apply_v448_dvr.py
+      - name: Verify DVR transport state machine
         run: python3 tools/verify_v448_transport.py
       - uses: actions/setup-java@v5
         with:
