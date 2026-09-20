@@ -1,0 +1,48 @@
+name: Zako 4.49 Managed DVR
+on:
+  push:
+    branches: [ "zako-v4.49-managed-dvr" ]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Regenerate verified 4.48 source
+        run: |
+          python3 tools/fix_v424_patcher_source.py
+          python3 tools/apply_v424.py
+          python3 tools/apply_v424_post.py
+          python3 tools/apply_v425.py
+          python3 tools/apply_v425_remote_info.py
+          python3 tools/apply_v426_updater.py
+          python3 tools/apply_v428.py
+          python3 tools/apply_v429.py
+          python3 tools/apply_v430.py
+          python3 tools/apply_v431.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('tools/apply_v432.py'); t=p.read_text(); t=t.replace("search_key_marker = '@Composable\\nprivate fun SearchKey('", "search_key_marker = '@Composable\\nprivate fun androidx.compose.foundation.layout.RowScope.SearchKey('"); p.write_text(t)
+          PY
+          python3 tools/apply_v432.py
+          python3 tools/apply_v433.py
+          python3 tools/apply_v434.py
+          python3 tools/apply_v435.py
+          python3 tools/fix_v436_patcher.py
+          python3 tools/apply_v436.py
+          python3 tools/apply_v437.py
+          python3 tools/apply_v438.py
+          python3 tools/apply_v439.py
+          python3 tools/fix_v440_patcher.py
+          python3 tools/apply_v440.py
+          python3 tools/apply_v441.py
+          python3 scripts/prepare_v442_generated.py
+          python3 tools/apply_v443.py
+          python3 tools/apply_v444.py
+          python3 tools/apply_v445.py
+          python3 tools/apply_v446.py
+          python3 tools/apply_v447.py
+          python3 tools/apply_v448.py
+          python3 tools/apply_v448_dvr.py
+          python3 tools/apply_v448_release.py
+      - name: Verify 4.49 schedule core
+        run: python3 tools/verify_v449_schedule_core.py
