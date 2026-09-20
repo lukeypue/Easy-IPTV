@@ -15,7 +15,7 @@ block=r'''
 @Composable
 fun ManagedDvrSchedulePane(
     prefs: android.content.SharedPreferences,
-    channels: List<Channel>,
+    channels: List<Playable>,
     refreshToken: Int,
     onRefresh: () -> Unit
 ) {
