@@ -48,5 +48,7 @@ jobs:
         run: python3 tools/apply_v449_core.py
       - name: Verify 4.49 schedule core
         run: python3 tools/verify_v449_schedule_core.py
-      - name: RED - verify reboot recovery
+      - name: Apply reboot recovery
+        run: python3 tools/apply_v449_recovery.py
+      - name: Verify reboot recovery
         run: python3 tools/verify_v449_recovery.py
