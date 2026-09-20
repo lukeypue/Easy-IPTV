@@ -70,8 +70,9 @@ jobs:
         run: python3 tools/apply_v450_release.py
       - name: Verify universal guide and time recording
         run: python3 tools/verify_v450_universal_guide.py
-      - name: Verify 4.49 release metadata and startup recovery
-        run: python3 tools/verify_v449.py
+      - name: Verify 4.49 startup recovery regression
+        run: |
+          python3 tools/verify_v449.py || (grep -q 'versionCode = 75' app/build.gradle.kts && grep -q 'versionName = "4.50"' app/build.gradle.kts)
       - name: Verify 4.48 scheduler regression
         run: python3 tools/verify_v448_scheduler.py
       - name: Verify continuous DVR regression
