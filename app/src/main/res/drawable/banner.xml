@@ -1,24 +1,60 @@
 <?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:aapt="http://schemas.android.com/aapt"
-    android:width="320dp" android:height="180dp"
-    android:viewportWidth="320" android:viewportHeight="180">
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+
     <path android:pathData="M0,0h320v180h-320z">
         <aapt:attr name="android:fillColor">
-            <gradient android:startColor="#070B13" android:centerColor="#0C1630" android:endColor="#111C3C"
-                android:startX="0" android:startY="180" android:endX="320" android:endY="0" android:type="linear" />
+            <gradient
+                android:startColor="#050A13"
+                android:centerColor="#0A1830"
+                android:endColor="#0B2035"
+                android:startX="0"
+                android:startY="180"
+                android:endX="320"
+                android:endY="0"
+                android:type="linear" />
         </aapt:attr>
     </path>
-    <!-- Zako mark -->
-    <path android:fillType="evenOdd" android:fillColor="#5C78D8FF"
-        android:pathData="M72,40 A50,50 0,1 1 71.99,40 Z M72,47 A43,43 0,1 0 72.01,47 Z" />
-    <path android:pathData="M42,66 C51,56 66,54 88,56 L96,66 C84,66 71,67 58,70 L91,71 C99,71 104,75 105,81 C94,88 84,95 73,102 C64,108 57,114 52,120 C64,115 81,116 95,124 L86,137 C74,131 57,131 44,139 L36,126 C43,115 57,104 75,93 L96,80 L51,79 C43,79 39,75 39,70 Z">
-        <aapt:attr name="android:fillColor"><gradient android:startX="38" android:startY="132" android:endX="104" android:endY="55" android:startColor="#70DFFF" android:centerColor="#FFFFFF" android:endColor="#496EFF" android:type="linear" /></aapt:attr>
+
+    <!-- Low-cost blue glow behind the mark. -->
+    <path android:fillColor="#17376E9E" android:pathData="M20,34h116v112h-116z" />
+
+    <!-- Same unmistakable geometric Z used by the launcher icon. -->
+    <path android:pathData="M39,43 L129,43 L117,61 L91,61 L57,111 L126,111 L114,132 L28,132 L39,111 L77,61 L27,61 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="31"
+                android:startY="45"
+                android:endX="122"
+                android:endY="130"
+                android:startColor="#195BFF"
+                android:centerColor="#159CFF"
+                android:endColor="#19E3D3"
+                android:type="linear" />
+        </aapt:attr>
     </path>
-    <!-- ZAKO wordmark, block geometry -->
-    <path android:fillColor="#F4F7FF" android:pathData="M137,70 h34 v8 l-22,26 h22 v9 h-36 v-8 l22,-26 h-20 Z" />
-    <path android:fillType="evenOdd" android:fillColor="#F4F7FF" android:pathData="M180,113 L194,70 h12 l14,43 h-10 l-3,-10 h-15 l-3,10 Z M195,95 h10 l-5,-17 Z" />
-    <path android:fillColor="#F4F7FF" android:pathData="M228,70 h10 v17 l14,-17 h12 l-17,20 l18,23 h-12 l-15,-20 v20 h-10 Z" />
-    <path android:fillType="evenOdd" android:fillColor="#F4F7FF" android:pathData="M272,70 h18 c13,0 20,8 20,21 c0,14 -7,22 -20,22 h-18 Z M282,79 v25 h7 c7,0 11,-4 11,-13 c0,-8 -4,-12 -11,-12 Z" />
-    <path android:fillColor="#6CCBFF" android:pathData="M137,124h171v3h-171z" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#7DEBFF"
+        android:strokeWidth="1.2"
+        android:strokeLineJoin="round"
+        android:pathData="M39,43 L129,43 L117,61 L91,61 L57,111 L126,111 L114,132 L28,132 L39,111 L77,61 L27,61 Z" />
+    <path
+        android:fillColor="#07101C"
+        android:strokeColor="#75F0F0"
+        android:strokeWidth="1"
+        android:pathData="M91,115 L108,121.5 L91,128 Z" />
+    <path android:fillColor="#30FFFFFF" android:pathData="M42,47 L123,47 L119,52 L38,52 Z" />
+
+    <!-- ZAKO wordmark. -->
+    <path android:fillColor="#F4F8FF" android:pathData="M144,66 h34 v8 l-22,26 h22 v9 h-36 v-8 l22,-26 h-20 Z" />
+    <path android:fillType="evenOdd" android:fillColor="#F4F8FF" android:pathData="M187,109 L201,66 h12 l14,43 h-10 l-3,-10 h-15 l-3,10 Z M202,91 h10 l-5,-17 Z" />
+    <path android:fillColor="#F4F8FF" android:pathData="M235,66 h10 v17 l14,-17 h12 l-17,20 l18,23 h-12 l-15,-20 v20 h-10 Z" />
+    <path android:fillType="evenOdd" android:fillColor="#F4F8FF" android:pathData="M279,66 h18 c13,0 20,8 20,21 c0,14 -7,22 -20,22 h-18 Z M289,75 v25 h7 c7,0 11,-4 11,-13 c0,-8 -4,-12 -11,-12 Z" />
+
+    <path android:fillColor="#29D6E6" android:pathData="M144,120h167v3h-167z" />
 </vector>

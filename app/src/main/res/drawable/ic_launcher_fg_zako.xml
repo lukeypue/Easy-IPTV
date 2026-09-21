@@ -1,28 +1,50 @@
 <?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:aapt="http://schemas.android.com/aapt"
-    android:width="108dp" android:height="108dp"
-    android:viewportWidth="108" android:viewportHeight="108">
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
 
-    <!-- Electric-blue ring inspired by the supplied Zako mark. -->
+    <!-- Soft blue halo behind the mark. -->
     <path
-        android:fillType="evenOdd"
-        android:pathData="M54,17 A37,37 0,1 1 53.99,17 Z M54,22 A32,32 0,1 0 54.01,22 Z"
-        android:fillColor="#4D78D8FF" />
+        android:fillColor="#18366DA8"
+        android:pathData="M18,20h72v72h-72z" />
 
-    <!-- Soft inner halo. -->
-    <path android:fillColor="#202B68FF"
-        android:pathData="M54,25 A29,29 0,1 1 53.99,25 Z" />
-
-    <!-- Stylized Z: broad enough to stay readable from across a room. -->
-    <path android:pathData="M31,36 C38,29 48,27 64,28 C70,29 75,31 79,35 L73,43 C67,39 61,38 53,38 C46,38 41,39 37,42 L66,43 C72,43 77,45 80,49 L77,55 C70,60 63,64 57,68 C51,72 45,76 41,80 C47,77 54,76 62,76 C69,76 75,78 80,82 L74,90 C68,86 61,85 52,85 C42,85 34,88 29,92 L24,84 C28,77 35,70 44,64 C52,58 59,54 65,50 L35,49 C30,49 27,46 27,42 Z">
+    <!-- Clear geometric Z. The straight strokes are intentional: this must read as Z from across a room. -->
+    <path
+        android:pathData="M27,25 L88,25 L79,39 L61,39 L37,74 L85,74 L78,89 L19,89 L26,74 L50,39 L19,39 Z">
         <aapt:attr name="android:fillColor">
-            <gradient android:startX="28" android:startY="84" android:endX="82" android:endY="30"
-                android:startColor="#8EEBFF" android:centerColor="#F5FAFF" android:endColor="#4178FF"
+            <gradient
+                android:startX="23"
+                android:startY="26"
+                android:endX="84"
+                android:endY="88"
+                android:startColor="#195BFF"
+                android:centerColor="#159CFF"
+                android:endColor="#19E3D3"
                 android:type="linear" />
         </aapt:attr>
     </path>
 
-    <!-- A few tiny spark points make the icon pop without adding bitmap memory. -->
-    <path android:fillColor="#B9F4FF" android:pathData="M23,51h2v2h-2z M84,46h2v2h-2z M80,70h2v2h-2z M35,24h2v2h-2z" />
+    <!-- Fine cyan edge light keeps the logo crisp on dark TV home screens. -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#7DEBFF"
+        android:strokeWidth="0.8"
+        android:strokeLineJoin="round"
+        android:pathData="M27,25 L88,25 L79,39 L61,39 L37,74 L85,74 L78,89 L19,89 L26,74 L50,39 L19,39 Z" />
+
+    <!-- Recessed play symbol, integrated into the lower stroke. -->
+    <path
+        android:fillColor="#08101C"
+        android:strokeColor="#75F0F0"
+        android:strokeWidth="0.8"
+        android:strokeLineJoin="round"
+        android:pathData="M61,77 L74,81.5 L61,86 Z" />
+
+    <!-- Small glossy highlight, kept subtle so the Z remains the hero. -->
+    <path
+        android:fillColor="#35FFFFFF"
+        android:pathData="M29,28 L83,28 L79,32 L27,32 Z" />
 </vector>
