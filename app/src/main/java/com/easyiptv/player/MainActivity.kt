@@ -4151,40 +4151,217 @@ private fun TvTextField(
     keyboardType: KeyboardType = KeyboardType.Text
 ) {
     var editing by remember { mutableStateOf(false) }
-    val fr = remember { FocusRequester() }
+
     if (editing) {
-        LaunchedEffect(Unit) { runCatching { fr.requestFocus() } }
-        BackHandler(enabled = true) { editing = false }
-        OutlinedTextField(
+        TvAmazonKeyboard(
             value = value,
             onValueChange = onValueChange,
-            label = { Text(label) },
-            placeholder = { if (placeholder.isNotEmpty()) Text(placeholder) },
-            singleLine = true,
-            visualTransformation = if (password) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
-            keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
-            modifier = modifier.focusRequester(fr)
+            title = label,
+            password = password,
+            onDone = { editing = false },
+            onCancel = { editing = false }
+        )
+    }
+
+    Column(
+        modifier
+            .tvFocus(RoundedCornerShape(8.dp))
+            .background(Color(0x33202634), RoundedCornerShape(8.dp))
+            .clickable { editing = true }
+            .padding(horizontal = 14.dp, vertical = 12.dp)
+    ) {
+        Text(label, color = Muted, fontSize = 11.sp)
+        Text(
+            when {
+                value.isEmpty() -> placeholder.ifEmpty { "Press OK to type" }
+                password -> "•".repeat(value.length.coerceAtMost(12))
+                else -> value
+            },
+            color = if (value.isEmpty()) Muted else Ink,
+            fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+/**
+ * One keyboard for ALL Zako text entry. It deliberately does not summon the
+ * phone/Fire OS IME, so login, search, playlist names and URLs behave exactly
+ * the same with a Fire TV remote.
+ *
+ * Navigation mirrors the familiar Fire TV pattern:
+ *  - Left/right wraps around the current row.
+ *  - Up/down keeps the nearest column.
+ *  - OK presses the highlighted key.
+ *  - Back closes the keyboard.
+ *  - ABC / 123 switches letter and symbol pages.
+ */
+@Composable
+private fun TvAmazonKeyboard(
+    value: String,
+    onValueChange: (String) -> Unit,
+    title: String,
+    password: Boolean,
+    onDone: () -> Unit,
+    onCancel: () -> Unit
+) {
+    var symbols by remember { mutableStateOf(false) }
+    var upper by remember { mutableStateOf(false) }
+    var row by remember { mutableIntStateOf(0) }
+    var col by remember { mutableIntStateOf(0) }
+    val focus = remember { FocusRequester() }
+
+    val letters = if (upper) {
+        listOf(
+            listOf("Q","W","E","R","T","Y","U","I","O","P"),
+            listOf("A","S","D","F","G","H","J","K","L"),
+            listOf("⇧","Z","X","C","V","B","N","M","⌫"),
+            listOf("123","SPACE",".","-","_","@","/","DONE")
         )
     } else {
-        Column(
-            modifier
-                .tvFocus(RoundedCornerShape(8.dp))
-                .background(Color(0x33202634), RoundedCornerShape(8.dp))
-                .clickable { editing = true }
-                .padding(horizontal = 14.dp, vertical = 12.dp)
-        ) {
-            Text(label, color = Muted, fontSize = 11.sp)
-            Text(
-                when {
-                    value.isEmpty() -> placeholder.ifEmpty { "Press OK to type" }
-                    password -> "\u2022".repeat(value.length.coerceAtMost(12))
-                    else -> value
-                },
-                color = if (value.isEmpty()) Muted else Ink,
-                fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
-            )
+        listOf(
+            listOf("q","w","e","r","t","y","u","i","o","p"),
+            listOf("a","s","d","f","g","h","j","k","l"),
+            listOf("⇧","z","x","c","v","b","n","m","⌫"),
+            listOf("123","SPACE",".","-","_","@","/","DONE")
+        )
+    }
+    val numberRows = listOf(
+        listOf("1","2","3","4","5","6","7","8","9","0"),
+        listOf("!","#","$","%","&","*","(",")","+","="),
+        listOf(":",";","'","\"","?",",",".","-","_","⌫"),
+        listOf("ABC","SPACE","@","/","\\",":",".com","DONE")
+    )
+    val rows = if (symbols) numberRows else letters
+    row = row.coerceIn(0, rows.lastIndex)
+    col = col.coerceIn(0, rows[row].lastIndex)
+
+    fun press(key: String) {
+        when (key) {
+            "⌫" -> if (value.isNotEmpty()) onValueChange(value.dropLast(1))
+            "SPACE" -> onValueChange(value + " ")
+            "⇧" -> upper = !upper
+            "123" -> { symbols = true; row = 0; col = 0 }
+            "ABC" -> { symbols = false; row = 0; col = 0 }
+            "DONE" -> onDone()
+            ".com" -> onValueChange(value + ".com")
+            else -> onValueChange(value + key)
         }
     }
+
+    BackHandler(enabled = true) { onCancel() }
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay(80)
+        runCatching { focus.requestFocus() }
+    }
+
+    AlertDialog(
+        onDismissRequest = onCancel,
+        containerColor = SurfaceCol,
+        title = {
+            Column {
+                Text(title, color = Ink, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(6.dp))
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF0A0B0F), RoundedCornerShape(8.dp))
+                        .border(2.dp, Accent, RoundedCornerShape(8.dp))
+                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                ) {
+                    Text(
+                        when {
+                            value.isEmpty() -> "Type with the remote"
+                            password -> "•".repeat(value.length)
+                            else -> value
+                        },
+                        color = if (value.isEmpty()) Muted else Ink,
+                        fontSize = 16.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        },
+        text = {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .focusRequester(focus)
+                    .focusable()
+                    .onPreviewKeyEvent { ev ->
+                        if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                        when (ev.key) {
+                            Key.DirectionRight -> {
+                                col = (col + 1) % rows[row].size
+                                true
+                            }
+                            Key.DirectionLeft -> {
+                                col = (col - 1 + rows[row].size) % rows[row].size
+                                true
+                            }
+                            Key.DirectionDown -> {
+                                row = (row + 1) % rows.size
+                                col = col.coerceAtMost(rows[row].lastIndex)
+                                true
+                            }
+                            Key.DirectionUp -> {
+                                row = (row - 1 + rows.size) % rows.size
+                                col = col.coerceAtMost(rows[row].lastIndex)
+                                true
+                            }
+                            Key.DirectionCenter, Key.Enter -> {
+                                press(rows[row][col])
+                                true
+                            }
+                            Key.Backspace, Key.Delete -> {
+                                if (value.isNotEmpty()) onValueChange(value.dropLast(1))
+                                true
+                            }
+                            else -> false
+                        }
+                    }
+            ) {
+                rows.forEachIndexed { ri, keys ->
+                    Row(
+                        Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        keys.forEachIndexed { ci, key ->
+                            val selected = ri == row && ci == col
+                            Box(
+                                Modifier
+                                    .weight(if (key == "SPACE") 2.2f else if (key == "DONE") 1.5f else 1f)
+                                    .height(42.dp)
+                                    .background(
+                                        if (selected) FocusPink.copy(alpha = 0.24f) else Color(0xFF292C34),
+                                        RoundedCornerShape(7.dp)
+                                    )
+                                    .border(
+                                        if (selected) 3.dp else 1.dp,
+                                        if (selected) FocusPink else Line,
+                                        RoundedCornerShape(7.dp)
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    key,
+                                    color = if (key == "DONE") Accent else Ink,
+                                    fontSize = if (key.length > 3) 10.sp else 14.sp,
+                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
+                                )
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(5.dp))
+                Text(
+                    "D-pad moves • OK selects • Left/Right wraps • Back closes",
+                    color = Muted, fontSize = 10.sp
+                )
+            }
+        },
+        confirmButton = {}
+    )
 }
 
 @Composable
