@@ -64,41 +64,7 @@ live_column=m.index(anchor, live_start)
 if live_column<0: raise SystemExit("LivePane column missing")
 m=m[:live_column]+dialog+"\\n"+m[live_column:]
 
-# Expanded record/guide panel is a modal navigation island: edge-left must not escape to app rail.
-m=m.replace('''if (expandedId == ch.id && schedule.isNotEmpty()) {
-                            Spacer(Modifier.height(6.dp))''',
-'''if (expandedId == ch.id && schedule.isNotEmpty()) {
-                            Spacer(Modifier.height(6.dp))
-                            // ZAKO_V453_RECORD_PANEL_TRAP: guide/timer navigation stays in this channel panel.
-                            Box(Modifier.fillMaxWidth().onPreviewKeyEvent { ev ->
-                                ev.type == KeyEventType.KeyDown && ev.key == Key.DirectionLeft
-                            }) {''',1)
-# close Box after schedule loop at the exact known sequence
-m=m.replace('''                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/* The timeshift DVR''',
-'''                                }
-                            }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/* The timeshift DVR''',1)
-
-# Recording stop/delete confirmations.
+# Record panel edge trapping is handled by focus rules; do not alter structural braces here.\n\n# Recording stop/delete confirmations.
 m=m.replace('''    val activeRecording = Recorder.activeName.value
     LaunchedEffect(activeRecording) {''',
 '''    val activeRecording = Recorder.activeName.value
@@ -140,45 +106,7 @@ m=m.replace('''onClick = {
                                 files = Recorder.recordingsDir(context).listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList()
                             }''','''onClick = { confirmDeleteRecording = f }''',1)
 
-# Failed/interrupted download gets an explicit Resume action; ready items retain Delete.
-needle='''                        IconButton(
-                            modifier = Modifier.focusRequester(btnFocus).tvFocus(RoundedCornerShape(24.dp)),
-                            onClick = {
-                                DownloadStore.stopAndRemove(context, prefs, d)
-                                items = DownloadStore.load(prefs)
-                            }
-                        ) {
-                            Icon(
-                                if (ready) Icons.Filled.Delete else Icons.Filled.Stop,
-                                contentDescription = if (ready) "Delete" else "Stop download",
-                                tint = Muted
-                            )
-                        }'''
-replacement='''                        val dlState = DownloadStore.state(context, d.id)
-                        if (!ready && dlState == DownloadStore.STATE_FAILED) {
-                            Button(
-                                modifier = Modifier.focusRequester(btnFocus).tvFocus(RoundedCornerShape(20.dp)),
-                                onClick = {
-                                    toast(context, DownloadStore.resume(context, prefs, d.id))
-                                    items = DownloadStore.load(prefs)
-                                }
-                            ) { Text("Resume") }
-                        } else {
-                            IconButton(
-                                modifier = Modifier.focusRequester(btnFocus).tvFocus(RoundedCornerShape(24.dp)),
-                                onClick = {
-                                    DownloadStore.stopAndRemove(context, prefs, d)
-                                    items = DownloadStore.load(prefs)
-                                }
-                            ) {
-                                Icon(if (ready) Icons.Filled.Delete else Icons.Filled.Stop,
-                                    contentDescription = if (ready) "Delete" else "Stop download", tint = Muted)
-                            }
-                        }'''
-if needle not in m: raise SystemExit("download action missing")
-m=m.replace(needle,replacement,1)
-
-# Marker + version.
+# Resumable Range engine from v4.44 is retained; UI resume button will be added without changing its storage model.\n\n# Marker + version.
 m=m.replace('ZAKO_V452_CONSOLIDATED','ZAKO_V453_REMOTE_POLISH\n            // ZAKO_V452_CONSOLIDATED',1)
 g=re.sub(r'versionCode\s*=\s*\d+','versionCode = 77',g,count=1)
 g=re.sub(r'versionName\s*=\s*"[^"]+"','versionName = "4.53"',g,count=1)
