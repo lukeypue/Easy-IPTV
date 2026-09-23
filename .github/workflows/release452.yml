@@ -106,7 +106,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create v4.52 app/build/outputs/apk/release/Zako-v4.52.apk --target "$GITHUB_SHA" --title "Zako 4.52 Consolidated" --notes "Consolidated regression repair from the verified 4.50 chain: restored mini guide, updater, bubble UI, deterministic remote navigation, one wrapping Fire TV keyboard, universal 7-day manual recording on every channel, upcoming schedules, background recording retries, and low-memory release shrinking."
+          NOTES="Consolidated regression repair from the verified 4.50 chain: restored mini guide, updater, bubble UI, deterministic remote navigation, one wrapping Fire TV keyboard, universal 7-day manual recording on every channel, upcoming schedules, background recording retries, and low-memory release shrinking."
+          if gh release view v4.52 >/dev/null 2>&1; then
+            gh release upload v4.52 app/build/outputs/apk/release/Zako-v4.52.apk --clobber
+            gh release edit v4.52 --title "Zako 4.52 Consolidated" --notes "$NOTES" --latest
+          else
+            gh release create v4.52 app/build/outputs/apk/release/Zako-v4.52.apk --target "$GITHUB_SHA" --title "Zako 4.52 Consolidated" --notes "$NOTES" --latest
+          fi
       - name: Point updater to 4.52
         env:
           GH_TOKEN: ${{ github.token }}
@@ -125,7 +131,7 @@ jobs:
         run: |
           gh release view v4.52 --json assets --jq '.assets[].name' | grep '^Zako-v4.52.apk$'
           RAW="$(gh api repos/lukeypue/Easy-IPTV/contents/latest.json?ref=main --jq .content | tr -d '\n' | base64 -d)"
-          printf '%s' "$RAW" | grep '"versionCode": 75'
+          printf '%s' "$RAW" | grep '"versionCode": 76'
           printf '%s' "$RAW" | grep '"versionName": "4.52"'
       - uses: actions/upload-artifact@v4
         with:
