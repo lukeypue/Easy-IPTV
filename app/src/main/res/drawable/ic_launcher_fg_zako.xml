@@ -21,8 +21,8 @@
                 android:endX="84"
                 android:endY="88"
                 android:startColor="#195BFF"
-                android:centerColor="#159CFF"
-                android:endColor="#19E3D3"
+                android:centerColor="#8A5CFF"
+                android:endColor="#FF2FB9"
                 android:type="linear" />
         </aapt:attr>
     </path>
@@ -30,7 +30,7 @@
     <!-- Fine cyan edge light keeps the logo crisp on dark TV home screens. -->
     <path
         android:fillColor="#00000000"
-        android:strokeColor="#7DEBFF"
+        android:strokeColor="#33E1FF"
         android:strokeWidth="0.8"
         android:strokeLineJoin="round"
         android:pathData="M27,25 L88,25 L79,39 L61,39 L37,74 L85,74 L78,89 L19,89 L26,74 L50,39 L19,39 Z" />
@@ -38,7 +38,7 @@
     <!-- Recessed play symbol, integrated into the lower stroke. -->
     <path
         android:fillColor="#08101C"
-        android:strokeColor="#75F0F0"
+        android:strokeColor="#FF58C8"
         android:strokeWidth="0.8"
         android:strokeLineJoin="round"
         android:pathData="M61,77 L74,81.5 L61,86 Z" />
