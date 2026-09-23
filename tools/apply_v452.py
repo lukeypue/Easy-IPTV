@@ -9,7 +9,7 @@ if "ZAKO_V452_CONSOLIDATED" in main: raise SystemExit("4.52 already applied")
 main=re.sub(r'private val Muted = Color\\(0x[0-9A-Fa-f]+\\)','private val Muted = Color(0xFFBFEFFF)',main,count=1)
 if 'private val NeonGreen = Color(0xFF39FF88)' in main:
     main=main.replace('private val NeonGreen = Color(0xFF39FF88)','private val NeonGreen = Color(0xFF39FF88) // ZAKO_V452_CHANNEL_GREEN',1)
-a=main.index('@Composable\\nprivate fun TvTextField('); b=main.index('@Composable\\nprivate fun ChannelIcon(',a)
+a=main.index('@Composable\nprivate fun TvTextField('); b=main.index('@Composable\nprivate fun ChannelIcon(',a)
 keyboard=r'''@Composable
 private fun TvTextField(
     value: String, onValueChange: (String) -> Unit, label: String,
@@ -85,7 +85,7 @@ private fun TvTextField(
 '''
 main=main[:a]+keyboard+main[b:]
 main=main.replace('var expandedId by remember { mutableStateOf<String?>(null) }',
-    'var expandedId by remember { mutableStateOf<String?>(null) }\\n    var manualDayOffset by remember { mutableIntStateOf(0) }',1)
+    'var expandedId by remember { mutableStateOf<String?>(null) }\n    var manualDayOffset by remember { mutableIntStateOf(0) }',1)
 old_start='''                            if (schedule.isEmpty()) {
                                 // Provider metadata is optional; the timeline is not.'''
 si=main.find(old_start); ei=main.find('                            schedule.take(30).forEach { e ->',si)
@@ -194,7 +194,7 @@ retry=r'''                        // ZAKO_V452_RECORD_RETRY
                         if(!connected) throw(lastNetworkError ?: java.io.IOException("Provider stream did not start"))
 '''
 rec=rec.replace(old,retry,1)
-main=main.replace('ZAKO_V447_FULL_REDESIGN','ZAKO_V452_CONSOLIDATED\\n            // ZAKO_V447_FULL_REDESIGN',1)
+main=main.replace('ZAKO_V447_FULL_REDESIGN','ZAKO_V452_CONSOLIDATED\n            // ZAKO_V447_FULL_REDESIGN',1)
 gradle=re.sub(r'versionCode\\s*=\\s*\\d+','versionCode = 76',gradle,count=1)
 gradle=re.sub(r'versionName\\s*=\\s*"[^"]+"','versionName = "4.52"',gradle,count=1)
 MAIN.write_text(main);REC.write_text(rec);GRADLE.write_text(gradle)
