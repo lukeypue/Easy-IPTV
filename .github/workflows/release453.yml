@@ -1,7 +1,7 @@
 name: Release Zako 4.53 Remote Polish
 on:
   push:
-    branches: [ "zako-v4.53-consolidated" ]
+    branches: [ "zako-v4.52-consolidated" ]
   workflow_dispatch:
 permissions:
   contents: write
