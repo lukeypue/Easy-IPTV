@@ -32,29 +32,29 @@
                 android:endX="122"
                 android:endY="130"
                 android:startColor="#195BFF"
-                android:centerColor="#159CFF"
-                android:endColor="#19E3D3"
+                android:centerColor="#8A5CFF"
+                android:endColor="#FF2FB9"
                 android:type="linear" />
         </aapt:attr>
     </path>
     <path
         android:fillColor="#00000000"
-        android:strokeColor="#7DEBFF"
+        android:strokeColor="#33E1FF"
         android:strokeWidth="1.2"
         android:strokeLineJoin="round"
         android:pathData="M39,43 L129,43 L117,61 L91,61 L57,111 L126,111 L114,132 L28,132 L39,111 L77,61 L27,61 Z" />
     <path
         android:fillColor="#07101C"
-        android:strokeColor="#75F0F0"
+        android:strokeColor="#FF58C8"
         android:strokeWidth="1"
         android:pathData="M91,115 L108,121.5 L91,128 Z" />
     <path android:fillColor="#30FFFFFF" android:pathData="M42,47 L123,47 L119,52 L38,52 Z" />
 
     <!-- ZAKO wordmark. -->
-    <path android:fillColor="#F4F8FF" android:pathData="M144,66 h34 v8 l-22,26 h22 v9 h-36 v-8 l22,-26 h-20 Z" />
-    <path android:fillType="evenOdd" android:fillColor="#F4F8FF" android:pathData="M187,109 L201,66 h12 l14,43 h-10 l-3,-10 h-15 l-3,10 Z M202,91 h10 l-5,-17 Z" />
-    <path android:fillColor="#F4F8FF" android:pathData="M235,66 h10 v17 l14,-17 h12 l-17,20 l18,23 h-12 l-15,-20 v20 h-10 Z" />
-    <path android:fillType="evenOdd" android:fillColor="#F4F8FF" android:pathData="M279,66 h18 c13,0 20,8 20,21 c0,14 -7,22 -20,22 h-18 Z M289,75 v25 h7 c7,0 11,-4 11,-13 c0,-8 -4,-12 -11,-12 Z" />
+    <path android:fillColor="#DDF8FF" android:pathData="M144,66 h34 v8 l-22,26 h22 v9 h-36 v-8 l22,-26 h-20 Z" />
+    <path android:fillType="evenOdd" android:fillColor="#DDF8FF" android:pathData="M187,109 L201,66 h12 l14,43 h-10 l-3,-10 h-15 l-3,10 Z M202,91 h10 l-5,-17 Z" />
+    <path android:fillColor="#DDF8FF" android:pathData="M235,66 h10 v17 l14,-17 h12 l-17,20 l18,23 h-12 l-15,-20 v20 h-10 Z" />
+    <path android:fillType="evenOdd" android:fillColor="#DDF8FF" android:pathData="M279,66 h18 c13,0 20,8 20,21 c0,14 -7,22 -20,22 h-18 Z M289,75 v25 h7 c7,0 11,-4 11,-13 c0,-8 -4,-12 -11,-12 Z" />
 
-    <path android:fillColor="#29D6E6" android:pathData="M144,120h167v3h-167z" />
+    <path android:fillColor="#FF2FB9" android:pathData="M144,120h167v3h-167z" />
 </vector>
