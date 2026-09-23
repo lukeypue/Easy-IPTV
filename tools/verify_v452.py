@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 from pathlib import Path
 m=Path("app/src/main/java/com/easyiptv/player/MainActivity.kt").read_text()
-r=Path("app/src/main/java/com/easyiptv/player/Recording.kt").read_text()\nui=Path("app/src/main/java/com/easyiptv/player/ManagedDvrUi.kt").read_text()\nrecovery=Path("app/src/main/java/com/easyiptv/player/ScheduleRecoveryReceiver.kt").read_text()\nstartup=Path("app/src/main/java/com/easyiptv/player/StartupPolicy.kt").read_text()
+r=Path("app/src/main/java/com/easyiptv/player/Recording.kt").read_text()
+ui=Path("app/src/main/java/com/easyiptv/player/ManagedDvrUi.kt").read_text()
+recovery=Path("app/src/main/java/com/easyiptv/player/ScheduleRecoveryReceiver.kt").read_text()
+startup=Path("app/src/main/java/com/easyiptv/player/StartupPolicy.kt").read_text()
 g=Path("app/build.gradle.kts").read_text()
 checks={
 "consolidated full chain":"ZAKO_V452_CONSOLIDATED" in m and "ZAKO_V445_RESTORED_FULL_CHAIN" in m,
