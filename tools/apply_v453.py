@@ -32,8 +32,7 @@ m=m.replace('toast(context,ScheduleStore.add(context,prefs,"Manual Recording",ch
             'pendingManual = Triple(ch, startMs, endMs)')
 
 # Add confirmation dialog once in LivePane before root Column.
-anchor='''    Column(Modifier.fillMaxSize()) {
-        if (guideLoading) {'''
+anchor='''    Column(Modifier.fillMaxSize()) {'''
 dialog='''    pendingManual?.let { pending ->
         val (pendingChannel, pendingStart, pendingEnd) = pending
         AlertDialog(
@@ -60,8 +59,10 @@ dialog='''    pendingManual?.let { pending ->
 
     Column(Modifier.fillMaxSize()) {
         if (guideLoading) {'''
-if anchor not in m: raise SystemExit("LivePane anchor missing")
-m=m.replace(anchor,dialog,1)
+live_start=m.index("fun LivePane(")
+live_column=m.index(anchor, live_start)
+if live_column<0: raise SystemExit("LivePane column missing")
+m=m[:live_column]+dialog+"\\n"+m[live_column:]
 
 # Expanded record/guide panel is a modal navigation island: edge-left must not escape to app rail.
 m=m.replace('''if (expandedId == ch.id && schedule.isNotEmpty()) {
