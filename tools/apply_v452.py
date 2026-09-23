@@ -6,7 +6,7 @@ REC=Path("app/src/main/java/com/easyiptv/player/Recording.kt")
 GRADLE=Path("app/build.gradle.kts")
 main=MAIN.read_text(); rec=REC.read_text(); gradle=GRADLE.read_text()
 if "ZAKO_V452_CONSOLIDATED" in main: raise SystemExit("4.52 already applied")
-main=re.sub(r'private val Muted = Color\\(0x[0-9A-Fa-f]+\\)','private val Muted = Color(0xFFBFEFFF)',main,count=1)
+main=re.sub(r'private val Muted = Color\(0x[0-9A-Fa-f]+\)','private val Muted = Color(0xFFBFEFFF)',main,count=1)
 if 'private val NeonGreen = Color(0xFF39FF88)' in main:
     main=main.replace('private val NeonGreen = Color(0xFF39FF88)','private val NeonGreen = Color(0xFF39FF88) // ZAKO_V452_CHANNEL_GREEN',1)
 a=main.index('@Composable\nprivate fun TvTextField('); b=main.index('@Composable\nprivate fun ChannelIcon(',a)
@@ -195,7 +195,7 @@ retry=r'''                        // ZAKO_V452_RECORD_RETRY
 '''
 rec=rec.replace(old,retry,1)
 main=main.replace('ZAKO_V447_FULL_REDESIGN','ZAKO_V452_CONSOLIDATED\n            // ZAKO_V447_FULL_REDESIGN',1)
-gradle=re.sub(r'versionCode\\s*=\\s*\\d+','versionCode = 76',gradle,count=1)
-gradle=re.sub(r'versionName\\s*=\\s*"[^"]+"','versionName = "4.52"',gradle,count=1)
+gradle=re.sub(r'versionCode\s*=\s*\d+','versionCode = 76',gradle,count=1)
+gradle=re.sub(r'versionName\s*=\s*"[^"]+"','versionName = "4.52"',gradle,count=1)
 MAIN.write_text(main);REC.write_text(rec);GRADLE.write_text(gradle)
 print("Applied Zako 4.52 consolidated regression repair")
