@@ -3,8 +3,9 @@ from pathlib import Path
 import re
 P=Path("app/src/main/java/com/easyiptv/player/MainActivity.kt")
 G=Path("app/build.gradle.kts")
-m=P.read_text(); g=G.read_text()\nif "import androidx.compose.foundation.layout.widthIn" not in m:\n    m=m.replace("import androidx.compose.foundation.layout.width", "import androidx.compose.foundation.layout.width\\nimport androidx.compose.foundation.layout.widthIn", 1)
-
+m=P.read_text(); g=G.read_text()
+if "import androidx.compose.foundation.layout.widthIn" not in m:
+    m=m.replace("import androidx.compose.foundation.layout.width\\n", "import androidx.compose.foundation.layout.width\\nimport androidx.compose.foundation.layout.widthIn\\n", 1)
 # RYZOD 4.56 visual/usability pass. Apply only after the verified 4.55 chain.
 # One branded identity everywhere instead of legacy text.
 m=m.replace('Text("RYZOD", fontWeight = FontWeight.ExtraBold, fontSize = 19.sp, color = Ink)', 'RyzodBrandMark(compact = false)')
