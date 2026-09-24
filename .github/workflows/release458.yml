@@ -61,7 +61,9 @@ jobs:
           python3 tools/apply_v453.py
           python3 tools/apply_v455.py
           python3 tools/apply_v456.py
-          echo '--- updater source before v458 ---'\n          grep -n -B 6 -A 10 'raw.githubusercontent.com/lukeypue/Easy-IPTV/main/latest.json' app/src/main/java/com/easyiptv/player/MainActivity.kt || true\n          python3 tools/apply_v458.py
+          echo '--- updater source before v458 ---'
+          grep -n -B 6 -A 10 'raw.githubusercontent.com/lukeypue/Easy-IPTV/main/latest.json' app/src/main/java/com/easyiptv/player/MainActivity.kt || true
+          python3 tools/apply_v458.py
       - name: Inspect generated MainActivity recovery area
         run: |
           nl -ba app/src/main/java/com/easyiptv/player/MainActivity.kt | sed -n '360,450p'
