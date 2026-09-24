@@ -1,6 +1,10 @@
 name: Release RYZOD 4.56 Verified Full App
 on:
   workflow_dispatch:
+  push:
+    branches: [ryzod-v4.55-verified]
+    paths:
+      - '.github/RYZOD_456_RELEASE_TRIGGER'
 permissions:
   contents: write
 jobs:
