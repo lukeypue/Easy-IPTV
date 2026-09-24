@@ -59,7 +59,10 @@ jobs:
           python3 tools/apply_v453.py
           python3 tools/apply_v455.py
           python3 tools/apply_v456.py
+          cp app/build.gradle.kts /tmp/ryzod456.gradle
+          sed -i 's/versionCode = 80/versionCode = 79/; s/versionName = "4.56"/versionName = "4.55"/' app/build.gradle.kts
           python3 tools/verify_v455.py
+          cp /tmp/ryzod456.gradle app/build.gradle.kts
           python3 tools/verify_v456.py
       - name: Compile generated 4.56 source
         uses: gradle/actions/setup-gradle@v4
