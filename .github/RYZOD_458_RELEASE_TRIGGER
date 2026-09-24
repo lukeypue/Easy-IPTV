@@ -7,3 +7,5 @@ Retry 2: robust updater matcher.
 Retry 3 deterministic updater anchors.
 
 Retry 4 branded URL anchor.
+
+Retry 5 indentation-independent updater anchors.
