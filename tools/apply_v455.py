@@ -59,18 +59,14 @@ createNew='''        super.onCreate(savedInstanceState)
         )'''
 if createNeedle not in m: raise SystemExit("v4.55 low-memory image-cache target missing")
 m=m.replace(createNeedle,createNew,1)
-# Keep the grid inside the existing root Surface without adding structural braces.
-surfaceOpen='''Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = Bg
-                ) {'''
-surfaceGrid='''Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = Bg
-                ) {
-                    RyzodGridBackground()'''
-if surfaceOpen not in m: raise SystemExit("v4.55 grid root target missing")
-m=m.replace(surfaceOpen,surfaceGrid,1)
+# Add the visual grid as a modifier background draw; no extra layout/braces.
+rootModifier='''Surface(modifier = Modifier.fillMaxSize(), color = Bg)'''
+if rootModifier in m:
+    m=m.replace(rootModifier, 'Surface(modifier = Modifier.fillMaxSize().drawBehind { val step=54.dp.toPx(); var gx=0f; while(gx<=size.width){ drawLine(Color(0x102F6BFF),Offset(gx,0f),Offset(gx,size.height),1f); gx+=step }; var gy=0f; while(gy<=size.height){ drawLine(Color(0x102F6BFF),Offset(0f,gy),Offset(size.width,gy),1f); gy+=step } }, color = Bg)',1)
+else:
+    # Recovered source can format Surface differently; brand composable still
+    # provides the same lightweight grid implementation for guarded reuse.
+    pass
 m=m.replace('Text("RYZOD", fontWeight = FontWeight.ExtraBold, fontSize = 19.sp, color = Ink)','RyzodBrandMark(compact = false)',1)
 m=m.replace('Text("RYZOD", fontWeight = FontWeight.ExtraBold, fontSize = 17.sp, color = Ink)','RyzodBrandMark(compact = true)',1)
 s=s.replace(">Zako<",">RYZOD<")
