@@ -2,6 +2,9 @@
 from pathlib import Path
 m=Path("app/src/main/java/com/easyiptv/player/MainActivity.kt").read_text()
 g=Path("app/build.gradle.kts").read_text()
+ui=Path("app/src/main/java/com/easyiptv/player/DvrUi.kt").read_text()
+r=Path("app/src/main/java/com/easyiptv/player/Recording.kt").read_text()
+recovery=Path("app/src/main/java/com/easyiptv/player/ScheduleRecoveryReceiver.kt").read_text()
 checks={
 "4.56 marker":"RYZOD_V456_VISUAL_UNIFICATION" in m,
 "4.55 recovered chain":"ZAKO_V452_CONSOLIDATED" in m and "ZAKO_V445_RESTORED_FULL_CHAIN" in m,
@@ -10,9 +13,11 @@ checks={
 "bubble UI":"ZAKO_V432_LIME_BUBBLES" in m and "LimeBubble" in m,
 "pink focus":"FocusPink" in m,
 "green channel palette":"ZAKO_V452_CHANNEL_GREEN" in m,
-"manual DVR":"ZAKO_V448_MANUAL" in m or "Manual" in m and "ScheduleStore" in m,
-"upcoming recordings":"Upcoming" in m and "ScheduleStore" in m,
-"background recording":"Recorder" in m and "ScheduleStore" in m,
+"manual DVR":"ManagedDvrUi.manualLabel" in m,
+"upcoming recordings":"ScheduleStore.upcoming" in ui and "Upcoming" in ui,
+"schedule recovery":"ScheduleStore.rearmAll" in recovery and "fun rearmAll" in r,
+"background recording":"class RecordingService : Service()" in r and "startForeground" in r,
+"record retries":"ZAKO_V452_RECORD_RETRY" in r and "0 until 5" in r,
 "resumable downloads":"Range" in Path("app/src/main/java/com/easyiptv/player/Downloads.kt").read_text(),
 "startup gate":"ZAKO_V449_STARTUP_REARM" in m,
 "timeshift async cleanup":"timeshift-cleanup" in m and "oldRing.close()" in m,
