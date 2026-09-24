@@ -29,3 +29,5 @@ Retry 13 with generated updater diagnostic snapshot.
 Retry 14 corrected diagnostic workflow formatting.
 
 Retry 15 after historical duplicate-anchor tolerance fix.
+
+Retry 16 patch actual v4.31 fresh updater block.
