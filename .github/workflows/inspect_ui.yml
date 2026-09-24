@@ -1,0 +1,64 @@
+name: Inspect generated RYZOD UI
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Regenerate
+        run: |
+          python3 tools/fix_v424_patcher_source.py
+          python3 tools/apply_v424.py
+          python3 tools/apply_v424_post.py
+          python3 tools/apply_v425.py
+          python3 tools/apply_v425_remote_info.py
+          python3 tools/apply_v426_updater.py
+          python3 tools/apply_v428.py
+          python3 tools/apply_v429.py
+          python3 tools/apply_v430.py
+          python3 tools/apply_v431.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('tools/apply_v432.py'); t=p.read_text(); t=t.replace("search_key_marker = '@Composable\\nprivate fun SearchKey('", "search_key_marker = '@Composable\\nprivate fun androidx.compose.foundation.layout.RowScope.SearchKey('"); p.write_text(t)
+          PY
+          python3 tools/apply_v432.py
+          python3 tools/apply_v433.py
+          python3 tools/apply_v434.py
+          python3 tools/apply_v435.py
+          python3 tools/fix_v436_patcher.py
+          python3 tools/apply_v436.py
+          python3 tools/apply_v437.py
+          python3 tools/apply_v438.py
+          python3 tools/apply_v439.py
+          python3 tools/fix_v440_patcher.py
+          python3 tools/apply_v440.py
+          python3 tools/apply_v441.py
+          python3 scripts/prepare_v442_generated.py
+          python3 tools/apply_v443.py
+          python3 tools/apply_v444.py
+          python3 tools/apply_v445.py
+          python3 tools/apply_v446.py
+          python3 tools/apply_v447.py
+          python3 tools/apply_v448.py
+          python3 tools/apply_v448_dvr.py
+          python3 tools/apply_v448_release.py
+          python3 tools/apply_v449_core.py
+          python3 tools/apply_v449_recovery.py
+          python3 tools/apply_v449_ui.py
+          python3 tools/apply_v449_screen.py
+          python3 tools/apply_v449_release.py
+          python3 tools/apply_v450_universal_guide.py
+          python3 tools/apply_v450_headroom.py
+          python3 tools/apply_v450_release.py
+          python3 tools/apply_v452.py
+          python3 tools/apply_v453.py
+          python3 tools/apply_v455.py
+      - name: Inspect UI anchors
+        run: |
+          grep -n -B 45 -A 90 'RECORD NOW' app/src/main/java/com/easyiptv/player/MainActivity.kt || true
+          grep -n -B 35 -A 100 'GRID GUIDE' app/src/main/java/com/easyiptv/player/MainActivity.kt || true
+          grep -n -B 30 -A 100 'Hold OK for info' app/src/main/java/com/easyiptv/player/MainActivity.kt || true
+          grep -n -B 20 -A 80 'ZAKO' app/src/main/java/com/easyiptv/player/MainActivity.kt | head -n 250 || true
