@@ -13,3 +13,5 @@ Retry 5 indentation-independent updater anchors.
 Retry 6 after Python syntax repair.
 
 Retry 7 multiline URL anchor.
+
+Retry 8 after java.net.URL branding side-effect fix.
