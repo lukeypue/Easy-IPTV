@@ -2,7 +2,7 @@
 from pathlib import Path
 m=Path("app/src/main/java/com/easyiptv/player/MainActivity.kt").read_text()
 g=Path("app/build.gradle.kts").read_text()
-ui=Path("app/src/main/java/com/easyiptv/player/DvrUi.kt").read_text()
+ui=Path("app/src/main/java/com/easyiptv/player/ManagedDvrUi.kt").read_text()
 r=Path("app/src/main/java/com/easyiptv/player/Recording.kt").read_text()
 recovery=Path("app/src/main/java/com/easyiptv/player/ScheduleRecoveryReceiver.kt").read_text()
 checks={
