@@ -84,4 +84,4 @@ m="// RYZOD_V455_VERIFIED_FULL\n"+m
 g=re.sub(r'versionCode\s*=\s*\d+','versionCode = 79',g,count=1)
 g=re.sub(r'versionName\s*=\s*"[^"]+"','versionName = "4.55"',g,count=1)
 P.write_text(m); G.write_text(g); S.write_text(s)
-print("Applied RYZOD 4.55 branding and non-blocking timeshift cleanup")
+print("Applied RYZOD 4.55 launch-candidate branding, memory profile, and non-blocking timeshift cleanup")
