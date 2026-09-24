@@ -4,13 +4,13 @@ import re
 P=Path("app/src/main/java/com/easyiptv/player/MainActivity.kt")
 G=Path("app/build.gradle.kts")
 m=P.read_text(); g=G.read_text()
-needle='''val raw = java.net.URL(
-                                "https://raw.githubusercontent.com/lukeypue/Easy-IPTV/main/latest.json"
-                            ).readText()
-                            val obj = org.json.JSONObject(raw)'''
-start=m.find(needle)
-if start < 0: raise SystemExit("updater fetch exact block missing")
-end=start+len(needle)
+url='https://raw.githubusercontent.com/lukeypue/Easy-IPTV/main/latest.json'
+u=m.find(url)
+if u < 0: raise SystemExit("updater manifest URL missing")
+start=m.rfind("val raw =",0,u)
+end=m.find("val obj = org.json.JSONObject(raw)",u)
+if start < 0 or end < 0: raise SystemExit("updater fetch block bounds missing")
+end += len("val obj = org.json.JSONObject(raw)")
 new='''// RYZOD_V458_UPDATER_RELIABILITY
 val manifestUrl = "https://raw.githubusercontent.com/lukeypue/Easy-IPTV/main/latest.json?ts=" + System.currentTimeMillis()
 val conn = (java.net.URL(manifestUrl).openConnection() as java.net.HttpURLConnection).apply {
