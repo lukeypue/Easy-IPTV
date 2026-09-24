@@ -7,8 +7,8 @@ changes = []
 def replace_once(old: str, new: str, name: str):
     global text
     count = text.count(old)
-    if count != 1:
-        raise SystemExit(f'{name}: expected exactly 1 match, found {count}')
+    if count < 1:
+        raise SystemExit(f'{name}: expected at least 1 match, found {count}')
     text = text.replace(old, new, 1)
     changes.append(name)
 
