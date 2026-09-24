@@ -1,60 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
-<vector xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:aapt="http://schemas.android.com/aapt"
-    android:width="320dp"
-    android:height="180dp"
-    android:viewportWidth="320"
-    android:viewportHeight="180">
-
-    <path android:pathData="M0,0h320v180h-320z">
-        <aapt:attr name="android:fillColor">
-            <gradient
-                android:startColor="#050A13"
-                android:centerColor="#0A1830"
-                android:endColor="#0B2035"
-                android:startX="0"
-                android:startY="180"
-                android:endX="320"
-                android:endY="0"
-                android:type="linear" />
-        </aapt:attr>
-    </path>
-
-    <!-- Low-cost blue glow behind the mark. -->
-    <path android:fillColor="#17376E9E" android:pathData="M20,34h116v112h-116z" />
-
-    <!-- Same unmistakable geometric Z used by the launcher icon. -->
-    <path android:pathData="M39,43 L129,43 L117,61 L91,61 L57,111 L126,111 L114,132 L28,132 L39,111 L77,61 L27,61 Z">
-        <aapt:attr name="android:fillColor">
-            <gradient
-                android:startX="31"
-                android:startY="45"
-                android:endX="122"
-                android:endY="130"
-                android:startColor="#195BFF"
-                android:centerColor="#8A5CFF"
-                android:endColor="#FF2FB9"
-                android:type="linear" />
-        </aapt:attr>
-    </path>
-    <path
-        android:fillColor="#00000000"
-        android:strokeColor="#33E1FF"
-        android:strokeWidth="1.2"
-        android:strokeLineJoin="round"
-        android:pathData="M39,43 L129,43 L117,61 L91,61 L57,111 L126,111 L114,132 L28,132 L39,111 L77,61 L27,61 Z" />
-    <path
-        android:fillColor="#07101C"
-        android:strokeColor="#FF58C8"
-        android:strokeWidth="1"
-        android:pathData="M91,115 L108,121.5 L91,128 Z" />
-    <path android:fillColor="#30FFFFFF" android:pathData="M42,47 L123,47 L119,52 L38,52 Z" />
-
-    <!-- ZAKO wordmark. -->
-    <path android:fillColor="#DDF8FF" android:pathData="M144,66 h34 v8 l-22,26 h22 v9 h-36 v-8 l22,-26 h-20 Z" />
-    <path android:fillType="evenOdd" android:fillColor="#DDF8FF" android:pathData="M187,109 L201,66 h12 l14,43 h-10 l-3,-10 h-15 l-3,10 Z M202,91 h10 l-5,-17 Z" />
-    <path android:fillColor="#DDF8FF" android:pathData="M235,66 h10 v17 l14,-17 h12 l-17,20 l18,23 h-12 l-15,-20 v20 h-10 Z" />
-    <path android:fillType="evenOdd" android:fillColor="#DDF8FF" android:pathData="M279,66 h18 c13,0 20,8 20,21 c0,14 -7,22 -20,22 h-18 Z M289,75 v25 h7 c7,0 11,-4 11,-13 c0,-8 -4,-12 -11,-12 Z" />
-
-    <path android:fillColor="#FF2FB9" android:pathData="M144,120h167v3h-167z" />
+<vector xmlns:android="http://schemas.android.com/apk/res/android" xmlns:aapt="http://schemas.android.com/aapt"
+ android:width="320dp" android:height="180dp" android:viewportWidth="320" android:viewportHeight="180">
+ <path android:fillColor="#050810" android:pathData="M0,0h320v180h-320z"/>
+ <path android:fillColor="#0C1630" android:pathData="M0,0 L320,0 L320,180 L0,180 Z"/>
+ <path android:fillColor="#00000000" android:strokeColor="#1733E1FF" android:strokeWidth="1" android:pathData="M0,35h320 M0,70h320 M0,105h320 M0,140h320 M40,0v180 M80,0v180 M120,0v180 M160,0v180 M200,0v180 M240,0v180 M280,0v180"/>
+ <path android:fillColor="#00000000" android:strokeColor="#33E1FF" android:strokeWidth="2" android:pathData="M72,38 A48,48 0,1 1,71.9,38"/>
+ <path android:pathData="M49,52 L49,123 L61,123 L61,96 L77,96 L96,123 L111,123 L89,91 C99,87 105,80 105,70 C105,58 96,52 82,52 Z M61,63 L81,63 C89,63 93,67 93,73 C93,80 88,84 81,84 L61,84 Z">
+  <aapt:attr name="android:fillColor"><gradient android:startX="49" android:startY="52" android:endX="111" android:endY="123" android:startColor="#FFFFFF" android:centerColor="#B8D0EA" android:endColor="#66778C" android:type="linear"/></aapt:attr>
+ </path>
+ <path android:fillColor="#33E1FF" android:strokeColor="#DDF8FF" android:strokeWidth="0.7" android:pathData="M82,67 L82,85 L98,76 Z"/>
+ <!-- compact geometric RYZOD wordmark -->
+ <path android:fillColor="#DDF8FF" android:pathData="M135,70h9v42h-9z M144,70h18c10,0 15,5 15,13c0,6 -3,10 -9,12l11,17h-11l-10,-15h-14v-9h17c5,0 7,-2 7,-5c0,-3 -2,-5 -7,-5h-17v-8z"/>
+ <path android:fillColor="#DDF8FF" android:pathData="M180,70h11l9,15l9,-15h11l-15,24v18h-10v-18z"/>
+ <path android:fillColor="#DDF8FF" android:pathData="M220,70h35v8l-23,25h23v9h-36v-8l23,-25h-22z"/>
+ <path android:fillType="evenOdd" android:fillColor="#DDF8FF" android:pathData="M260,70h18c12,0 20,8 20,21s-8,21 -20,21h-18z M270,79v24h7c7,0 11,-4 11,-12s-4,-12 -11,-12z"/>
+ <path android:fillColor="#33E1FF" android:pathData="M135,123h163v2h-163z"/>
+ <path android:fillColor="#A9C7E8" android:pathData="M174,132h89v2h-89z"/>
 </vector>
