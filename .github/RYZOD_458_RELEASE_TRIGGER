@@ -23,3 +23,5 @@ Retry 10 after correcting safe branding generator formatting.
 Retry 11 exact verified updater block replacement.
 
 Retry 12 semantic updater bounds.
+
+Retry 13 with generated updater diagnostic snapshot.
