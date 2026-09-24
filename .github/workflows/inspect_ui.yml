@@ -59,6 +59,14 @@ jobs:
           python3 tools/apply_v453.py
           python3 tools/apply_v455.py
           python3 tools/apply_v456.py
+          python3 tools/verify_v455.py
+          python3 tools/verify_v456.py
+      - name: Compile generated 4.56 source
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Compile debug APK
+        run: gradle :app:assembleDebug --stacktrace
       - name: Inspect UI anchors
         run: |
           grep -n -B 45 -A 90 'RECORD NOW' app/src/main/java/com/easyiptv/player/MainActivity.kt || true
