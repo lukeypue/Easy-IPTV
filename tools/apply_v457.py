@@ -14,25 +14,8 @@ m=m.replace('''            Text(
             )
 ''','',1)
 
-# Setup keyboard must overlay rather than extend the setup Column below the password field.
-m=m.replace('''        if (editing) {
-            Spacer(Modifier.height(6.dp))
-            Box(Modifier.fillMaxWidth(), contentAlignment=Alignment.Center) {''','''        if (editing) {
-            androidx.compose.ui.window.Dialog(onDismissRequest={ editing=false }) {
-            Box(Modifier.fillMaxWidth(), contentAlignment=Alignment.Center) {''',1)
-# Close the Dialog in addition to the keyboard Box.
-needle='''            }
-            }
-        }
-    }
-}'''
-repl='''            }
-            }
-            }
-        }
-    }
-}'''
-if needle in m: m=m.replace(needle,repl,1)
+# Keep setup keyboard compact for 720p; avoid structural brace rewriting here.
+m=m.replace('Modifier.widthIn(max=720.dp).fillMaxWidth(0.78f)', 'Modifier.widthIn(max=640.dp).fillMaxWidth(0.72f)', 1)
 
 # Remaining visible legacy brand text in generated UI only.
 m=m.replace('Text("ZAKO",','Text("RYZOD",')
