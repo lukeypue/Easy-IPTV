@@ -5,7 +5,7 @@ P=Path("app/src/main/java/com/easyiptv/player/MainActivity.kt")
 G=Path("app/build.gradle.kts")
 S=Path("app/src/main/res/values/strings.xml")
 m=P.read_text(); g=G.read_text(); s=S.read_text()
-m=m.replace("Zako","RYZOD")
+# Brand only user-visible text; never globally replace identifiers such as java.net.URL.\nm=m.replace('"Zako', '"RYZOD')\nm=m.replace(' Zako', ' RYZOD')
 # Lightweight presentation polish: vector-drawn brand mark + subtle grid. No bitmap allocation.
 brand = r'''
 @Composable
