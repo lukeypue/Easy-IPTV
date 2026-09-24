@@ -105,7 +105,7 @@ jobs:
           ACTUAL="$("$APKSIGNER" verify --print-certs "$APK" | sed -nE 's/^(V[0-9.]+ Signer: |Signer #1 )certificate SHA-256 digest: //p' | head -n 1 | tr '[:lower:]' '[:upper:]')"
           test "$ACTUAL" = "8EF5FE2873F7A9D40302E722822C05B37B471AB08DF23785FA0A1AEB19A2C165"
           cp "$APK" app/build/outputs/apk/release/RYZOD-v4.55.apk
-      - name: Publish 4.53
+      - name: Publish RYZOD 4.55
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -134,8 +134,8 @@ jobs:
         run: |
           gh release view v4.55 --json assets --jq '.assets[].name' | grep '^RYZOD-v4.55.apk$'
           RAW="$(gh api repos/lukeypue/Easy-IPTV/contents/latest.json?ref=main --jq .content | tr -d '\n' | base64 -d)"
-          printf '%s' "$RAW" | grep '"versionCode": 77'
-          printf '%s' "$RAW" | grep '"versionName": "4.53"'
+          printf '%s' "$RAW" | grep '"versionCode": 79'
+          printf '%s' "$RAW" | grep '"versionName": "4.55"'
       - uses: actions/upload-artifact@v4
         with:
           name: Zako-v4.55-release
