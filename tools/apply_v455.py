@@ -6,7 +6,7 @@ G=Path("app/build.gradle.kts")
 S=Path("app/src/main/res/values/strings.xml")
 m=P.read_text(); g=G.read_text(); s=S.read_text()
 # RYZOD visible rebrand, preserving package/signing/data identity.
-m=m.replace("Zako","RYZOD").replace("ZAKO","RYZOD")
+m=m.replace("Zako","RYZOD")
 s=s.replace(">Zako<",">RYZOD<")
 # Never block channel changes deleting a large rolling-DVR file.
 old='''        stopInternal()
