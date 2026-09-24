@@ -14,7 +14,7 @@ jobs:
       - uses: actions/checkout@v5
       - name: Regenerate verified source
         run: |
-          python3 tools/fix_v424_patcher_source.py
+          # Diagnostic snapshot before 4.58 patch; harmless and makes generator drift visible.\n          # Historical regeneration commands follow below.\n          python3 tools/fix_v424_patcher_source.py
           python3 tools/apply_v424.py
           python3 tools/apply_v424_post.py
           python3 tools/apply_v425.py
@@ -61,7 +61,7 @@ jobs:
           python3 tools/apply_v453.py
           python3 tools/apply_v455.py
           python3 tools/apply_v456.py
-          python3 tools/apply_v458.py
+          echo '--- updater source before v458 ---'\n          grep -n -B 6 -A 10 'raw.githubusercontent.com/lukeypue/Easy-IPTV/main/latest.json' app/src/main/java/com/easyiptv/player/MainActivity.kt || true\n          python3 tools/apply_v458.py
       - name: Inspect generated MainActivity recovery area
         run: |
           nl -ba app/src/main/java/com/easyiptv/player/MainActivity.kt | sed -n '360,450p'
