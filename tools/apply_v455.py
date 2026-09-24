@@ -41,8 +41,8 @@ private fun RyzodGridBackground() {
     }
 }
 '''
-val classNeedle = "class MainActivity : ComponentActivity() {"
-if (classNeedle !in m): raise SystemExit("v4.55 brand insertion target missing")
+classNeedle = "class MainActivity : ComponentActivity() {"
+if classNeedle not in m: raise SystemExit("v4.55 brand insertion target missing")
 m=m.replace(classNeedle, brand+"\\n"+classNeedle,1)
 createNeedle='''        super.onCreate(savedInstanceState)
         setContent {'''
