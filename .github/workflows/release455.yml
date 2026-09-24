@@ -1,7 +1,5 @@
 name: Release RYZOD 4.55 Verified Full App
 on:
-  push:
-    branches: [ "ryzod-v4.55-verified" ]
   workflow_dispatch:
 permissions:
   contents: write
