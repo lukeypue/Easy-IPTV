@@ -59,9 +59,30 @@ createNew='''        super.onCreate(savedInstanceState)
         )'''
 if createNeedle not in m: raise SystemExit("v4.55 low-memory image-cache target missing")
 m=m.replace(createNeedle,createNew,1)
-surfacePattern=r'(Surface\\(\\s*modifier\\s*=\\s*Modifier\\.fillMaxSize\\(\\)\\s*,\\s*color\\s*=\\s*Bg\\s*\\)\\s*\\{)'
-m, gridCount = re.subn(surfacePattern, r'\\1\\n                    RyzodGridBackground()', m, count=1)
-if gridCount != 1: raise SystemExit("v4.55 grid target missing")
+# Put the grid behind the app at the root setContent block without depending on
+# historical Surface formatting.
+rootNeedle='''            MaterialTheme(colorScheme = AppColors) {'''
+rootNew='''            MaterialTheme(colorScheme = AppColors) {
+                Box(Modifier.fillMaxSize()) {
+                    RyzodGridBackground()'''
+if rootNeedle not in m: raise SystemExit("v4.55 grid root target missing")
+m=m.replace(rootNeedle,rootNew,1)
+# Close the added root Box immediately before MaterialTheme's closing brace.
+appClose='''                }
+            }
+        }
+    }
+
+    override fun dispatchKeyEvent'''
+appCloseNew='''                }
+                }
+            }
+        }
+    }
+
+    override fun dispatchKeyEvent'''
+if appClose not in m: raise SystemExit("v4.55 grid root close target missing")
+m=m.replace(appClose,appCloseNew,1)
 m=m.replace('Text("RYZOD", fontWeight = FontWeight.ExtraBold, fontSize = 19.sp, color = Ink)','RyzodBrandMark(compact = false)',1)
 m=m.replace('Text("RYZOD", fontWeight = FontWeight.ExtraBold, fontSize = 17.sp, color = Ink)','RyzodBrandMark(compact = true)',1)
 s=s.replace(">Zako<",">RYZOD<")
