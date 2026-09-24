@@ -9,3 +9,5 @@ Retry 3 deterministic updater anchors.
 Retry 4 branded URL anchor.
 
 Retry 5 indentation-independent updater anchors.
+
+Retry 6 after Python syntax repair.
