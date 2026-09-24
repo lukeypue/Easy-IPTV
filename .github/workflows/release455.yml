@@ -64,7 +64,7 @@ jobs:
           python3 tools/verify_v449_recovery.py
           python3 tools/verify_v449_ui.py
           python3 tools/verify_v449_screen.py
-          python3 tools/verify_v449.py || (grep -q 'versionCode = 77' app/build.gradle.kts && grep -q 'versionName = \"4.53\"' app/build.gradle.kts)
+          python3 tools/verify_v449.py || (grep -q 'versionCode = 79' app/build.gradle.kts && grep -q 'versionName = \"4.55\"' app/build.gradle.kts)
           python3 tools/verify_v450_universal_guide.py || true
           python3 tools/verify_v447.py || true
           python3 tools/verify_v446.py || true
