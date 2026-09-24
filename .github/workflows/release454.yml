@@ -15,7 +15,7 @@ jobs:
       - name: Get the code
         uses: actions/checkout@v5
 
-            - name: Set up Java 17
+      - name: Set up Java 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -75,12 +75,12 @@ jobs:
           NOTES="RYZOD rebrand and live-TV stability update. Rebrands the app to RYZOD and prevents long-running timeshift DVR files from blocking channel changes by retiring large temporary files off the UI thread."
           if gh release view v4.54 >/dev/null 2>&1; then
             gh release upload v4.54 app/build/outputs/apk/release/RYZOD-v4.54.apk RYZOD-v4.54-source.zip --clobber
-            gh release edit v4.54 --title "RYZOD 4.54 Download Stability" --notes "$NOTES" --prerelease=false --latest
+            gh release edit v4.54 --title "RYZOD 4.54 Rebrand and Live Stability" --notes "$NOTES" --prerelease=false --latest
           else
-            gh release create v4.54 app/build/outputs/apk/release/RYZOD-v4.54.apk RYZOD-v4.54-source.zip --target "$GITHUB_SHA" --title "RYZOD 4.54 Download Stability" --notes "$NOTES" --latest
+            gh release create v4.54 app/build/outputs/apk/release/RYZOD-v4.54.apk RYZOD-v4.54-source.zip --target "$GITHUB_SHA" --title "RYZOD 4.54 Rebrand and Live Stability" --notes "$NOTES" --latest
           fi
 
-      - name: Point in-app updater to 4.44
+      - name: Point in-app updater to 4.54
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
