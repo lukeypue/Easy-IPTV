@@ -8,13 +8,11 @@ m=P.read_text(); g=G.read_text(); s=S.read_text()
 m=m.replace("Zako","RYZOD")
 s=s.replace(">Zako<",">RYZOD<")
 old='''        stopInternal()
-        val dir = if (prefs != null) Storage.timeshiftDir(context, prefs) else context.cacheDir
         val f = File(dir, "timeshift.ts")
         runCatching { f.delete() }
         file = f'''
 new='''        val stale = file
         stopInternal()
-        val dir = if (prefs != null) Storage.timeshiftDir(context, prefs) else context.cacheDir
         val f = File(dir, "timeshift_${System.nanoTime()}.ts")
         file = f
         if (stale != null) Thread({ runCatching { stale.delete() } }, "timeshift-cleanup").apply { isDaemon = true }.start()'''
