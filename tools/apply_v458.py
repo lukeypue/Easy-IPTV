@@ -4,8 +4,7 @@ import re
 P=Path("app/src/main/java/com/easyiptv/player/MainActivity.kt")
 G=Path("app/build.gradle.kts")
 m=P.read_text(); g=G.read_text()
-url='"https://raw.githubusercontent.com/lukeypue/Easy-IPTV/main/latest.json"'
-u=m.find(url)
+u=m.find("raw.githubusercontent.com/lukeypue/Easy-IPTV/main/latest.json")
 if u < 0: raise SystemExit("updater manifest URL missing")
 start=m.rfind("                            val raw = java.net.URL(",0,u)
 end=m.find("                            val obj = org.json.JSONObject(raw)",u)
