@@ -122,7 +122,7 @@ jobs:
           "$AAPT" dump badging "$APK" | grep "package: name='com.easyiptv.player'" | grep "versionCode='83'" | grep "versionName='4.59'"
           ACTUAL="$("$APKSIGNER" verify --print-certs "$APK" | sed -nE 's/^.*certificate SHA-256 digest: //p' | head -n 1 | tr '[:lower:]' '[:upper:]')"
           echo "APK signer SHA-256: $ACTUAL"
-          test "$ACTUAL" = "8EF5FE2873F7A9D40302E722832C05B37B471AB08DF23785FA0A1AEB19A2C165"
+          test "$ACTUAL" = "8EF5FE2873F7A9D40302E722822C05B37B471AB08DF23785FA0A1AEB19A2C165"
           cp "$APK" app/build/outputs/apk/release/RYZOD-v4.59.apk
       - name: Publish RYZOD 4.59
         env:
