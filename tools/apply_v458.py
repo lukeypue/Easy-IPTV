@@ -4,10 +4,7 @@ import re
 P=Path("app/src/main/java/com/easyiptv/player/MainActivity.kt")
 G=Path("app/build.gradle.kts")
 m=P.read_text(); g=G.read_text()
-old='''                            val raw = java.net.URL(
-                                "https://raw.githubusercontent.com/lukeypue/Easy-IPTV/main/latest.json"
-                            ).readText()
-                            val obj = org.json.JSONObject(raw)'''
+pattern=r'''val raw = java\.net\.URL\(\s*"https://raw\.githubusercontent\.com/lukeypue/Easy-IPTV/main/latest\.json"\s*\)\.readText\(\)\s*val obj = org\.json\.JSONObject\(raw\)'''
 new='''                            // RYZOD_V458_UPDATER_RELIABILITY
                             val manifestUrl = "https://raw.githubusercontent.com/lukeypue/Easy-IPTV/main/latest.json?ts=" + System.currentTimeMillis()
                             val conn = (java.net.URL(manifestUrl).openConnection() as java.net.HttpURLConnection).apply {
@@ -26,8 +23,8 @@ new='''                            // RYZOD_V458_UPDATER_RELIABILITY
                                 conn.disconnect()
                             }
                             val obj = org.json.JSONObject(raw)'''
-if old not in m: raise SystemExit("updater fetch block missing")
-m=m.replace(old,new,1)
+m,n=re.subn(pattern,new,m,count=1)
+if n != 1: raise SystemExit("updater fetch block missing")
 m=m.replace('updateStatus = "Checking…"','updateStatus = "Checking RYZOD update server…" ',1)
 m=m.replace('updateStatus = "Zako $name is available."','updateStatus = "RYZOD $name is available (build $code)."',1)
 m=m.replace('updateStatus = "You\'re up to date — Zako ${BuildConfig.VERSION_NAME}."','updateStatus = "You\'re up to date — RYZOD ${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE})."',1)
