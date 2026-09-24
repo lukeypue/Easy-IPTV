@@ -82,3 +82,7 @@ jobs:
           # RYZOD 4.57 inspection anchors
           nl -ba app/src/main/java/com/easyiptv/player/MainActivity.kt | sed -n '1800,2120p'
           grep -n -B 30 -A 90 'manualLabel' app/src/main/java/com/easyiptv/player/ManagedDvrUi.kt || true
+
+          # setup keyboard clipping anchors
+          nl -ba app/src/main/java/com/easyiptv/player/MainActivity.kt | sed -n "5300,5525p"
+          grep -n -B 80 -A 180 "Sign in to your service" app/src/main/java/com/easyiptv/player/MainActivity.kt || true
