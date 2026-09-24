@@ -78,3 +78,7 @@ jobs:
           grep -n -B 20 -A 80 'ZAKO' app/src/main/java/com/easyiptv/player/MainActivity.kt | head -n 250 || true
           grep -n -B 25 -A 120 'RYZOD GUIDE' app/src/main/java/com/easyiptv/player/MainActivity.kt || true
           grep -n -B 25 -A 130 'widthIn(max=720.dp)' app/src/main/java/com/easyiptv/player/MainActivity.kt || true
+
+          # RYZOD 4.57 inspection anchors
+          nl -ba app/src/main/java/com/easyiptv/player/MainActivity.kt | sed -n '1800,2120p'
+          grep -n -B 30 -A 90 'manualLabel' app/src/main/java/com/easyiptv/player/ManagedDvrUi.kt || true
