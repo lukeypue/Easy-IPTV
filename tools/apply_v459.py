@@ -190,7 +190,7 @@ m=m[:insert]+manual+m[insert:]
 # Visible branding only; keep historical internal markers intact.
 m=m.replace('Text("ZAKO"', 'Text("RYZOD"').replace('"ZAKO GUIDE"','"RYZOD GUIDE"')
 m="// RYZOD_V459_USER_REQUESTED_UI_FIXES\\n"+m
-g=re.sub(r'versionCode\\s*=\\s*\\d+','versionCode = 83',g,count=1)
-g=re.sub(r'versionName\\s*=\\s*"[^"]+"','versionName = "4.59"',g,count=1)
+g=re.sub(r'versionCode\s*=\s*\d+','versionCode = 83',g,count=1)
+g=re.sub(r'versionName\s*=\s*"[^"]+"','versionName = "4.59"',g,count=1)
 P.write_text(m);G.write_text(g)
 print("Applied RYZOD 4.59 requested UI corrections")
