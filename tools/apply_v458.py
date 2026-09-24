@@ -7,6 +7,7 @@ m=P.read_text(); g=G.read_text()
 u=m.find("raw.githubusercontent.com/lukeypue/Easy-IPTV/main/latest.json")
 if u < 0: raise SystemExit("updater manifest URL missing")
 start=m.rfind("val raw = java.net.URL(",0,u)
+if start < 0: start=m.rfind("val raw = java.net.URL(",u,u+400)
 end=m.find("val obj = org.json.JSONObject(raw)",u)
 if start < 0 or end < 0: raise SystemExit("updater fetch anchors missing")
 line_start=m.rfind("\n",0,start)+1
