@@ -9,13 +9,13 @@
                 android:startX="0" android:startY="180" android:endX="320" android:endY="0" android:type="linear" />
         </aapt:attr>
     </path>
-    <!-- Zako mark -->
+    <!-- RYZOD mark -->
     <path android:fillType="evenOdd" android:fillColor="#5C78D8FF"
         android:pathData="M72,40 A50,50 0,1 1 71.99,40 Z M72,47 A43,43 0,1 0 72.01,47 Z" />
     <path android:pathData="M42,66 C51,56 66,54 88,56 L96,66 C84,66 71,67 58,70 L91,71 C99,71 104,75 105,81 C94,88 84,95 73,102 C64,108 57,114 52,120 C64,115 81,116 95,124 L86,137 C74,131 57,131 44,139 L36,126 C43,115 57,104 75,93 L96,80 L51,79 C43,79 39,75 39,70 Z">
         <aapt:attr name="android:fillColor"><gradient android:startX="38" android:startY="132" android:endX="104" android:endY="55" android:startColor="#70DFFF" android:centerColor="#FFFFFF" android:endColor="#496EFF" android:type="linear" /></aapt:attr>
     </path>
-    <!-- ZAKO wordmark, block geometry -->
+    <!-- RYZOD launcher banner geometry -->
     <path android:fillColor="#F4F7FF" android:pathData="M137,70 h34 v8 l-22,26 h22 v9 h-36 v-8 l22,-26 h-20 Z" />
     <path android:fillType="evenOdd" android:fillColor="#F4F7FF" android:pathData="M180,113 L194,70 h12 l14,43 h-10 l-3,-10 h-15 l-3,10 Z M195,95 h10 l-5,-17 Z" />
     <path android:fillColor="#F4F7FF" android:pathData="M228,70 h10 v17 l14,-17 h12 l-17,20 l18,23 h-12 l-15,-20 v20 h-10 Z" />
