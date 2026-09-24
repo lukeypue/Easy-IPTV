@@ -6,28 +6,31 @@ G=Path("app/build.gradle.kts")
 m=P.read_text(); g=G.read_text()
 u=m.find("raw.githubusercontent.com/lukeypue/Easy-IPTV/main/latest.json")
 if u < 0: raise SystemExit("updater manifest URL missing")
-start=m.rfind("                            val raw = java.net.URL(",0,u)
-end=m.find("                            val obj = org.json.JSONObject(raw)",u)
+start=m.rfind("val raw = java.net.URL(",0,u)
+end=m.find("val obj = org.json.JSONObject(raw)",u)
 if start < 0 or end < 0: raise SystemExit("updater fetch anchors missing")
-end += len("                            val obj = org.json.JSONObject(raw)")
-new='''                            // RYZOD_V458_UPDATER_RELIABILITY
-                            val manifestUrl = "https://raw.githubusercontent.com/lukeypue/Easy-IPTV/main/latest.json?ts=" + System.currentTimeMillis()
-                            val conn = (java.net.URL(manifestUrl).openConnection() as java.net.HttpURLConnection).apply {
-                                useCaches = false
-                                connectTimeout = 15_000
-                                readTimeout = 15_000
-                                setRequestProperty("Cache-Control", "no-cache, no-store, max-age=0")
-                                setRequestProperty("Pragma", "no-cache")
-                                setRequestProperty("User-Agent", "RYZOD-Updater/" + BuildConfig.VERSION_NAME)
-                            }
-                            val raw = try {
-                                conn.connect()
-                                if (conn.responseCode !in 200..299) throw java.io.IOException("Update server returned " + conn.responseCode)
-                                conn.inputStream.bufferedReader().use { it.readText() }
-                            } finally {
-                                conn.disconnect()
-                            }
-                            val obj = org.json.JSONObject(raw)'''
+line_start=m.rfind("\n",0,start)+1
+indent=m[line_start:start]
+start=line_start
+end += len("val obj = org.json.JSONObject(raw)")
+new=f'''{indent}// RYZOD_V458_UPDATER_RELIABILITY
+{indent}val manifestUrl = "https://raw.githubusercontent.com/lukeypue/Easy-IPTV/main/latest.json?ts=" + System.currentTimeMillis()
+{indent}val conn = (java.net.URL(manifestUrl).openConnection() as java.net.HttpURLConnection).apply {
+{indent}    useCaches = false
+{indent}    connectTimeout = 15_000
+{indent}    readTimeout = 15_000
+{indent}    setRequestProperty("Cache-Control", "no-cache, no-store, max-age=0")
+{indent}    setRequestProperty("Pragma", "no-cache")
+{indent}    setRequestProperty("User-Agent", "RYZOD-Updater/" + BuildConfig.VERSION_NAME)
+{indent}}
+{indent}val raw = try {
+{indent}    conn.connect()
+{indent}    if (conn.responseCode !in 200..299) throw java.io.IOException("Update server returned " + conn.responseCode)
+{indent}    conn.inputStream.bufferedReader().use { it.readText() }
+{indent}} finally {
+{indent}    conn.disconnect()
+{indent}}
+{indent}val obj = org.json.JSONObject(raw)'''
 m=m[:start]+new+m[end:]
 m=m.replace('updateStatus = "Checking…"','updateStatus = "Checking RYZOD update server…" ',1)
 m=m.replace('updateStatus = "RYZOD $name is available."','updateStatus = "RYZOD $name is available (build $code)."',1)
