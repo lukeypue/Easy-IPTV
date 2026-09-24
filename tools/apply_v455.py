@@ -44,6 +44,24 @@ private fun RyzodGridBackground() {
 val classNeedle = "class MainActivity : ComponentActivity() {"
 if (classNeedle !in m): raise SystemExit("v4.55 brand insertion target missing")
 m=m.replace(classNeedle, brand+"\\n"+classNeedle,1)
+createNeedle='''        super.onCreate(savedInstanceState)
+        setContent {'''
+createNew='''        super.onCreate(savedInstanceState)
+        // RYZOD low-memory profile: Fire TV sticks have tight heaps and poster/logo
+        // browsing can otherwise let Coil's default memory cache grow too aggressively.
+        coil.Coil.setImageLoader(
+            coil.ImageLoader.Builder(this)
+                .memoryCache {
+                    coil.memory.MemoryCache.Builder(this)
+                        .maxSizePercent(0.06)
+                        .build()
+                }
+                .crossfade(false)
+                .build()
+        )
+        setContent {'''
+if createNeedle not in m: raise SystemExit("v4.55 low-memory image-cache target missing")
+m=m.replace(createNeedle,createNew,1)
 surfaceNeedle='''                Surface(modifier = Modifier.fillMaxSize(), color = Bg) {
                     App()
                 }'''
