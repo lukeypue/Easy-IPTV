@@ -19,6 +19,7 @@ m=m.replace('Modifier.widthIn(max=720.dp).fillMaxWidth(0.78f)', 'Modifier.widthI
 
 # Remaining visible legacy brand text in generated UI only.
 m=m.replace('Text("ZAKO",','Text("RYZOD",')
+m=re.sub(r'\s*Text\(\s*"Hold OK for Info • Record • Favorite",\s*color = SecondaryText,\s*fontSize = 11\.sp,\s*modifier = Modifier\.padding\(start = 8\.dp\)\s*\)', '', m, count=1)
 m=m.replace('"ZAKO"','"RYZOD"')
 
 # Version.
