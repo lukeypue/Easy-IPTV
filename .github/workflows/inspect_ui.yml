@@ -1,5 +1,7 @@
 name: Inspect generated RYZOD UI
 on:
+  push:
+    branches: [ "ryzod-v4.55-verified" ]
   workflow_dispatch:
 permissions:
   contents: read
