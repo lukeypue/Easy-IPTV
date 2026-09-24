@@ -59,15 +59,9 @@ createNew='''        super.onCreate(savedInstanceState)
         )'''
 if createNeedle not in m: raise SystemExit("v4.55 low-memory image-cache target missing")
 m=m.replace(createNeedle,createNew,1)
-surfaceNeedle='''                Surface(modifier = Modifier.fillMaxSize(), color = Bg) {
-                    App()
-                }'''
-surfaceNew='''                Surface(modifier = Modifier.fillMaxSize(), color = Bg) {
-                    Box(Modifier.fillMaxSize()) {
-                        RyzodGridBackground()
-                        App()
-                    }
-                }'''
+surfaceNeedle='''Surface(modifier = Modifier.fillMaxSize(), color = Bg) {'''
+surfaceNew='''Surface(modifier = Modifier.fillMaxSize(), color = Bg) {
+                    RyzodGridBackground()'''
 if surfaceNeedle not in m: raise SystemExit("v4.55 grid target missing")
 m=m.replace(surfaceNeedle,surfaceNew,1)
 m=m.replace('Text("RYZOD", fontWeight = FontWeight.ExtraBold, fontSize = 19.sp, color = Ink)','RyzodBrandMark(compact = false)',1)
