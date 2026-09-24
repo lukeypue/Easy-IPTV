@@ -58,6 +58,10 @@ jobs:
           python3 tools/apply_v452.py
           python3 tools/apply_v453.py
           python3 tools/apply_v455.py
+      - name: Inspect generated MainActivity recovery area
+        run: |
+          nl -ba app/src/main/java/com/easyiptv/player/MainActivity.kt | sed -n '360,450p'
+
       - name: Verify full feature chain and RYZOD 4.55 regressions
         run: |
           python3 tools/verify_v449_schedule_core.py
