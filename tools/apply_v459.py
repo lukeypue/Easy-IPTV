@@ -9,7 +9,7 @@ m=P.read_text(); g=G.read_text()
 # out of the page layout and into a full-screen Dialog.
 old='''        if(editing) {
             LaunchedEffect(Unit){kotlinx.coroutines.delay(80);runCatching{keyFocus.requestFocus()}}
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(2.dp))
             Box(Modifier.fillMaxWidth(), contentAlignment=Alignment.Center) {
             Column(Modifier.widthIn(max=640.dp).fillMaxWidth(0.72f).background(Color(0xF20A2038),RoundedCornerShape(18.dp))'''
 new='''        if(editing) {
