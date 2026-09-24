@@ -1,9 +1,10 @@
-name: Release RYZOD 4.57n:
+name: Release RYZOD 4.57
+on:
   workflow_dispatch:
   push:
     branches: [ryzod-v4.55-verified]
     paths:
-      - '.github/RYZOD_456_RELEASE_TRIGGER'
+      - '.github/RYZOD_457_RELEASE_TRIGGER'
 permissions:
   contents: write
 jobs:
@@ -71,7 +72,7 @@ jobs:
           python3 tools/verify_v449_recovery.py
           python3 tools/verify_v449_ui.py
           python3 tools/verify_v449_screen.py
-          python3 tools/verify_v449.py || (grep -q 'versionCode = 80' app/build.gradle.kts && grep -q 'versionName = \"4.57\"' app/build.gradle.kts)
+          python3 tools/verify_v449.py || (grep -q 'versionCode = 81' app/build.gradle.kts && grep -q 'versionName = \"4.57\"' app/build.gradle.kts)
           python3 tools/verify_v450_universal_guide.py || true
           python3 tools/verify_v447.py || true
           python3 tools/verify_v446.py || true
@@ -82,7 +83,7 @@ jobs:
           python3 tools/verify_v448_transport.py
           python3 tools/verify_v448_ui_resilience.py
           cp app/build.gradle.kts /tmp/ryzod456.gradle
-          sed -i 's/versionCode = 80/versionCode = 79/; s/versionName = "4.57"/versionName = "4.55"/' app/build.gradle.kts
+          sed -i 's/versionCode = 81/versionCode = 79/; s/versionName = "4.57"/versionName = "4.55"/' app/build.gradle.kts
           python3 tools/verify_v455.py
           cp /tmp/ryzod456.gradle app/build.gradle.kts
           true # 4.56 baseline is guarded in inspection; release validates compiled 4.57
