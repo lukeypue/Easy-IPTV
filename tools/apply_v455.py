@@ -7,30 +7,16 @@ S=Path("app/src/main/res/values/strings.xml")
 m=P.read_text(); g=G.read_text(); s=S.read_text()
 m=m.replace("Zako","RYZOD")
 s=s.replace(">Zako<",">RYZOD<")
-old='''        stopInternal()
-        val f = File(dir, "timeshift.ts")
-        runCatching { f.delete() }
-        file = f'''
-new='''        val stale = file
-        stopInternal()
-        val f = File(dir, "timeshift_${System.nanoTime()}.ts")
-        file = f
-        if (stale != null) Thread({ runCatching { stale.delete() } }, "timeshift-cleanup").apply { isDaemon = true }.start()'''
-if old not in m: raise SystemExit("v4.55 start patch target missing")
+old='''        val oldRing = ring
+        ring = null
+        runCatching { oldRing?.close() }
+        bytesWritten = 0L'''
+new='''        val oldRing = ring
+        ring = null
+        if (oldRing != null) Thread({ runCatching { oldRing.close() } }, "timeshift-cleanup").apply { isDaemon = true }.start()
+        bytesWritten = 0L'''
+if old not in m: raise SystemExit("v4.55 rolling-ring cleanup target missing")
 m=m.replace(old,new,1)
-old2='''    fun stop() {
-        stopInternal()
-        runCatching { file?.delete() }
-        file = null
-    }'''
-new2='''    fun stop() {
-        val stale = file
-        stopInternal()
-        file = null
-        if (stale != null) Thread({ runCatching { stale.delete() } }, "timeshift-cleanup").apply { isDaemon = true }.start()
-    }'''
-if old2 not in m: raise SystemExit("v4.55 stop patch target missing")
-m=m.replace(old2,new2,1)
 m="// RYZOD_V455_VERIFIED_FULL\n"+m
 g=re.sub(r'versionCode\s*=\s*\d+','versionCode = 79',g,count=1)
 g=re.sub(r'versionName\s*=\s*"[^"]+"','versionName = "4.55"',g,count=1)
