@@ -13,7 +13,7 @@ checks={
 "green channels":"ZAKO_V452_CHANNEL_GREEN" in m,
 "keyboard":"ZAKO_V452_WRAP_KEYBOARD" in m,
 "manual DVR":"items(7)" in m and "items(24)" in m,
-"async timeshift cleanup":"timeshift-cleanup" in m and "timeshift_${System.nanoTime()}.ts" in m,
+"async timeshift cleanup":"timeshift-cleanup" in m and "oldRing.close()" in m,
 "version":"versionCode = 79" in g and 'versionName = "4.55"' in g,
 "release signing":"signingConfigs" in g and "ZAKO_KEYSTORE_PATH" in g,
 }
