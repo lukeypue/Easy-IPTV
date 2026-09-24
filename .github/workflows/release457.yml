@@ -132,7 +132,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          printf '%s\n' '{' '  "versionCode": 80,' '  "versionName": "4.57",' '  "downloadUrl": "https://github.com/lukeypue/Easy-IPTV/releases/download/v4.57/RYZOD-v4.57.apk"' '}' > /tmp/latest.json
+          printf '%s\n' '{' '  "versionCode": 81,' '  "versionName": "4.57",' '  "downloadUrl": "https://github.com/lukeypue/Easy-IPTV/releases/download/v4.57/RYZOD-v4.57.apk"' '}' > /tmp/latest.json
           CONTENT="$(base64 -w0 /tmp/latest.json)"
           for attempt in 1 2 3 4 5; do
             SHA="$(gh api repos/lukeypue/Easy-IPTV/contents/latest.json?ref=main --jq .sha)"
@@ -146,7 +146,7 @@ jobs:
         run: |
           gh release view v4.57 --json assets --jq '.assets[].name' | grep '^RYZOD-v4.57.apk$'
           RAW="$(gh api repos/lukeypue/Easy-IPTV/contents/latest.json?ref=main --jq .content | tr -d '\n' | base64 -d)"
-          printf '%s' "$RAW" | grep '"versionCode": 80'
+          printf '%s' "$RAW" | grep '"versionCode": 81'
           printf '%s' "$RAW" | grep '"versionName": "4.57"'
       - uses: actions/upload-artifact@v4
         with:
