@@ -16,6 +16,9 @@ checks={
 "async timeshift cleanup":"timeshift-cleanup" in m and "oldRing.close()" in m,
 "version":"versionCode = 79" in g and 'versionName = "4.55"' in g,
 "release signing":"signingConfigs" in g and "ZAKO_KEYSTORE_PATH" in g,
+"RYZOD header mark":"RyzodBrandMark" in m,
+"subtle grid":"RyzodGridBackground" in m,
+"low-memory image cache":"maxSizePercent(0.06)" in m,
 }
 bad=[k for k,v in checks.items() if not v]
 for k,v in checks.items(): print(("PASS: " if v else "FAIL: ")+k)
