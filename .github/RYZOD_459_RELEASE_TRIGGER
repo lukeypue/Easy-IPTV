@@ -8,3 +8,5 @@ retry-6-shell-comment
 retry after version stamping fix
 
 retry after signer parser fix
+
+retry with verified permanent signer fingerprint
