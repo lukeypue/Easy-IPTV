@@ -5,3 +5,5 @@ Retry after generated-source updater matcher fix.
 Retry 2: robust updater matcher.
 
 Retry 3 deterministic updater anchors.
+
+Retry 4 branded URL anchor.
