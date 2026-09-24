@@ -17,3 +17,5 @@ Retry 7 multiline URL anchor.
 Retry 8 after java.net.URL branding side-effect fix.
 
 Retry 9 after eliminating global identifier branding.
+
+Retry 10 after correcting safe branding generator formatting.
