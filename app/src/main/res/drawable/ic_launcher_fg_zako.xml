@@ -1,50 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<vector xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:aapt="http://schemas.android.com/aapt"
-    android:width="108dp"
-    android:height="108dp"
-    android:viewportWidth="108"
-    android:viewportHeight="108">
-
-    <!-- Soft blue halo behind the mark. -->
-    <path
-        android:fillColor="#18366DA8"
-        android:pathData="M18,20h72v72h-72z" />
-
-    <!-- Clear geometric Z. The straight strokes are intentional: this must read as Z from across a room. -->
-    <path
-        android:pathData="M27,25 L88,25 L79,39 L61,39 L37,74 L85,74 L78,89 L19,89 L26,74 L50,39 L19,39 Z">
-        <aapt:attr name="android:fillColor">
-            <gradient
-                android:startX="23"
-                android:startY="26"
-                android:endX="84"
-                android:endY="88"
-                android:startColor="#195BFF"
-                android:centerColor="#8A5CFF"
-                android:endColor="#FF2FB9"
-                android:type="linear" />
-        </aapt:attr>
-    </path>
-
-    <!-- Fine cyan edge light keeps the logo crisp on dark TV home screens. -->
-    <path
-        android:fillColor="#00000000"
-        android:strokeColor="#33E1FF"
-        android:strokeWidth="0.8"
-        android:strokeLineJoin="round"
-        android:pathData="M27,25 L88,25 L79,39 L61,39 L37,74 L85,74 L78,89 L19,89 L26,74 L50,39 L19,39 Z" />
-
-    <!-- Recessed play symbol, integrated into the lower stroke. -->
-    <path
-        android:fillColor="#08101C"
-        android:strokeColor="#FF58C8"
-        android:strokeWidth="0.8"
-        android:strokeLineJoin="round"
-        android:pathData="M61,77 L74,81.5 L61,86 Z" />
-
-    <!-- Small glossy highlight, kept subtle so the Z remains the hero. -->
-    <path
-        android:fillColor="#35FFFFFF"
-        android:pathData="M29,28 L83,28 L79,32 L27,32 Z" />
+<vector xmlns:android="http://schemas.android.com/apk/res/android" xmlns:aapt="http://schemas.android.com/aapt"
+ android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+ <path android:fillColor="#101018" android:pathData="M8,8h92v92h-92z"/>
+ <path android:fillColor="#1233E1FF" android:pathData="M14,14h80v80h-80z"/>
+ <path android:fillColor="#00000000" android:strokeColor="#33E1FF" android:strokeWidth="2.2" android:pathData="M54,17 A37,37 0,1 1,53.9,17"/>
+ <path android:pathData="M31,27 L31,82 L42,82 L42,60 L55,60 L70,82 L84,82 L66,57 C75,53 79,46 79,38 C79,30 72,27 62,27 Z M42,37 L60,37 C65,37 68,40 68,44 C68,48 65,51 60,51 L42,51 Z">
+  <aapt:attr name="android:fillColor"><gradient android:startX="31" android:startY="27" android:endX="84" android:endY="82" android:startColor="#FFFFFF" android:centerColor="#AFC8E8" android:endColor="#64748B" android:type="linear"/></aapt:attr>
+ </path>
+ <path android:fillColor="#33E1FF" android:strokeColor="#DDF8FF" android:strokeWidth="0.8" android:pathData="M61,39 L61,55 L75,47 Z"/>
+ <path android:fillColor="#30FFFFFF" android:pathData="M34,30h29v3h-29z"/>
 </vector>
