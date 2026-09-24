@@ -220,7 +220,7 @@ private fun Modifier.tvFocus(shape: RoundedCornerShape = RoundedCornerShape(14.d
  * Fire TV's View focus search can climb from Media3's seek bar to the playback
  * row and then get "stuck" there. Wire every visible stock-controller button
  * DOWN to the progress bar, and the progress bar UP to Play/Pause. This affects
- * only VOD / saved recordings / downloads; live TV uses Zako's own controller.
+ * only VOD / saved recordings / downloads; live TV uses RYZOD's own controller.
  */
 @OptIn(UnstableApi::class)
 private fun wireStockPlayerDpad(root: PlayerView) {
@@ -340,7 +340,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
-        // Fire TV storage + provider safety: when Zako is hidden, stop the live
+        // Fire TV storage + provider safety: when RYZOD is hidden, stop the live
         // provider/DVR path instead of quietly writing video in the background.
         // The only exception is an active recording, which owns the one stream.
         if (isChangingConfigurations) Playback.player?.pause()
@@ -453,7 +453,7 @@ fun App() {
                     recordingActive && maxStreams == 1 ->
                         "Recording is using your 1-stream IPTV plan. Stay on this channel, stop recording, or set Provider streams to 2/3 only if your service includes them."
                     recordingActive ->
-                        "No provider stream is free for that change. Your Zako limit is $maxStreams; stop a recording/download or raise it only if your IPTV plan allows more."
+                        "No provider stream is free for that change. Your RYZOD limit is $maxStreams; stop a recording/download or raise it only if your IPTV plan allows more."
                     downloadSlots > 0 ->
                         "A download is using your available IPTV stream. Stop it in Downloads or raise Settings → Provider streams if your plan includes more connections."
                     else -> "No provider stream is free. Check Settings → Provider streams."
@@ -801,7 +801,7 @@ fun AddPlaylistScreen(first: Boolean, onSaved: (Playlist) -> Unit, onBack: (() -
             }
             Spacer(Modifier.width(10.dp))
             Column {
-                Text("Zako", fontWeight = FontWeight.ExtraBold, fontSize = 19.sp, color = Ink)
+                Text("RYZOD", fontWeight = FontWeight.ExtraBold, fontSize = 19.sp, color = Ink)
                 Text("TV made simple", fontSize = 12.sp, color = Muted)
             }
         }
@@ -975,7 +975,7 @@ fun HomeScreen(
         AlertDialog(
             onDismissRequest = { showExit = false },
             containerColor = SurfaceCol,
-            title = { Text("Leave Zako?", color = Ink) },
+            title = { Text("Leave RYZOD?", color = Ink) },
             text = {
                 Text(
                     "Downloads in progress and scheduled DVR recordings keep working in the background even after you exit — the device just needs to stay powered on.",
@@ -1006,7 +1006,7 @@ fun HomeScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(Modifier.weight(1f)) {
-                Text("Zako", fontWeight = FontWeight.ExtraBold, fontSize = 17.sp, color = Ink)
+                Text("RYZOD", fontWeight = FontWeight.ExtraBold, fontSize = 17.sp, color = Ink)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.size(7.dp).background(Accent, CircleShape))
                     Spacer(Modifier.width(6.dp))
@@ -1627,11 +1627,22 @@ internal object Timeshift {
      *  file is always packet-aligned and reconnect seams are clean. */
     @Synchronized
     fun start(context: Context, url: String, prefs: SharedPreferences? = null) {
+        // Never delete a long-running DVR file on the UI/channel-change path.
+        // On removable/FAT-style storage a multi-GB unlink can block for many
+        // seconds. That made channel changes progressively slower and could
+        // trigger an ANR/crash after watching one channel for a long time.
+        val stale = file
         stopInternal()
         val dir = if (prefs != null) Storage.timeshiftDir(context, prefs) else context.cacheDir
-        val f = File(dir, "timeshift.ts")
-        runCatching { f.delete() }
+        // A generation-specific file lets the new channel start immediately
+        // while the previous channel's file is retired off the main thread.
+        val f = File(dir, "timeshift_${System.nanoTime()}.ts")
         file = f
+        if (stale != null && stale != f) {
+            Thread {
+                runCatching { stale.delete() }
+            }.apply { isDaemon = true; name = "timeshift-cleanup" }.start()
+        }
         bytesWritten = 0L
         hitCap = false
         capBytes = if (prefs != null && Storage.usingDrive(context, prefs)) 3_500_000_000L else 1_000_000_000L
@@ -1752,9 +1763,16 @@ internal object Timeshift {
 
     @Synchronized
     fun stop() {
+        val stale = file
         stopInternal()
-        runCatching { file?.delete() }
         file = null
+        // File deletion can be unexpectedly slow on USB/removable storage.
+        // Playback teardown must stay non-blocking; cleanup is disposable work.
+        if (stale != null) {
+            Thread {
+                runCatching { stale.delete() }
+            }.apply { isDaemon = true; name = "timeshift-cleanup" }.start()
+        }
     }
 
     private fun stopInternal() {
@@ -1813,7 +1831,7 @@ private object TimeshiftServer {
      * showed exactly that symptom: 0% / black picture for minutes while the
      * writer kept producing a perfectly playable recording.
      *
-     * Rewind/FF is now Zako-controlled. A query-string offset means "start this
+     * Rewind/FF is now RYZOD-controlled. A query-string offset means "start this
      * new unknown-length tail at a byte that ALREADY EXISTS"; it is not an HTTP
      * Range and we never claim unwritten bytes exist.
      */
@@ -2074,7 +2092,7 @@ object Playback {
             .setLoadErrorHandlingPolicy(androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy(8))
         // DVR Live is a still-growing MPEG-TS stream. Do NOT ask Media3 to
         // discover a fixed duration or do native constant-bitrate seeking here;
-        // Zako owns the 45-minute DVR window and reopens the localhost stream at
+        // RYZOD owns the 45-minute DVR window and reopens the localhost stream at
         // already-written packet offsets. The tolerant TS flags help Fire TV lock
         // onto provider streams that begin between keyframes.
         val liveDvrExtractors = androidx.media3.extractor.DefaultExtractorsFactory()
@@ -2373,7 +2391,7 @@ object Playback {
         return if (ms >= 2_000L && bytes >= 188L * 20L) bytes.toDouble() / ms.toDouble() else 0.0
     }
 
-    /** Approximate playhead within Zako's own temporary DVR window. */
+    /** Approximate playhead within RYZOD's own temporary DVR window. */
     fun dvrAbsolutePositionMs(): Long {
         if (!liveMode || simpleRaw || directLive) return player?.currentPosition?.coerceAtLeast(0L) ?: 0L
         val window = Timeshift.windowMs()
@@ -3051,7 +3069,7 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         Spacer(Modifier.height(4.dp))
         var providerStreams by remember { mutableIntStateOf(ProviderStreams.max(prefs)) }
         Text(
-            "Set this to the number of simultaneous connections INCLUDED with your IPTV service — not the number of Fire TV tuners. Zako defaults to 1. Recording the channel you are already watching in DVR Live shares that same stream; watching one channel while recording a different channel needs 2. A live stream + different-channel recording + download needs 3.",
+            "Set this to the number of simultaneous connections INCLUDED with your IPTV service — not the number of Fire TV tuners. RYZOD defaults to 1. Recording the channel you are already watching in DVR Live shares that same stream; watching one channel while recording a different channel needs 2. A live stream + different-channel recording + download needs 3.",
             fontSize = 12.sp, color = Muted
         )
         Spacer(Modifier.height(10.dp))
@@ -3067,7 +3085,7 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
             }
         }
         Text(
-            "If your service only includes 1 stream, Zako will warn/block combinations that need a second connection instead of letting the provider randomly kill one.",
+            "If your service only includes 1 stream, RYZOD will warn/block combinations that need a second connection instead of letting the provider randomly kill one.",
             fontSize = 10.sp, color = Muted, modifier = Modifier.padding(top = 4.dp)
         )
 
@@ -3093,9 +3111,9 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
                 drivePresent ->
                     "Save downloads, recordings, and the live pause buffer to your plugged-in drive so the Fire Stick's small storage never fills up."
                 driveRaw ->
-                    "A USB drive is plugged in, but Fire OS has not exposed a path Zako can prove writable. Use Recheck USB after granting the normal storage permission or reconnecting the drive. Zako will never claim USB is active until a real write test passes."
+                    "A USB drive is plugged in, but Fire OS has not exposed a path RYZOD can prove writable. Use Recheck USB after granting the normal storage permission or reconnecting the drive. RYZOD will never claim USB is active until a real write test passes."
                 else ->
-                    "Plug in a USB drive or SSD for saved downloads and recordings. Fire OS decides which portable volumes an app may write; Zako tests the drive before offering it and falls back safely if the OS blocks it."
+                    "Plug in a USB drive or SSD for saved downloads and recordings. Fire OS decides which portable volumes an app may write; RYZOD tests the drive before offering it and falls back safely if the OS blocks it."
             },
             fontSize = 12.sp, color = Muted
         )
@@ -3126,7 +3144,7 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
             Chip("Recheck USB", false) {
                 storageRefresh++
                 val ok = Storage.drivePresent(ctx)
-                toast(ctx, if (ok) "USB write test passed." else "USB still isn't writable by Zako on this Fire OS setup.")
+                toast(ctx, if (ok) "USB write test passed." else "USB still isn't writable by RYZOD on this Fire OS setup.")
             }
         }
         Text(
@@ -3188,7 +3206,7 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         Text("Channel lock-in cushion", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
         Text(
-            "How much video Zako collects before showing a live channel. Bigger cushion = steadier picture on weak channels, but changing channels takes longer. If certain channels keep re-buffering, bump this up.",
+            "How much video RYZOD collects before showing a live channel. Bigger cushion = steadier picture on weak channels, but changing channels takes longer. If certain channels keep re-buffering, bump this up.",
             fontSize = 12.sp, color = Muted
         )
         Spacer(Modifier.height(10.dp))
@@ -3231,7 +3249,7 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         Text("Auto frame rate (AFR)", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
         Text(
-            "Matches the Fire TV display to 24/25/30/50/60 fps content when the TV supports it. Zako waits until playback is stable and restores normal display preference when you leave the player. The TV may briefly go black while HDMI changes rate.",
+            "Matches the Fire TV display to 24/25/30/50/60 fps content when the TV supports it. RYZOD waits until playback is stable and restores normal display preference when you leave the player. The TV may briefly go black while HDMI changes rate.",
             fontSize = 12.sp, color = Muted
         )
         Spacer(Modifier.height(10.dp))
@@ -3287,7 +3305,7 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         }
 
         Spacer(Modifier.height(24.dp))
-        Text("Zako 4.23 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
+        Text("RYZOD 4.23 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
     }
 }
 
@@ -3460,7 +3478,7 @@ fun SearchTab(
         val guideFmt = remember { SimpleDateFormat("EEE h:mm a", Locale.getDefault()) }
 
         // Search used to launch a live hit as a one-item queue. That made the
-        // channel play, but Zako no longer knew its real lineup position:
+        // channel play, but RYZOD no longer knew its real lineup position:
         // channel up/down and the recent-channel mini guide broke (the 24/7
         // Star Wars test exposed it). Always re-enter Live with the complete
         // playlist queue and the searched channel's true index.
@@ -3754,9 +3772,9 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
         }
         Text(
             if (DownloadStore.retentionDays(prefs) <= 0)
-                "Saved for offline watching. Add as many titles as you want — Zako downloads one at a time in a lightweight queue. Files stay until you delete them."
+                "Saved for offline watching. Add as many titles as you want — RYZOD downloads one at a time in a lightweight queue. Files stay until you delete them."
             else
-                "Saved for offline watching. Add as many titles as you want — Zako downloads one at a time in a lightweight queue. Files are kept for ${DownloadStore.retentionDays(prefs)} days.",
+                "Saved for offline watching. Add as many titles as you want — RYZOD downloads one at a time in a lightweight queue. Files are kept for ${DownloadStore.retentionDays(prefs)} days.",
             fontSize = 12.sp, color = Muted,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
         )
@@ -3901,7 +3919,7 @@ fun RecordingsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
             if (ProviderStreams.max(prefs) == 1)
                 "Provider streams: 1 • Recording the channel you are watching in DVR Live shares that stream. Recording a different channel takes over Live TV."
             else
-                "Provider streams: ${ProviderStreams.max(prefs)} • Zako may keep Live TV playing while a different channel records, up to your selected IPTV-plan limit.",
+                "Provider streams: ${ProviderStreams.max(prefs)} • RYZOD may keep Live TV playing while a different channel records, up to your selected IPTV-plan limit.",
             color = Muted, fontSize = 10.sp,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
         )
@@ -4184,7 +4202,7 @@ private fun TvTextField(
 }
 
 /**
- * One keyboard for ALL Zako text entry. It deliberately does not summon the
+ * One keyboard for ALL RYZOD text entry. It deliberately does not summon the
  * phone/Fire OS IME, so login, search, playlist names and URLs behave exactly
  * the same with a Fire TV remote.
  *
@@ -4590,7 +4608,7 @@ fun PlayerScreen(
     val current = queue[currentIdx.coerceIn(0, queue.size - 1)]
     var nowNext by remember { mutableStateOf<List<EpgEntry>>(emptyList()) }
     // VOD/recordings keep the legacy Media3 control overlay. Live TV has only
-    // the Zako mini guide; starting this true on live was the reason the old
+    // the RYZOD mini guide; starting this true on live was the reason the old
     // title/gear overlay could still appear underneath the mini guide.
     var overlayVisible by remember { mutableStateOf(queue.getOrNull(start)?.isLive != true) }
     var showRecordChoice by remember { mutableStateOf(false) }
@@ -4802,7 +4820,7 @@ fun PlayerScreen(
         queue.size > 1 && queue.getOrNull(Playback.currentIdxC.intValue)?.isLive == true
     fun zap(dir: Int) {
         if (Recorder.activeName.value != null && ProviderStreams.max(prefs) < 2) {
-            toast(context, "That would need a second provider stream while recording. Your Zako setting is 1 stream — stay on this channel or stop recording.")
+            toast(context, "That would need a second provider stream while recording. Your RYZOD setting is 1 stream — stay on this channel or stop recording.")
             return
         }
         Playback.zapTo(Playback.currentIdxC.intValue + dir)
@@ -4980,7 +4998,7 @@ fun PlayerScreen(
             factory = { ctx ->
                 PlayerView(ctx).apply {
                     player = exo
-                    // Live TV has ONE controller: Zako's cable-box mini guide.
+                    // Live TV has ONE controller: RYZOD's cable-box mini guide.
                     // Media3's stock controller was competing for OK/focus and
                     // trapping the remote on its gear/title row. VOD/recordings
                     // still use Media3's normal controller.
@@ -5104,7 +5122,7 @@ fun PlayerScreen(
                             Recorder.stop(context)
                             toast(context, "Recording saved — find it in Recordings.")
                         } else if (Recorder.activeName.value != null) {
-                            toast(context, "Zako is already recording ${Recorder.activeName.value}. Stop that recording first.")
+                            toast(context, "RYZOD is already recording ${Recorder.activeName.value}. Stop that recording first.")
                         } else if (Playback.simpleRaw) {
                             toast(context, "Recording needs DVR Live. Switch to DVR Live, let the picture lock in, then press REC.")
                         } else {
@@ -5135,7 +5153,7 @@ fun PlayerScreen(
                     },
                 onTune = { ch ->
                     if (Recorder.activeName.value != null && ch.url != current.url && ProviderStreams.max(prefs) < 2) {
-                        toast(context, "Changing channels while recording needs 2 provider streams. Your Zako setting is 1.")
+                        toast(context, "Changing channels while recording needs 2 provider streams. Your RYZOD setting is 1.")
                     } else {
                         miniGuideOpen = false
                         if (ch.url != current.url) Playback.zapToChannel(ch)
@@ -5712,7 +5730,7 @@ private fun MiniGuide(
         Spacer(Modifier.height(5.dp))
 
         // X1-inspired program/timeshift line. The line spans the whole scheduled
-        // program. Gold = show progress, cyan = the part Zako has actually stored,
+        // program. Gold = show progress, cyan = the part RYZOD has actually stored,
         // pink dot = current playhead. Left/right on THIS line seeks, while the
         // remote's physical FF/RW keys do the same from anywhere on screen.
         val showStart = nowShow?.startMs ?: 0L
