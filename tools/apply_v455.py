@@ -43,7 +43,7 @@ private fun RyzodGridBackground() {
 '''
 classNeedle = "class MainActivity : ComponentActivity() {"
 if classNeedle not in m: raise SystemExit("v4.55 brand insertion target missing")
-m=m.replace(classNeedle, brand+"\\n"+classNeedle,1)
+m=m.replace(classNeedle, brand+chr(10)+classNeedle,1)
 createNeedle='''        super.onCreate(savedInstanceState)'''
 createNew='''        super.onCreate(savedInstanceState)
         // RYZOD low-memory profile: cap poster/logo RAM cache on Fire TV.
