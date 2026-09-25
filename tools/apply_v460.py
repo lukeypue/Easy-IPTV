@@ -108,51 +108,53 @@ if old not in vod: raise SystemExit("VodInfoDialog buttons missing")
 vod=vod.replace(old,new,1)
 m=m[:vod_start]+vod+m[vod_end:]
 
-# Episode click gets the same one-row Play / Download / Close dialog.
-m=m.replace('''    var watchTick by remember { mutableIntStateOf(0) }
-    BackHandler { onBack() }''','''    var watchTick by remember { mutableIntStateOf(0) }
-    var episodeActions by remember { mutableStateOf<Pair<Episode, Pair<String, Int>>?>(null) }
-    BackHandler { if(episodeActions!=null) episodeActions=null else onBack() }''',1)
-old='''                            onClick = {
-                                val idx = queue.indexOfFirst { it.url == ep.url }.coerceAtLeast(0)
-                                onPlayQueue(queue, idx)
-                            },'''
-new='''                            onClick = {
-                                val idx = queue.indexOfFirst { it.url == ep.url }.coerceAtLeast(0)
-                                episodeActions = ep to (epName to idx)
-                            },'''
-if old not in m: raise SystemExit("episode click missing")
-m=m.replace(old,new,1)
-anchor='''        }
-    }
-}
-
-@Composable
-fun PlayerScreen('''
-dialog='''        }
-        episodeActions?.let { picked ->
-            val ep=picked.first; val epName=picked.second.first; val idx=picked.second.second
-            AlertDialog(
-                onDismissRequest={episodeActions=null},containerColor=SurfaceCol,
-                title={Text(epName,color=Ink,fontWeight=FontWeight.ExtraBold)},
-                text={Text("Choose an action",color=Muted,fontSize=12.sp)},
-                confirmButton={
-                    Row(horizontalArrangement=Arrangement.spacedBy(6.dp)) {
-                        TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(14.dp)),onClick={episodeActions=null;onPlayQueue(queue,idx)}) { Text("▶ PLAY",color=ProgramCyan,fontWeight=FontWeight.Bold) }
-                        TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(14.dp)),onClick={toast(context,DownloadStore.start(context,prefs,epName,ep.url));episodeActions=null}) { Text("⬇ DOWNLOAD",color=Accent,fontWeight=FontWeight.Bold) }
-                        TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(14.dp)),onClick={episodeActions=null}) { Text("CLOSE",color=Ink) }
-                    }
-                },dismissButton={}
-            )
+# Series episodes already open EpisodeInfoDialog. Put PLAY / DOWNLOAD / CLOSE
+# together in one row, matching Movies.
+ep_start=m.find("private fun EpisodeInfoDialog(")
+ep_end=m.find("@Composable\nfun SeriesDetailScreen(",ep_start)
+if ep_start<0 or ep_end<0: raise SystemExit("EpisodeInfoDialog section missing")
+epd=m[ep_start:ep_end]
+old='''                Spacer(Modifier.height(14.dp))
+                TextButton(
+                    modifier = Modifier.tvFocus(RoundedCornerShape(18.dp)),
+                    onClick = { toast(context, DownloadStore.start(context, prefs, epName, episode.url)) }
+                ) {
+                    Text("⬇ DOWNLOAD", color = DownloadGreen, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                }
+'''
+if old not in epd: raise SystemExit("EpisodeInfoDialog embedded download missing")
+epd=epd.replace(old,'''                Spacer(Modifier.height(14.dp))
+''',1)
+old='''        confirmButton = {
+            TextButton(
+                modifier = Modifier.tvFocus(RoundedCornerShape(18.dp)),
+                onClick = { onClose(); onPlay() }
+            ) { Text("▶ PLAY", color = ProgramCyan, fontWeight = FontWeight.Bold, fontSize = 14.sp) }
+        },
+        dismissButton = {
+            TextButton(modifier = Modifier.tvFocus(RoundedCornerShape(18.dp)), onClick = onClose) {
+                Text("CLOSE", color = Ink, fontWeight = FontWeight.Bold)
+            }
         }
-    }
-}
-
-@Composable
-fun PlayerScreen('''
-# choose last occurrence before PlayerScreen (SeriesDetail end)
-if anchor not in m: raise SystemExit("series dialog anchor missing")
-m=m.replace(anchor,dialog,1)
+'''
+new='''        confirmButton = {
+            Row(horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+                TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(18.dp)),onClick={onClose();onPlay()}) {
+                    Text("▶ PLAY",color=ProgramCyan,fontWeight=FontWeight.Bold,fontSize=14.sp)
+                }
+                TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(18.dp)),onClick={
+                    toast(context,DownloadStore.start(context,prefs,epName,episode.url))
+                }) { Text("⬇ DOWNLOAD",color=DownloadGreen,fontWeight=FontWeight.Bold,fontSize=14.sp) }
+                TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(18.dp)),onClick=onClose) {
+                    Text("CLOSE",color=Ink,fontWeight=FontWeight.Bold)
+                }
+            }
+        },
+        dismissButton = {}
+'''
+if old not in epd: raise SystemExit("EpisodeInfoDialog buttons missing")
+epd=epd.replace(old,new,1)
+m=m[:ep_start]+epd+m[ep_end:]
 
 # Downloads: failed items expose RESUME; destructive stop/delete always confirms.
 m=m.replace('''    val lastRate = remember { HashMap<Long, Double>() }
