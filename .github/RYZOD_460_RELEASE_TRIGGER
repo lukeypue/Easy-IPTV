@@ -32,3 +32,5 @@ retry normalized generated confirmation types
 inspect post-v460 generated Kotlin
 
 retry ScheduleStore.Sched compile fix
+
+rebuild live guide focus and official artwork
