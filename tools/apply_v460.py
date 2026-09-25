@@ -201,7 +201,7 @@ m=m[:ep_start]+epd+m[ep_end:]
 # Downloads: failed items expose RESUME; destructive stop/delete always confirms.
 m=m.replace('''    val lastRate = remember { HashMap<Long, Double>() }
 ''','''    val lastRate = remember { HashMap<Long, Double>() }
-    var confirmDownload by remember { mutableStateOf<DownloadItem?>(null) }
+    var confirmDownload by remember { mutableStateOf<DownloadStore.Item?>(null) }
 ''',1)
 old='''                        IconButton(
                             modifier = Modifier.focusRequester(btnFocus).tvFocus(RoundedCornerShape(24.dp)),
@@ -257,7 +257,7 @@ m=m[:dstart]+dsec+m[dend:]
 m=m.replace('''    val activeRecording = Recorder.activeName.value
 ''','''    val activeRecording = Recorder.activeName.value
     var confirmRecordingFile by remember { mutableStateOf<File?>(null) }
-    var confirmSchedule by remember { mutableStateOf<ScheduledRecording?>(null) }
+    var confirmSchedule by remember { mutableStateOf<ScheduleStore.Item?>(null) }
     var confirmStopRecording by remember { mutableStateOf(false) }
 ''',1)
 m=m.replace('''                    IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = {
