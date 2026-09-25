@@ -63,6 +63,7 @@ jobs:
           python3 tools/apply_v456.py
           python3 tools/apply_v457.py
           python3 tools/apply_v458.py
+          python3 tools/apply_v459.py
           echo '--- generated source before v460 ---'
           grep -n -B 8 -A 20 'RECORD NOW' app/src/main/java/com/easyiptv/player/MainActivity.kt || true
           python3 tools/apply_v460.py
