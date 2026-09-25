@@ -22,3 +22,5 @@ retry normalized EpisodeInfoDialog
 inspect downloads section
 
 retry guide return + download confirmation boundary
+
+retry bounded DownloadsPane confirmation
