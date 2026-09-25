@@ -14,3 +14,5 @@ retry MoviesPane anchored actions
 inspect exact generated MoviesPane
 
 retry normalized existing VodInfoDialog
+
+inspect exact series detail
