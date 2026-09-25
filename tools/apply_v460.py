@@ -230,13 +230,14 @@ new='''                        if (DownloadStore.state(context,d.id)==DownloadSt
                         }'''
 if old not in m: raise SystemExit("download delete control missing")
 m=m.replace(old,new,1)
-# Confirmation after list.
-needle='''        }
-    }
-}
-
-fun RecordingsPane'''
-rep='''        }
+# Insert confirmation at the end of DownloadsPane using section boundaries.
+dstart=m.find("fun DownloadsPane(")
+dend=m.find("/* ----------------------------- recordings ----------------------------- */",dstart)
+if dstart<0 or dend<0: raise SystemExit("DownloadsPane bounds missing")
+dsec=m[dstart:dend]
+close=dsec.rfind("\n}")
+if close<0: raise SystemExit("DownloadsPane close missing")
+confirm='''
         confirmDownload?.let { d ->
             AlertDialog(
                 onDismissRequest={confirmDownload=null},containerColor=SurfaceCol,
@@ -248,12 +249,9 @@ rep='''        }
                 dismissButton={TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(14.dp)),onClick={confirmDownload=null}){Text("CLOSE",color=Ink)}}
             )
         }
-    }
-}
-
-fun RecordingsPane'''
-if needle not in m: raise SystemExit("download confirm anchor missing")
-m=m.replace(needle,rep,1)
+'''
+dsec=dsec[:close]+confirm+dsec[close:]
+m=m[:dstart]+dsec+m[dend:]
 
 # Recordings: confirmation for scheduled cancellation and saved-file deletion.
 m=m.replace('''    val activeRecording = Recorder.activeName.value
