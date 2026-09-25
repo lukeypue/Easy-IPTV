@@ -252,6 +252,10 @@ confirm='''
 '''
 dsec=dsec[:close]+confirm+dsec[close:]
 m=m[:dstart]+dsec+m[dend:]
+# apply_v458 may introduce a top-level Item alias after this patch was authored.
+# Use the nested DownloadStore model explicitly in generated source.
+m=m.replace("mutableStateOf<DownloadItem?>(null)", "mutableStateOf<DownloadStore.Item?>(null)")
+m=m.replace("mutableStateOf<ScheduledRecording?>(null)", "mutableStateOf<ScheduleStore.Item?>(null)")
 
 # Recordings: confirmation for scheduled cancellation and saved-file deletion.
 m=m.replace('''    val activeRecording = Recorder.activeName.value
