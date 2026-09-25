@@ -62,15 +62,15 @@ guide_sig='''private fun LiveGridGuide(
     channels: List<LiveChannel>,
 '''
 if guide_sig not in m: raise SystemExit("LiveGridGuide signature missing for return memory")
-# Current playback already persists last_channel_id for previous-channel UX.
+# Current playback persists last_live_url; use that exact stream as the guide anchor.
 state='''    var selected by remember { mutableStateOf<Pair<LiveChannel, EpgEntry>?>(null) }
 '''
 if state not in m: raise SystemExit("LiveGridGuide state missing")
-m=m.replace(state,state+'''    val returnId = remember(channels) { prefs.getString("last_channel_id", null) }
-    val returnIndex = remember(channels, returnId) { channels.indexOfFirst { it.id == returnId }.coerceAtLeast(0) }
-    val returnFocus = remember(returnId) { FocusRequester() }
+m=m.replace(state,state+'''    val returnUrl = prefs.getString("last_live_url", null)
+    val returnIndex = channels.indexOfFirst { it.url == returnUrl }.coerceAtLeast(0)
+    val returnFocus = remember(returnUrl, channels.size) { FocusRequester() }
     val guideListState = androidx.compose.foundation.lazy.rememberLazyListState()
-    LaunchedEffect(returnId, channels.size) {
+    LaunchedEffect(returnUrl, channels.size) {
         if (channels.isNotEmpty()) {
             runCatching { guideListState.scrollToItem(returnIndex.coerceIn(0, channels.lastIndex)) }
             kotlinx.coroutines.delay(120)
@@ -92,8 +92,8 @@ bubble='''Modifier.width(142.dp).fillMaxHeight()
 '''
 if bubble in gs:
     gs=gs.replace(bubble,'''Modifier.width(142.dp).fillMaxHeight()
-                            .then(if(ch.id==returnId) Modifier.focusRequester(returnFocus) else Modifier)
-                            .border(if(ch.id==returnId) 3.dp else 1.dp,if(ch.id==returnId) Accent else Color.White.copy(alpha=.45f),RoundedCornerShape(8.dp))
+                            .then(if(ch.url==returnUrl) Modifier.focusRequester(returnFocus) else Modifier)
+                            .border(if(ch.url==returnUrl) 3.dp else 1.dp,if(ch.url==returnUrl) Accent else Color.White.copy(alpha=.45f),RoundedCornerShape(8.dp))
 ''',1)
 m=m[:gstart]+gs+m[gend:]
 
