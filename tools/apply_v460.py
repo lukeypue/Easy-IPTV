@@ -56,33 +56,25 @@ m=m.replace(old,new,1)
 m=m.replace('''Text("Choose a day and hour • up to 7 days",color=Muted,fontSize=11.sp)''','''Text("Record by time • up to 7 days ahead",color=Muted,fontSize=11.sp)''',1)
 
 # Movie click opens one-row Play / Download / Close actions.
-m=m.replace('''    val context = LocalContext.current
-
-    if (data.movies.isEmpty()) {''','''    val context = LocalContext.current
+movie_start=m.find("fun MoviesPane(")
+movie_end=m.find("/* ----------------------------- series pane ----------------------------- */",movie_start)
+if movie_start<0 or movie_end<0: raise SystemExit("MoviesPane section missing")
+movie=m[movie_start:movie_end]
+movie=movie.replace('''    val context = LocalContext.current
+''','''    val context = LocalContext.current
     var movieActions by remember { mutableStateOf<MovieItem?>(null) }
-
-    if (data.movies.isEmpty()) {''',1)
-old='''                    onClick = {
-                        BrowseFocusMemory.movieCategory = selectedCat
-                        BrowseFocusMemory.movieUrl = m.url
-                        onPlay(Playable(m.name, m.url, isLive = false, artwork = m.icon))
-                    },'''
-new='''                    onClick = {
-                        BrowseFocusMemory.movieCategory = selectedCat
-                        BrowseFocusMemory.movieUrl = m.url
-                        movieActions = m
-                    },'''
-if old in m:
-    m=m.replace(old,new,1)
-else:
-    pat=r"onClick\s*=\s*\{\s*BrowseFocusMemory\.movieCategory\s*=\s*selectedCat\s*BrowseFocusMemory\.movieUrl\s*=\s*m\.url\s*onPlay\(Playable\(m\.name,\s*m\.url,\s*isLive\s*=\s*false,\s*artwork\s*=\s*m\.icon\)\)\s*\},"
-    m,n=re.subn(pat,new.strip(),m,count=1,flags=re.S)
-    if n!=1: raise SystemExit("movie click missing")
-anchor='''        }
+''',1)
+play_call='''                        onPlay(Playable(m.name, m.url, isLive = false, artwork = m.icon))
+'''
+if play_call not in movie: raise SystemExit("MoviesPane play call missing")
+movie=movie.replace(play_call,'''                        movieActions = m
+''',1)
+close='''        }
     }
 }
-
-/* ----------------------------- series pane ----------------------------- */'''
+'''
+pos=movie.rfind(close)
+if pos<0: raise SystemExit("MoviesPane closing block missing")
 dialog='''        }
         movieActions?.let { item ->
             AlertDialog(
@@ -104,10 +96,9 @@ dialog='''        }
         }
     }
 }
-
-/* ----------------------------- series pane ----------------------------- */'''
-if anchor not in m: raise SystemExit("movie dialog anchor missing")
-m=m.replace(anchor,dialog,1)
+'''
+movie=movie[:pos]+dialog+movie[pos+len(close):]
+m=m[:movie_start]+movie+m[movie_end:]
 
 # Episode click gets the same one-row Play / Download / Close dialog.
 m=m.replace('''    var watchTick by remember { mutableIntStateOf(0) }
