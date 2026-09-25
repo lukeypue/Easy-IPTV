@@ -10,3 +10,5 @@ retry hardened movie action matcher
 retry corrected matcher syntax
 
 retry MoviesPane anchored actions
+
+inspect exact generated MoviesPane
