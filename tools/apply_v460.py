@@ -55,50 +55,58 @@ if old not in m: raise SystemExit("live compact row tail missing")
 m=m.replace(old,new,1)
 m=m.replace('''Text("Choose a day and hour • up to 7 days",color=Muted,fontSize=11.sp)''','''Text("Record by time • up to 7 days ahead",color=Muted,fontSize=11.sp)''',1)
 
-# Movie click opens one-row Play / Download / Close actions.
-movie_start=m.find("fun MoviesPane(")
-movie_end=m.find("/* ----------------------------- series pane ----------------------------- */",movie_start)
-if movie_start<0 or movie_end<0: raise SystemExit("MoviesPane section missing")
-movie=m[movie_start:movie_end]
-movie=movie.replace('''    val context = LocalContext.current
-''','''    val context = LocalContext.current
-    var movieActions by remember { mutableStateOf<MovieItem?>(null) }
-''',1)
-play_call='''                        onPlay(Playable(m.name, m.url, isLive = false, artwork = m.icon))
-'''
-if play_call not in movie: raise SystemExit("MoviesPane play call missing")
-movie=movie.replace(play_call,'''                        movieActions = m
-''',1)
-close='''        }
-    }
-}
-'''
-pos=movie.rfind(close)
-if pos<0: raise SystemExit("MoviesPane closing block missing")
-dialog='''        }
-        movieActions?.let { item ->
-            AlertDialog(
-                onDismissRequest={movieActions=null}, containerColor=SurfaceCol,
-                title={Text(item.name,color=Ink,fontWeight=FontWeight.ExtraBold)},
-                text={Text("Choose an action",color=Muted,fontSize=12.sp)},
-                confirmButton={
-                    Row(horizontalArrangement=Arrangement.spacedBy(6.dp)) {
-                        TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(14.dp)),onClick={
-                            movieActions=null; onPlay(Playable(item.name,item.url,isLive=false,artwork=item.icon))
-                        }) { Text("▶ PLAY",color=ProgramCyan,fontWeight=FontWeight.Bold) }
-                        TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(14.dp)),onClick={
-                            toast(context,DownloadStore.start(context,prefs,item.name,item.url));movieActions=null
-                        }) { Text("⬇ DOWNLOAD",color=Accent,fontWeight=FontWeight.Bold) }
-                        TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(14.dp)),onClick={movieActions=null}) { Text("CLOSE",color=Ink) }
+# Movies already open the X1-style VodInfoDialog. Normalize that dialog itself to
+# the requested single action row: PLAY, DOWNLOAD, CLOSE.
+vod_start=m.find("private fun VodInfoDialog(")
+vod_end=m.find("@Composable\nfun MoviesPane(",vod_start)
+if vod_start<0 or vod_end<0: raise SystemExit("VodInfoDialog section missing")
+vod=m[vod_start:vod_end]
+old='''                Spacer(Modifier.height(12.dp))
+                TextButton(
+                    modifier = Modifier.tvFocus(RoundedCornerShape(18.dp)),
+                    onClick = {
+                        toast(context, DownloadStore.start(context, prefs, movie.name, movie.url))
                     }
-                }, dismissButton={}
-            )
-        }
-    }
-}
+                ) {
+                    Text("⬇ DOWNLOAD", color = DownloadGreen, fontWeight = FontWeight.Bold)
+                }
 '''
-movie=movie[:pos]+dialog+movie[pos+len(close):]
-m=m[:movie_start]+movie+m[movie_end:]
+if old not in vod: raise SystemExit("VodInfoDialog embedded download missing")
+vod=vod.replace(old,'''                Spacer(Modifier.height(12.dp))
+''',1)
+old='''        confirmButton = {
+            TextButton(
+                modifier = Modifier.tvFocus(RoundedCornerShape(18.dp)),
+                onClick = {
+                    onClose()
+                    onPlay(Playable(movie.name, movie.url, isLive = false, artwork = movie.icon))
+                }
+            ) { Text("▶ PLAY", color = ProgramCyan, fontWeight = FontWeight.Bold) }
+        },
+        dismissButton = {
+            TextButton(modifier = Modifier.tvFocus(RoundedCornerShape(18.dp)), onClick = onClose) {
+                Text("CLOSE", color = Ink)
+            }
+        }
+'''
+new='''        confirmButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(18.dp)),onClick={
+                    onClose();onPlay(Playable(movie.name,movie.url,isLive=false,artwork=movie.icon))
+                }) { Text("▶ PLAY",color=ProgramCyan,fontWeight=FontWeight.Bold) }
+                TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(18.dp)),onClick={
+                    toast(context,DownloadStore.start(context,prefs,movie.name,movie.url))
+                }) { Text("⬇ DOWNLOAD",color=DownloadGreen,fontWeight=FontWeight.Bold) }
+                TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(18.dp)),onClick=onClose) {
+                    Text("CLOSE",color=Ink)
+                }
+            }
+        },
+        dismissButton = {}
+'''
+if old not in vod: raise SystemExit("VodInfoDialog buttons missing")
+vod=vod.replace(old,new,1)
+m=m[:vod_start]+vod+m[vod_end:]
 
 # Episode click gets the same one-row Play / Download / Close dialog.
 m=m.replace('''    var watchTick by remember { mutableIntStateOf(0) }
