@@ -28,3 +28,5 @@ retry bounded DownloadsPane confirmation
 inspect exact compile lines
 
 retry normalized generated confirmation types
+
+inspect post-v460 generated Kotlin
