@@ -20,3 +20,5 @@ inspect exact series detail
 retry normalized EpisodeInfoDialog
 
 inspect downloads section
+
+retry guide return + download confirmation boundary
