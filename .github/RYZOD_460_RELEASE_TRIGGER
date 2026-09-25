@@ -16,3 +16,5 @@ inspect exact generated MoviesPane
 retry normalized existing VodInfoDialog
 
 inspect exact series detail
+
+retry normalized EpisodeInfoDialog
