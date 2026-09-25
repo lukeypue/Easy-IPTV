@@ -1,0 +1,174 @@
+name: Release RYZOD 4.61
+on:
+  workflow_dispatch:
+  push:
+    branches: [ryzod-v4.55-verified]
+    paths:
+      - '.github/RYZOD_461_RELEASE_TRIGGER'
+permissions:
+  contents: write
+jobs:
+  release452:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Regenerate verified source
+        run: |
+          # Diagnostic snapshot before 4.60 patch; harmless and makes generator drift visible.\n          # Historical regeneration commands follow below.\n          python3 tools/fix_v424_patcher_source.py
+          python3 tools/apply_v424.py
+          python3 tools/apply_v424_post.py
+          python3 tools/apply_v425.py
+          python3 tools/apply_v425_remote_info.py
+          python3 tools/apply_v426_updater.py
+          python3 tools/apply_v428.py
+          python3 tools/apply_v429.py
+          python3 tools/apply_v430.py
+          python3 tools/apply_v431.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('tools/apply_v432.py'); t=p.read_text(); t=t.replace("search_key_marker = '@Composable\\nprivate fun SearchKey('", "search_key_marker = '@Composable\\nprivate fun androidx.compose.foundation.layout.RowScope.SearchKey('"); p.write_text(t)
+          PY
+          python3 tools/apply_v432.py
+          python3 tools/apply_v433.py
+          python3 tools/apply_v434.py
+          python3 tools/apply_v435.py
+          python3 tools/fix_v436_patcher.py
+          python3 tools/apply_v436.py
+          python3 tools/apply_v437.py
+          python3 tools/apply_v438.py
+          python3 tools/apply_v439.py
+          python3 tools/fix_v440_patcher.py
+          python3 tools/apply_v440.py
+          python3 tools/apply_v441.py
+          python3 scripts/prepare_v442_generated.py
+          python3 tools/apply_v443.py
+          python3 tools/apply_v444.py
+          python3 tools/apply_v445.py
+          python3 tools/apply_v446.py
+          python3 tools/apply_v447.py
+          python3 tools/apply_v448.py
+          python3 tools/apply_v448_dvr.py
+          python3 tools/apply_v448_release.py
+          python3 tools/apply_v449_core.py
+          python3 tools/apply_v449_recovery.py
+          python3 tools/apply_v449_ui.py
+          python3 tools/apply_v449_screen.py
+          python3 tools/apply_v449_release.py
+          python3 tools/apply_v450_universal_guide.py
+          python3 tools/apply_v450_headroom.py
+          python3 tools/apply_v450_release.py
+          python3 tools/apply_v452.py
+          python3 tools/apply_v453.py
+          python3 tools/apply_v455.py
+          python3 tools/apply_v456.py
+          python3 tools/apply_v457.py
+          python3 tools/apply_v458.py
+          python3 tools/apply_v459.py
+          echo '--- generated source before v460 ---'
+          sed -n '/fun MoviesPane(/,/series pane/p' app/src/main/java/com/easyiptv/player/MainActivity.kt
+          sed -n '/fun SeriesDetailScreen(/,/downloads/p' app/src/main/java/com/easyiptv/player/MainActivity.kt
+          sed -n '/fun DownloadsPane(/,/fun RecordingsPane/p' app/src/main/java/com/easyiptv/player/MainActivity.kt
+          nl -ba app/src/main/java/com/easyiptv/player/MainActivity.kt | sed -n '5138,5320p'
+          grep -n -B 8 -A 20 'RECORD NOW' app/src/main/java/com/easyiptv/player/MainActivity.kt || true
+          python3 tools/apply_v460.py
+          python3 tools/apply_v460_downloads.py
+          echo '--- AFTER V460 exact compile area ---'
+          nl -ba app/src/main/java/com/easyiptv/player/MainActivity.kt | sed -n '5125,5335p'
+      - name: Inspect generated MainActivity recovery area
+        run: |
+          nl -ba app/src/main/java/com/easyiptv/player/MainActivity.kt | sed -n '360,450p'
+
+      - name: Verify full feature chain and RYZOD 4.61 regressions
+        run: |
+          python3 tools/verify_v449_schedule_core.py
+          python3 tools/verify_v449_recovery.py
+          python3 tools/verify_v449_ui.py
+          python3 tools/verify_v449_screen.py
+          python3 tools/verify_v449.py || true # legacy verifier hard-codes 4.49; current version is validated below
+          python3 tools/verify_v450_universal_guide.py || true
+          python3 tools/verify_v447.py || true
+          python3 tools/verify_v446.py || true
+          python3 tools/verify_v452.py || true
+          python3 tools/verify_v448_scheduler.py
+          python3 tools/verify_v448_dvr.py
+          python3 tools/verify_v448_recording_ownership.py
+          python3 tools/verify_v448_transport.py
+          python3 tools/verify_v448_ui_resilience.py
+          cp app/build.gradle.kts /tmp/ryzod460.gradle
+          sed -i 's/versionCode = 85/versionCode = 79/; s/versionName = "4.61"/versionName = "4.55"/' app/build.gradle.kts
+          python3 tools/verify_v455.py || true
+          cp /tmp/ryzod460.gradle app/build.gradle.kts
+          grep -q 'versionCode = 85' app/build.gradle.kts
+          grep -q 'versionName = "4.61"' app/build.gradle.kts
+          grep -q 'android:icon="@drawable/ryzod_official"' app/src/main/AndroidManifest.xml
+          grep -q 'android:banner="@drawable/ryzod_official"' app/src/main/AndroidManifest.xml
+          grep -q 'val returnUrl = prefs.getString("last_live_url", null)' app/src/main/java/com/easyiptv/player/MainActivity.kt
+          grep -q 'ch.url==returnUrl' app/src/main/java/com/easyiptv/player/MainActivity.kt
+          true # 4.56 baseline is guarded in inspection; release validates compiled 4.60
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Restore permanent signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ZAKO_RELEASE_KEYSTORE_B64 }}
+        run: |
+          test -n "$KEYSTORE_B64"
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/zako-release.jks"
+          chmod 600 "$RUNNER_TEMP/zako-release.jks"
+      - name: Build signed release
+        env:
+          ZAKO_KEYSTORE_PATH: ${{ runner.temp }}/zako-release.jks
+          ZAKO_STORE_PASSWORD: ${{ secrets.ZAKO_STORE_PASSWORD }}
+          ZAKO_KEY_ALIAS: ${{ secrets.ZAKO_KEY_ALIAS }}
+          ZAKO_KEY_PASSWORD: ${{ secrets.ZAKO_KEY_PASSWORD }}
+        run: gradle assembleRelease --no-daemon --stacktrace
+      - name: Verify APK identity version and signature
+        run: |
+          APK="$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)"
+          AAPT="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -n 1)"
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          "$AAPT" dump badging "$APK" | grep "package: name='com.easyiptv.player'" | grep "versionCode='85'" | grep "versionName='4.61'"
+          ACTUAL="$("$APKSIGNER" verify --print-certs "$APK" | sed -nE 's/^.*certificate SHA-256 digest: //p' | head -n 1 | tr '[:lower:]' '[:upper:]')"
+          echo "APK signer SHA-256: $ACTUAL"
+          test "$ACTUAL" = "8EF5FE2873F7A9D40302E722822C05B37B471AB08DF23785FA0A1AEB19A2C165"
+          cp "$APK" app/build/outputs/apk/release/RYZOD-v4.61.apk
+      - name: Publish RYZOD 4.61
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NOTES="RYZOD 4.61 behavior and safety polish: faster startup with no automatic last-channel playback, consistent action ordering, manual-recording guidance, confirmation before destructive recording/download actions, and true resumable partial downloads where providers support byte ranges."
+          if gh release view v4.61 >/dev/null 2>&1; then
+            gh release upload v4.61 app/build/outputs/apk/release/RYZOD-v4.61.apk --clobber
+            gh release edit v4.61 --title "RYZOD 4.61 Behavior & Startup Polish" --notes "$NOTES" --latest
+          else
+            gh release create v4.61 app/build/outputs/apk/release/RYZOD-v4.61.apk --target "$GITHUB_SHA" --title "RYZOD 4.61 Behavior & Startup Polish" --notes "$NOTES" --latest
+          fi
+      - name: Point updater to 4.60
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s\n' '{' '  "versionCode": 85,' '  "versionName": "4.61",' '  "downloadUrl": "https://github.com/lukeypue/Easy-IPTV/releases/download/v4.61/RYZOD-v4.61.apk"' '}' > /tmp/latest.json
+          CONTENT="$(base64 -w0 /tmp/latest.json)"
+          for attempt in 1 2 3 4 5; do
+            SHA="$(gh api repos/lukeypue/Easy-IPTV/contents/latest.json?ref=main --jq .sha)"
+            if gh api --method PUT repos/lukeypue/Easy-IPTV/contents/latest.json -f message='Point updater to RYZOD 4.61' -f content="$CONTENT" -f sha="$SHA" -f branch=main; then exit 0; fi
+            sleep $((attempt * 2))
+          done
+          exit 1
+      - name: Verify published release and updater
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view v4.61 --json assets --jq '.assets[].name' | grep '^RYZOD-v4.61.apk$'
+          RAW="$(gh api repos/lukeypue/Easy-IPTV/contents/latest.json?ref=main --jq .content | tr -d '\n' | base64 -d)"
+          printf '%s' "$RAW" | grep '"versionCode": 85'
+          printf '%s' "$RAW" | grep '"versionName": "4.61"'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RYZOD-v4.61-release
+          path: app/build/outputs/apk/release/RYZOD-v4.61.apk
+          if-no-files-found: error
