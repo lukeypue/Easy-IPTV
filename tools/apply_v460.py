@@ -55,6 +55,48 @@ if old not in m: raise SystemExit("live compact row tail missing")
 m=m.replace(old,new,1)
 m=m.replace('''Text("Choose a day and hour • up to 7 days",color=Muted,fontSize=11.sp)''','''Text("Record by time • up to 7 days ahead",color=Muted,fontSize=11.sp)''',1)
 
+# Live guide return memory: keep the currently watched channel as the guide anchor.
+# The grid scrolls to it and requests focus whenever Live is reopened.
+guide_sig='''private fun LiveGridGuide(
+    prefs: SharedPreferences,
+    channels: List<LiveChannel>,
+'''
+if guide_sig not in m: raise SystemExit("LiveGridGuide signature missing for return memory")
+# Current playback already persists last_channel_id for previous-channel UX.
+state='''    var selected by remember { mutableStateOf<Pair<LiveChannel, EpgEntry>?>(null) }
+'''
+if state not in m: raise SystemExit("LiveGridGuide state missing")
+m=m.replace(state,state+'''    val returnId = remember(channels) { prefs.getString("last_channel_id", null) }
+    val returnIndex = remember(channels, returnId) { channels.indexOfFirst { it.id == returnId }.coerceAtLeast(0) }
+    val returnFocus = remember(returnId) { FocusRequester() }
+    val guideListState = androidx.compose.foundation.lazy.rememberLazyListState()
+    LaunchedEffect(returnId, channels.size) {
+        if (channels.isNotEmpty()) {
+            runCatching { guideListState.scrollToItem(returnIndex.coerceIn(0, channels.lastIndex)) }
+            kotlinx.coroutines.delay(120)
+            runCatching { returnFocus.requestFocus() }
+        }
+    }
+''',1)
+# Bind state to guide channel list if it is a plain LazyColumn.
+gstart=m.find("private fun LiveGridGuide("); gend=m.find("\n@Composable",gstart+20)
+if gend<0: gend=len(m)
+gs=m[gstart:gend]
+lc='''        LazyColumn('''
+if lc in gs and "state = guideListState" not in gs:
+    gs=gs.replace(lc,'''        LazyColumn(
+            state = guideListState,''',1)
+# Highlight/focus current channel bubble without changing the white-line layout.
+bubble='''Modifier.width(142.dp).fillMaxHeight()
+                            .border(1.dp,Color.White.copy(alpha=.45f),RoundedCornerShape(8.dp))
+'''
+if bubble in gs:
+    gs=gs.replace(bubble,'''Modifier.width(142.dp).fillMaxHeight()
+                            .then(if(ch.id==returnId) Modifier.focusRequester(returnFocus) else Modifier)
+                            .border(if(ch.id==returnId) 3.dp else 1.dp,if(ch.id==returnId) Accent else Color.White.copy(alpha=.45f),RoundedCornerShape(8.dp))
+''',1)
+m=m[:gstart]+gs+m[gend:]
+
 # Movies already open the X1-style VodInfoDialog. Normalize that dialog itself to
 # the requested single action row: PLAY, DOWNLOAD, CLOSE.
 vod_start=m.find("private fun VodInfoDialog(")
