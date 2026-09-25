@@ -33,15 +33,16 @@ needle='''    val prefs = remember { context.getSharedPreferences("easyiptv", Co
 m=m.replace(needle,needle+'''    LaunchedEffect(Unit) { prefs.edit().putBoolean("autoplay_last", false).apply() }
 ''',1)
 
-# Live guide: WATCH first, CLOSE last.
-old='''                Row(horizontalArrangement=Arrangement.spacedBy(3.dp),verticalAlignment=Alignment.CenterVertically) {
-                    if(recordable) TextButton'''
-new='''                Row(horizontalArrangement=Arrangement.spacedBy(3.dp),verticalAlignment=Alignment.CenterVertically) {
-                    if(airing) TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(14.dp)),onClick={
+# Live guide: WATCH first, CLOSE last. 4.59 generates the compact row as
+# RECORD/FAVORITE/CLOSE/WATCH, so rotate the same actions without changing behavior.
+old='''                    if(recordable) TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(14.dp)),onClick={
+'''
+new='''                    if(airing) TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(14.dp)),onClick={
                         val queue=channels.map{livePlayable(prefs,it)};selected=null;onPlayLive(queue,chIndexOf(channels,ch))
                     }) { Text("▶ WATCH",color=ProgramCyan,fontWeight=FontWeight.Bold,fontSize=10.sp) }
-                    if(recordable) TextButton'''
-if old not in m: raise SystemExit("live actions start missing")
+                    if(recordable) TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(14.dp)),onClick={
+'''
+if old not in m: raise SystemExit("live compact row missing")
 m=m.replace(old,new,1)
 old='''                    TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(14.dp)),onClick={selected=null}) { Text("CLOSE",color=Ink,fontSize=10.sp) }
                     if(airing) TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(14.dp)),onClick={
@@ -50,10 +51,9 @@ old='''                    TextButton(modifier=Modifier.tvFocus(RoundedCornerSha
 '''
 new='''                    TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(14.dp)),onClick={selected=null}) { Text("CLOSE",color=Ink,fontSize=10.sp) }
 '''
-if old not in m: raise SystemExit("live actions tail missing")
+if old not in m: raise SystemExit("live compact row tail missing")
 m=m.replace(old,new,1)
-m=m.replace('''Text("Choose a day and hour • up to 7 days",color=Muted,fontSize=11.sp)''',
-'''Text("Record this channel by time • up to 7 days ahead",color=Muted,fontSize=11.sp)''',1)
+m=m.replace('''Text("Choose a day and hour • up to 7 days",color=Muted,fontSize=11.sp)''','''Text("Record by time • up to 7 days ahead",color=Muted,fontSize=11.sp)''',1)
 
 # Movie click opens one-row Play / Download / Close actions.
 m=m.replace('''    val context = LocalContext.current
