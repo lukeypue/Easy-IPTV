@@ -12,3 +12,5 @@ retry corrected matcher syntax
 retry MoviesPane anchored actions
 
 inspect exact generated MoviesPane
+
+retry normalized existing VodInfoDialog
