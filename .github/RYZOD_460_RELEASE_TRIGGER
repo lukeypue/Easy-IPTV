@@ -30,3 +30,5 @@ inspect exact compile lines
 retry normalized generated confirmation types
 
 inspect post-v460 generated Kotlin
+
+retry ScheduleStore.Sched compile fix
