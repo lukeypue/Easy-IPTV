@@ -72,8 +72,7 @@ new='''                    onClick = {
                         BrowseFocusMemory.movieUrl = m.url
                         movieActions = m
                     },'''
-if old not in m: raise SystemExit("movie click missing")
-m=m.replace(old,new,1)
+if old in m:\n    m=m.replace(old,new,1)\nelse:\n    pat=r"onClick\\s*=\\s*\\{\\s*BrowseFocusMemory\\.movieCategory\\s*=\\s*selectedCat\\s*BrowseFocusMemory\\.movieUrl\\s*=\\s*m\\.url\\s*onPlay\\(Playable\\(m\\.name,\\s*m\\.url,\\s*isLive\\s*=\\s*false,\\s*artwork\\s*=\\s*m\\.icon\\)\\)\\s*\\},"\n    m,n=re.subn(pat,new.strip(),m,count=1,flags=re.S)\n    if n!=1: raise SystemExit("movie click missing")
 anchor='''        }
     }
 }
