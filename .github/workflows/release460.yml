@@ -66,6 +66,7 @@ jobs:
           python3 tools/apply_v459.py
           echo '--- generated source before v460 ---'
           sed -n '/fun MoviesPane(/,/series pane/p' app/src/main/java/com/easyiptv/player/MainActivity.kt
+          sed -n '/fun SeriesDetailScreen(/,/downloads/p' app/src/main/java/com/easyiptv/player/MainActivity.kt
           grep -n -B 8 -A 20 'RECORD NOW' app/src/main/java/com/easyiptv/player/MainActivity.kt || true
           python3 tools/apply_v460.py
           python3 tools/apply_v460_downloads.py
