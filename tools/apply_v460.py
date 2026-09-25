@@ -255,13 +255,13 @@ m=m[:dstart]+dsec+m[dend:]
 # apply_v458 may introduce a top-level Item alias after this patch was authored.
 # Use the nested DownloadStore model explicitly in generated source.
 m=m.replace("mutableStateOf<DownloadItem?>(null)", "mutableStateOf<DownloadStore.Item?>(null)")
-m=m.replace("mutableStateOf<ScheduledRecording?>(null)", "mutableStateOf<ScheduleStore.Item?>(null)")
+m=m.replace("mutableStateOf<ScheduledRecording?>(null)", "mutableStateOf<ScheduleStore.Sched?>(null)")
 
 # Recordings: confirmation for scheduled cancellation and saved-file deletion.
 m=m.replace('''    val activeRecording = Recorder.activeName.value
 ''','''    val activeRecording = Recorder.activeName.value
     var confirmRecordingFile by remember { mutableStateOf<File?>(null) }
-    var confirmSchedule by remember { mutableStateOf<ScheduleStore.Item?>(null) }
+    var confirmSchedule by remember { mutableStateOf<ScheduleStore.Sched?>(null) }
     var confirmStopRecording by remember { mutableStateOf(false) }
 ''',1)
 m=m.replace('''                    IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = {
