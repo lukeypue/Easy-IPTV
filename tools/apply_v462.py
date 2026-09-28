@@ -9,35 +9,12 @@ m=P.read_text(); g=G.read_text()
 # Temporary DVR is channel-clock based: EPG boundaries never reset or reshape it.
 m=m.replace("private const val DVR_HISTORY_MS = 45L * 60L * 1000L","private const val DVR_HISTORY_MS = 55L * 60L * 1000L",1)
 
-old='''        val showStart = nowShow?.startMs ?: 0L
-        val showEnd = nowShow?.endMs ?: 0L
-        val showDuration = (showEnd - showStart).coerceAtLeast(0L)
-        val hasProgramWindow = showDuration > 1_000L
-        val trueDvrStartWall = Timeshift.startedAtWallMs
-        val visibleDvrStartWall = if (trueDvrStartWall > 0L)
-            maxOf(trueDvrStartWall, nowMs - DVR_HISTORY_MS)
-        else 0L
-        val playWall = if (trueDvrStartWall > 0L) trueDvrStartWall + playerPosMs else nowMs
-        val programLiveFraction = if (hasProgramWindow)
-            ((nowMs - showStart).toFloat() / showDuration.toFloat()).coerceIn(0f, 1f)
-        else dvrProgress
-        val programPlayFraction = if (hasProgramWindow)
-            ((playWall - showStart).toFloat() / showDuration.toFloat()).coerceIn(0f, 1f)
-        else dvrProgress
-        val dvrStartFraction = if (hasProgramWindow && visibleDvrStartWall > 0L)
-            ((maxOf(visibleDvrStartWall, showStart) - showStart).toFloat() / showDuration.toFloat()).coerceIn(0f, 1f)
-        else 0f
-        val dvrEndFraction = if (hasProgramWindow && dvrActive)
-            ((minOf(nowMs, showEnd) - showStart).toFloat() / showDuration.toFloat()).coerceIn(0f, 1f)
-        else if (dvrActive) 1f else 0f'''
+pattern=r'''        val showStart = nowShow\?\.startMs \?: 0L[\\s\\S]*?        val dvrEndFraction = if \(hasProgramWindow && dvrActive\)[\\s\\S]*?else if \(dvrActive\) 1f else 0f'''
 new='''        // RYZOD_V462_CHANNEL_CLOCK_DVR
-        // The temporary DVR belongs to the CHANNEL, never to an EPG program.
-        // A show boundary therefore cannot jump/reset/reload the timeline.
+        // Temporary DVR belongs to the channel, never to an EPG program.
         val trueDvrStartWall = Timeshift.startedAtWallMs
         val availableMs = minOf(dvrWindowMs, DVR_HISTORY_MS).coerceAtLeast(0L)
-        val visibleDvrStartWall = if (trueDvrStartWall > 0L)
-            (nowMs - availableMs).coerceAtLeast(trueDvrStartWall)
-        else 0L
+        val visibleDvrStartWall = if (trueDvrStartWall > 0L) (nowMs - availableMs).coerceAtLeast(trueDvrStartWall) else 0L
         val playInVisibleMs = (playerPosMs - (dvrWindowMs - availableMs).coerceAtLeast(0L)).coerceIn(0L, availableMs.coerceAtLeast(1L))
         val programLiveFraction = 1f
         val programPlayFraction = if (availableMs > 0L) (playInVisibleMs.toFloat()/availableMs.toFloat()).coerceIn(0f,1f) else 1f
@@ -45,8 +22,8 @@ new='''        // RYZOD_V462_CHANNEL_CLOCK_DVR
         val dvrEndFraction = if (dvrActive) 1f else 0f
         val hasProgramWindow = false
         val showEnd = nowMs'''
-if old not in m: raise SystemExit("v4.62 timeline target missing")
-m=m.replace(old,new,1)
+m,n=re.subn(pattern,new,m,count=1)
+if n!=1: raise SystemExit("v4.62 timeline target missing")
 
 # Avoid the old fixed-byte cliff landing around the end of a normal 55-minute
 # viewing session. USB keeps the FAT-safe ceiling; internal gets enough headroom
