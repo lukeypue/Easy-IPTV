@@ -89,7 +89,7 @@ ds=ds.replace(state_anchor,state_anchor+"\n    var selectedDownload by remember 
 ds=ds.replace("onClick = { if (ready) onPlay(Playable(d.title, Uri.fromFile(File(d.path)).toString(), false)) }",
               "onClick = { selectedDownload=d }")
 close=ds.rfind("\n}")
-dialog=r'''
+dialog='''
         selectedDownload?.let { d ->
             val ready=DownloadStore.isReady(context,d)
             val resumable=!ready && DownloadStore.state(context,d.id)!=DownloadStore.STATE_RUNNING
