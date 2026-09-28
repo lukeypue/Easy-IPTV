@@ -8,3 +8,5 @@ retry clean download patch
 retry syntax clean
 
 retry eof normalized
+
+retry stripped eof
