@@ -4,3 +4,5 @@ Three guarded review passes before build/release.
 retry pause patch placement
 
 retry clean download patch
+
+retry syntax clean
