@@ -12,3 +12,5 @@ retry eof normalized
 retry stripped eof
 
 diagnostic generated download action
+
+retry real newline
