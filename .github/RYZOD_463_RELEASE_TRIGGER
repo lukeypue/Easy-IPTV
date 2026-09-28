@@ -6,3 +6,5 @@ retry pause patch placement
 retry clean download patch
 
 retry syntax clean
+
+retry eof normalized
