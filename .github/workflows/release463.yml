@@ -75,6 +75,7 @@ jobs:
           sed -i 's/versionCode = 84/versionCode = 85/; s/versionName = "4.60"/versionName = "4.61"/' app/build.gradle.kts
           python3 tools/apply_v462.py
           python3 tools/apply_v463.py
+          nl -ba app/src/main/java/com/easyiptv/player/MainActivity.kt | sed -n '5155,5170p'
           echo '--- AFTER V460 exact compile area ---'
           nl -ba app/src/main/java/com/easyiptv/player/MainActivity.kt | sed -n '5125,5335p'
       - name: Inspect generated MainActivity recovery area
