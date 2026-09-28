@@ -10,3 +10,5 @@ retry syntax clean
 retry eof normalized
 
 retry stripped eof
+
+diagnostic generated download action
