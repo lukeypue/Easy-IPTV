@@ -1,0 +1,87 @@
+@Composable
+private fun SearchTvKeyboardField(value: String, onValueChange: (String) -> Unit, modifier: Modifier = Modifier) {
+    TvTextField(value, onValueChange, "Search", modifier,
+        placeholder = "SEARCH movies, shows, actors, directors & live TV", searchStyle = true)
+}
+
+@Composable
+private fun RyzodKeyboardDialog(
+    value: String, onValueChange: (String) -> Unit, label: String, password: Boolean,
+    onClose: () -> Unit
+) {
+    var page by remember { mutableIntStateOf(0) }
+    var upper by remember { mutableStateOf(false) }
+    var row by remember { mutableIntStateOf(1) }
+    var col by remember { mutableIntStateOf(0) }
+    val rows = remember(page, upper) { KeyboardLayout.rows(page, upper) }
+    val keyFocus = remember { FocusRequester() }
+    fun press(key: String) {
+        when (key) {
+            "ABC", "!?#", "+=<>" -> { page = listOf("ABC", "!?#", "+=<>").indexOf(key); row = 0; col = page }
+            "SHIFT" -> upper = !upper
+            "DONE" -> onClose()
+            else -> onValueChange(KeyboardLayout.edit(value, key))
+        }
+    }
+    androidx.compose.ui.window.Dialog(onDismissRequest = onClose,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)) {
+        LaunchedEffect(Unit) { androidx.compose.runtime.withFrameNanos { }; keyFocus.requestFocus() }
+        androidx.compose.foundation.layout.BoxWithConstraints(
+            Modifier.fillMaxSize().background(Color(0xB3000000)).padding(10.dp), contentAlignment = Alignment.Center
+        ) {
+            val keyHeight = ((maxHeight - 108.dp) / 6).coerceIn(22.dp, 38.dp)
+            Column(Modifier.widthIn(max = 620.dp).fillMaxWidth(.96f)
+                .background(Color(0xFF0A2038), RoundedCornerShape(14.dp))
+                .border(2.dp, ElectricCyan, RoundedCornerShape(14.dp))
+                .focusRequester(keyFocus)
+                .onPreviewKeyEvent { ev ->
+                    if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                    val delta = when (ev.key) {
+                        Key.DirectionLeft -> -1 to 0
+                        Key.DirectionRight -> 1 to 0
+                        Key.DirectionUp -> 0 to -1
+                        Key.DirectionDown -> 0 to 1
+                        else -> null
+                    }
+                    if (delta != null) {
+                        val next = KeyboardLayout.move(rows, row, col, delta.first, delta.second)
+                        row = next.first; col = next.second; true
+                    } else when (ev.key) {
+                        Key.DirectionCenter, Key.Enter -> { press(rows[row][col]); true }
+                        Key.Backspace -> { press("DELETE"); true }
+                        else -> {
+                            val native = ev.nativeKeyEvent
+                            val code = native.unicodeChar
+                            if (code >= 32 && !native.isCtrlPressed && !native.isAltPressed) {
+                                onValueChange(value + String(Character.toChars(code))); true
+                            } else false
+                        }
+                    }
+                }.focusable().padding(8.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(label, color = ElectricCyan, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Text(if (password) "•".repeat(value.length.coerceAtMost(30)) else value.ifEmpty { "Type here" },
+                    color = Ink, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.fillMaxWidth().border(2.dp, Accent, RoundedCornerShape(6.dp)).padding(6.dp))
+                rows.forEachIndexed { ri, keys ->
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                        keys.forEachIndexed { ci, key ->
+                            val selected = row == ri && col == ci
+                            val activePage = ri == 0 && ci == page
+                            Box(Modifier.weight(if (key == "SPACE") 1.7f else 1f).height(keyHeight)
+                                .background(if (selected) FocusPink.copy(alpha = .32f) else if (activePage) ElectricCyan.copy(alpha = .22f) else PanelGlow,
+                                    RoundedCornerShape(6.dp))
+                                .border(if (selected) 3.dp else 1.dp, if (selected) FocusPink else ElectricCyan.copy(alpha = .35f), RoundedCornerShape(6.dp))
+                                .focusProperties { canFocus = false }
+                                .clickable { row = ri; col = ci; press(key) }, contentAlignment = Alignment.Center) {
+                                Text(if (key == "SHIFT") if (upper) "abc" else "ABC ↑" else key,
+                                    color = if (key == "DONE") NeonGreen else Ink,
+                                    fontWeight = FontWeight.Bold, fontSize = if (key.length > 3) 10.sp else 14.sp, maxLines = 1)
+                            }
+                        }
+                    }
+                }
+                Text("Page ${page + 1}/3 • D-pad moves • OK types • Back closes", color = ElectricCyan, fontSize = 10.sp)
+            }
+        }
+    }
+}

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item><shape><size android:width="160dp" android:height="90dp" /><solid android:color="#000000" /></shape></item>
+    <item android:width="90dp" android:height="90dp" android:gravity="center">
+        <bitmap android:src="@drawable/ryzod_artwork_464" android:gravity="fill" android:filter="true" />
+    </item>
+</layer-list>

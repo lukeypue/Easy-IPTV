@@ -1,0 +1,25 @@
+@Composable
+private fun TvTextField(
+    value: String, onValueChange: (String) -> Unit, label: String,
+    modifier: Modifier = Modifier, placeholder: String = "", password: Boolean = false,
+    keyboardType: KeyboardType = KeyboardType.Text, searchStyle: Boolean = false
+) {
+    var editing by remember { mutableStateOf(false) }
+    val fieldFocus = remember { FocusRequester() }
+    val borderColor = if (searchStyle) Accent else ElectricCyan
+    Column(modifier) {
+        Column(Modifier.fillMaxWidth().focusRequester(fieldFocus).tvFocus(RoundedCornerShape(12.dp))
+            .background(PanelGlow.copy(alpha = .72f), RoundedCornerShape(12.dp))
+            .border(2.dp, borderColor, RoundedCornerShape(12.dp))
+            .clickable { editing = true }.padding(horizontal = 14.dp, vertical = 10.dp)) {
+            Text(label, color = borderColor, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Text(when { value.isEmpty() -> placeholder.ifEmpty { "Press OK to type" }
+                password -> "•".repeat(value.length.coerceAtMost(24)); else -> value },
+                color = if (value.isEmpty()) Muted else Ink, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+    if (editing) RyzodKeyboardDialog(value, onValueChange, label, password) {
+        editing = false
+        runCatching { fieldFocus.requestFocus() }
+    }
+}
