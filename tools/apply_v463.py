@@ -97,7 +97,7 @@ dialog=r'''
                 title={Text(d.title,color=Ink,fontWeight=FontWeight.ExtraBold)},
                 confirmButton={Row(horizontalArrangement=Arrangement.spacedBy(5.dp)){
                     if(ready) TextButton(onClick={selectedDownload=null;onPlay(Playable(d.title,Uri.fromFile(File(d.path)).toString(),false))}){Text("PLAY",color=Accent,fontWeight=FontWeight.Bold)}
-                    if(resumable) TextButton(onClick={toast(context,DownloadStore.resume(context,prefs,d));items=DownloadStore.load(prefs);selectedDownload=null}){Text("RESUME",color=Accent,fontWeight=FontWeight.Bold)}
+                    if(DownloadStore.state(context,d.id)==DownloadStore.STATE_RUNNING) TextButton(onClick={toast(context,DownloadStore.pause(context,prefs,d));items=DownloadStore.load(prefs);selectedDownload=null}){Text("PAUSE",color=Accent,fontWeight=FontWeight.Bold)}\n                    if(resumable) TextButton(onClick={toast(context,DownloadStore.resume(context,prefs,d));items=DownloadStore.load(prefs);selectedDownload=null}){Text("RESUME",color=Accent,fontWeight=FontWeight.Bold)}
                     TextButton(onClick={selectedDownload=null;confirmDownload=d}){Text("DELETE",color=Live,fontWeight=FontWeight.Bold)}
                     TextButton(onClick={selectedDownload=null}){Text("CLOSE",color=Ink)}
                 }},dismissButton={})
