@@ -52,6 +52,11 @@ s=s.replace('''                    val body = r.body ?: throw IOException("Empty
 
                     body.byteStream().use { inp ->
                         FileOutputStream(part, appending).use { out ->''',1)
+s=s.replace('''        fun isActive(id: Long): Boolean = id != 0L && activeId == id''','''        fun pause(context: Context, id: Long) {
+            if (activeId == id) runCatching { activeCall?.cancel() }
+        }
+
+        fun isActive(id: Long): Boolean = id != 0L && activeId == id''',1)
 s=s.replace('if (!userCancelled) {\n                    runCatching { part.delete() }\n                    DownloadStore.mark(','if (!userCancelled) {\n                    DownloadStore.mark(',1)
 p.write_text(s)
 print("Applied resumable RYZOD 4.60 downloads")        fun pause(context: Context, id: Long) {
