@@ -9,7 +9,9 @@ m=P.read_text(); g=G.read_text()
 # Temporary DVR is channel-clock based: EPG boundaries never reset or reshape it.
 m=m.replace("private const val DVR_HISTORY_MS = 45L * 60L * 1000L","private const val DVR_HISTORY_MS = 55L * 60L * 1000L",1)
 
-pattern=r'''        val showStart = nowShow\?\.startMs \?: 0L[\\s\\S]*?        val dvrEndFraction = if \(hasProgramWindow && dvrActive\)[\\s\\S]*?else if \(dvrActive\) 1f else 0f'''
+start=m.find("        val showStart = nowShow?.startMs ?: 0L")
+end=m.find("\n\n        Box(", start)
+if start<0 or end<0: raise SystemExit("v4.62 timeline anchors missing")
 new='''        // RYZOD_V462_CHANNEL_CLOCK_DVR
         // Temporary DVR belongs to the channel, never to an EPG program.
         val trueDvrStartWall = Timeshift.startedAtWallMs
@@ -22,8 +24,7 @@ new='''        // RYZOD_V462_CHANNEL_CLOCK_DVR
         val dvrEndFraction = if (dvrActive) 1f else 0f
         val hasProgramWindow = false
         val showEnd = nowMs'''
-m,n=re.subn(pattern,new,m,count=1)
-if n!=1: raise SystemExit("v4.62 timeline target missing")
+m=m[:start]+new+m[end:]
 
 # Avoid the old fixed-byte cliff landing around the end of a normal 55-minute
 # viewing session. USB keeps the FAT-safe ceiling; internal gets enough headroom
