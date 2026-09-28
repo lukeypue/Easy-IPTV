@@ -152,7 +152,7 @@ for start, end in [('fun MoviesPane(', '/* ----------------------------- series 
 ''', 1)
     m = m[:a] + pane + m[b:]
 
-# The supplied PNG stays byte-for-byte unchanged. Android sizes it via drawables.
+# The supplied artwork stays byte-for-byte unchanged. Android sizes it via drawables.
 replace_section('@Composable\nprivate fun RyzodBrandMark(', '@Composable\nprivate fun RyzodGridBackground(', '''@Composable
 private fun RyzodBrandMark(compact: Boolean = true) {
     AsyncImage(
