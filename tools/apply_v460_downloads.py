@@ -9,6 +9,14 @@ needle='''    fun stopAndRemove(context: Context, prefs: SharedPreferences, item
     }
 '''
 rep=needle+'''
+    fun pause(context: Context, prefs: SharedPreferences, item: Item): String {
+        if (isReady(context, item)) return "Already downloaded."
+        val part = File(item.path + ".part")
+        if (isInFlight(context, item.id)) DownloadService.pause(context, item.id)
+        mark(context, item.id, STATE_FAILED, part.length().coerceAtLeast(0L), -1L, "Paused")
+        return "Paused. The next queued download will start."
+    }
+
     fun resume(context: Context, prefs: SharedPreferences, item: Item): String {
         if (item.url.isBlank()) return "This older download cannot resume. Add the title again."
         if (isReady(context, item)) return "Already downloaded."
@@ -46,4 +54,8 @@ s=s.replace('''                    val body = r.body ?: throw IOException("Empty
                         FileOutputStream(part, appending).use { out ->''',1)
 s=s.replace('if (!userCancelled) {\n                    runCatching { part.delete() }\n                    DownloadStore.mark(','if (!userCancelled) {\n                    DownloadStore.mark(',1)
 p.write_text(s)
-print("Applied resumable RYZOD 4.60 downloads")
+print("Applied resumable RYZOD 4.60 downloads")        fun pause(context: Context, id: Long) {
+            if (activeId == id) runCatching { activeCall?.cancel() }
+        }
+
+
