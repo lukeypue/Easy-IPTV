@@ -15,8 +15,8 @@ if start<0 or end<0: raise SystemExit("v4.62 timeline anchors missing")
 new='''        // RYZOD_V462_CHANNEL_CLOCK_DVR
         // Temporary DVR belongs to the channel, never to an EPG program.
         val trueDvrStartWall = Timeshift.startedAtWallMs
-        val availableMs = minOf(dvrWindowMs, DVR_HISTORY_MS).coerceAtLeast(0L)
-        val visibleDvrStartWall = if (trueDvrStartWall > 0L) (nowMs - availableMs).coerceAtLeast(trueDvrStartWall) else 0L
+        val availableMs = minOf(dvrWindowMs, 55L * 60L * 1000L).coerceAtLeast(0L)
+        val visibleDvrStartWall = if (trueDvrStartWall > 0L) (nowMs - availableMs).coerceAtLeast(trueDvrStartWall) else 0L\n        val showStart = visibleDvrStartWall
         val playInVisibleMs = (playerPosMs - (dvrWindowMs - availableMs).coerceAtLeast(0L)).coerceIn(0L, availableMs.coerceAtLeast(1L))
         val programLiveFraction = 1f
         val programPlayFraction = if (availableMs > 0L) (playInVisibleMs.toFloat()/availableMs.toFloat()).coerceIn(0f,1f) else 1f
