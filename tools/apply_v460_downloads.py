@@ -59,4 +59,4 @@ s=s.replace('''        fun isActive(id: Long): Boolean = id != 0L && activeId ==
         fun isActive(id: Long): Boolean = id != 0L && activeId == id''',1)
 s=s.replace('if (!userCancelled) {\n                    runCatching { part.delete() }\n                    DownloadStore.mark(','if (!userCancelled) {\n                    DownloadStore.mark(',1)
 p.write_text(s)
-print("Applied resumable RYZOD 4.60 downloads")\n
+print("Applied resumable RYZOD 4.60 downloads")
