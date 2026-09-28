@@ -47,7 +47,7 @@ m=m.replace('.height(30.dp)\\n                            .background(if(selecte
 m=m.replace('fontSize=if(k.length>3)8.sp else 12.sp,','fontSize=if(k.length>3)9.sp else 14.sp,')
 
 m="// RYZOD_V462_STREAM_DVR_KEYBOARD_STABILITY\n"+m
-g=re.sub(r'versionCode\\s*=\\s*\\d+','versionCode = 86',g,count=1)
-g=re.sub(r'versionName\\s*=\\s*"[^"]+"','versionName = "4.62"',g,count=1)
+g=re.sub(r'versionCode\s*=\s*\d+','versionCode = 86',g,count=1)
+g=re.sub(r'versionName\s*=\s*"[^"]+"','versionName = "4.62"',g,count=1)
 P.write_text(m); G.write_text(g)
 print("Applied RYZOD 4.62 stream/DVR/keyboard stability")
