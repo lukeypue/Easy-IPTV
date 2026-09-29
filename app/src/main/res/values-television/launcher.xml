@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- TV launchers that read the icon instead of the banner use the wide artwork too. -->
+    <item name="ryzod_launcher_464" type="mipmap">@drawable/ryzod_tv_banner_466</item>
+</resources>
