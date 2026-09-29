@@ -1,0 +1,33 @@
+name: RYZOD 4.65 item menu regression check
+on:
+  push:
+    branches: [ryzod-v4.65-item-menus]
+permissions:
+  contents: read
+jobs:
+  menu-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Generate current RYZOD source
+        run: |
+          bash tools/generate_v463.sh
+          python3 tools/apply_v464.py
+          python3 tools/prepare_v465_tests.py
+          if test -f tools/apply_v465.py; then python3 tools/apply_v465.py; fi
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Exercise actual recording and download screens
+        run: gradle testDebugUnitTest --no-daemon --stacktrace
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: RYZOD-465-menu-test-results
+          path: |
+            app/build/test-results
+            app/build/reports/tests
