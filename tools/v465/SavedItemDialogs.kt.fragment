@@ -1,0 +1,65 @@
+private data class SavedItemAction(
+    val label: String,
+    val enabled: Boolean = true,
+    val destructive: Boolean = false,
+    val onClick: () -> Unit
+)
+
+@Composable
+private fun SavedItemPopup(title: String, message: String, actions: List<SavedItemAction>, onClose: () -> Unit) {
+    val focus = remember(actions.size) { List(actions.size) { FocusRequester() } }
+    val enabled = actions.indices.filter { actions[it].enabled }
+    val first = enabled.firstOrNull()
+    AlertDialog(
+        onDismissRequest = onClose,
+        modifier = Modifier.widthIn(max = 680.dp).fillMaxWidth(.94f),
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
+        containerColor = SurfaceCol,
+        title = { Text(title, color = Ink, fontWeight = FontWeight.ExtraBold, maxLines = 3, overflow = TextOverflow.Ellipsis) },
+        text = { Text(message, color = Muted, fontSize = 13.sp) },
+        confirmButton = {
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                actions.forEachIndexed { index, action ->
+                    val position = enabled.indexOf(index)
+                    TextButton(
+                        enabled = action.enabled,
+                        modifier = Modifier.focusRequester(focus[index])
+                            .focusProperties {
+                                if (position >= 0) {
+                                    left = focus[enabled[(position + enabled.size - 1) % enabled.size]]
+                                    right = focus[enabled[(position + 1) % enabled.size]]
+                                }
+                            }.tvFocus(RoundedCornerShape(14.dp)),
+                        onClick = action.onClick
+                    ) {
+                        Text(action.label, fontWeight = FontWeight.Bold, fontSize = 12.sp, maxLines = 1,
+                            color = when {
+                                !action.enabled -> Muted.copy(alpha = .45f)
+                                action.destructive -> Live
+                                action.label == "CLOSE" || action.label == "CANCEL" -> Ink
+                                else -> Accent
+                            })
+                    }
+                }
+            }
+            LaunchedEffect(first) {
+                androidx.compose.runtime.withFrameNanos { }
+                first?.let { focus[it].requestFocus() }
+            }
+        },
+        dismissButton = {}
+    )
+}
+
+@Composable
+private fun ConfirmSavedItemDelete(title: String, kind: String, onCancel: () -> Unit, onDelete: () -> Unit) {
+    SavedItemPopup(
+        title = "Delete $kind?",
+        message = "Are you sure you want to delete this $kind?\n\n$title",
+        actions = listOf(
+            SavedItemAction("CANCEL", onClick = onCancel),
+            SavedItemAction("YES, DELETE", destructive = true, onClick = onDelete)
+        ),
+        onClose = onCancel
+    )
+}
