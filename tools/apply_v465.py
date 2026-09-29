@@ -11,6 +11,9 @@ def once(s, old, new):
         raise SystemExit(f'Expected one 4.65 target, found {s.count(old)}: {old[:100]}')
     return s.replace(old, new, 1)
 
+m = once(m, 'import androidx.compose.foundation.verticalScroll',
+         'import androidx.compose.foundation.horizontalScroll\nimport androidx.compose.foundation.rememberScrollState\nimport androidx.compose.foundation.verticalScroll')
+
 start = m.index('fun DownloadsPane(')
 end = m.index('/* ----------------------------- recordings', start)
 d = m[start:end]

@@ -3,6 +3,8 @@ package com.easyiptv.player
 import android.content.Context
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.*
 import org.junit.Before
@@ -56,6 +58,20 @@ class LibraryItemMenusTest {
         ui.onNodeWithText("PLAY").assertIsNotEnabled()
         ui.onNodeWithText("RESUME").assertIsEnabled()
         ui.onNodeWithText("DELETE").assertIsEnabled()
+    }
+
+    @Test fun remoteOpensMenuAndWrapsFromPlayToClose() {
+        download(DownloadStore.STATE_SUCCESS)
+        ui.setContent { DownloadsPane(prefs) { played = it } }
+        ui.onNodeWithText("Test movie").performSemanticsAction(SemanticsActions.RequestFocus) { it() }
+        ui.onNodeWithText("Test movie").performKeyInput { pressKey(Key.DirectionCenter) }
+        ui.onNodeWithText("PLAY").assertIsFocused()
+        ui.onNodeWithText("PLAY").performKeyInput { pressKey(Key.DirectionLeft) }
+        ui.onNodeWithText("CLOSE").assertIsFocused()
+        ui.onNodeWithText("CLOSE").performKeyInput { pressKey(Key.DirectionCenter) }
+        ui.onNodeWithText("Test movie").assertExists()
+        ui.onNodeWithText("CLOSE").assertDoesNotExist()
+        ui.runOnIdle { assertNull(played) }
     }
 
     @Test fun pauseDownloadPreservesPartialFileAndItem() {
