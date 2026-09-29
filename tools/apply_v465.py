@@ -17,6 +17,10 @@ m = once(m, 'import androidx.compose.foundation.verticalScroll',
 start = m.index('fun DownloadsPane(')
 end = m.index('/* ----------------------------- recordings', start)
 d = m[start:end]
+d = once(d, '    var selectedDownload by remember { mutableStateOf<DownloadStore.Item?>(null) }',
+         '    var selectedDownload by remember { mutableStateOf<DownloadStore.Item?>(null) }\n    var downloadStates by remember { mutableStateOf<Map<Long, Int>>(emptyMap()) }')
+d = once(d, '            items = DownloadStore.load(prefs)\n            val inFlight',
+         '            items = DownloadStore.load(prefs)\n            downloadStates = items.associate { it.id to DownloadStore.state(context, it.id) }\n            val inFlight')
 d = once(d, 'items(items) { d ->', 'items(items, key = { it.id }) { d ->')
 d = once(d, '                    val btnFocus = remember { FocusRequester() }\n', '')
 d = once(d, '                            .focusProperties { right = btnFocus }\n', '')
@@ -35,7 +39,8 @@ d = d[:a] + '''    confirmDownload?.let { d ->
     }
     selectedDownload?.let { d ->
         val ready = DownloadStore.isReady(context, d)
-        val inFlight = DownloadStore.isInFlight(context, d.id)
+        val state = downloadStates[d.id] ?: DownloadStore.state(context, d.id)
+        val inFlight = state == DownloadStore.STATE_RUNNING || state == DownloadStore.STATE_PENDING
         SavedItemPopup(
             title = d.title,
             message = if (ready) "Saved for offline watching." else "Finish downloading to play. Pause keeps your progress; Resume continues the download.",
