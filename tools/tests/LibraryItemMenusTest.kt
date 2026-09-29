@@ -17,6 +17,7 @@ import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28], qualifiers = "w960dp-h540dp-land")
+@OptIn(ExperimentalTestApi::class)
 class LibraryItemMenusTest {
     @get:Rule val ui = createComposeRule()
     private val context = ApplicationProvider.getApplicationContext<Context>()
