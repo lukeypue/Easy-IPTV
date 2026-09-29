@@ -86,6 +86,31 @@ class LibraryItemMenusTest {
         }
     }
 
+    @Test fun openDownloadMenuUpdatesWhenTransferCompletes() {
+        val item = download(DownloadStore.STATE_RUNNING)
+        ui.setContent { DownloadsPane(prefs) { played = it } }
+        ui.onNodeWithText("Test movie").performClick()
+        ui.onNodeWithText("PLAY").assertIsNotEnabled()
+        ui.runOnIdle {
+            File(item.path).writeBytes(byteArrayOf(1, 2, 3))
+            DownloadStore.mark(context, item.id, DownloadStore.STATE_SUCCESS, 3, 3)
+        }
+        ui.mainClock.advanceTimeBy(2_000)
+        ui.onNodeWithText("PLAY").assertIsEnabled()
+        ui.onNodeWithText("PAUSE DOWNLOAD").assertDoesNotExist()
+    }
+
+    @Test fun openDownloadMenuOffersResumeAfterConnectionFailure() {
+        val item = download(DownloadStore.STATE_RUNNING)
+        ui.setContent { DownloadsPane(prefs) { played = it } }
+        ui.onNodeWithText("Test movie").performClick()
+        ui.onNodeWithText("RESUME").assertIsNotEnabled()
+        ui.runOnIdle { DownloadStore.mark(context, item.id, DownloadStore.STATE_FAILED, 3, 30, "Connection lost") }
+        ui.mainClock.advanceTimeBy(2_000)
+        ui.onNodeWithText("RESUME").assertIsEnabled()
+        ui.onNodeWithText("PAUSE DOWNLOAD").assertIsNotEnabled()
+    }
+
     @Test fun downloadDeleteRequiresConfirmationAndCancelKeepsFile() {
         val item = download(DownloadStore.STATE_SUCCESS)
         ui.setContent { DownloadsPane(prefs) { played = it } }
