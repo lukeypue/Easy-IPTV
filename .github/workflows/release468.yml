@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Generate reviewed 4.68 source
-        run: bash tools/generate_v467.sh
+        run: |\n          bash tools/generate_v463.sh\n          python3 tools/apply_v464.py\n          python3 tools/prepare_v465_tests.py\n          python3 tools/apply_v465.py\n          python3 tools/apply_v466.py\n          python3 tools/apply_v467.py\n          python3 tools/apply_v467_memory.py\n          python3 tools/apply_v467_review.py\n          python3 tools/apply_v467_epg.py\n          python3 tools/apply_v467_icons.py\n          python3 tools/apply_v468.py
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
