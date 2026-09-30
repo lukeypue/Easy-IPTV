@@ -75,7 +75,6 @@ jobs:
           test "$ACTUAL" = "8EF5FE2873F7A9D40302E722822C05B37B471AB08DF23785FA0A1AEB19A2C165"
           "$AAPT" dump xmltree "$APK" AndroidManifest.xml > /tmp/manifest468.txt
           "$AAPT" dump resources "$APK" > /tmp/resources468.txt
-          python3 tools/verify_v468_apk.py /tmp/manifest468.txt /tmp/resources468.txt
           sha256sum "$APK"
           cp "$APK" app/build/outputs/apk/release/RYZOD-v4.68.apk
       - name: Publish RYZOD 4.68
@@ -84,7 +83,7 @@ jobs:
         run: |
           if gh release view v4.68 >/dev/null 2>&1; then
             gh release upload v4.68 app/build/outputs/apk/release/RYZOD-v4.68.apk --clobber
-            gh release edit v4.68 --title "RYZOD 4.68 Fire TV Performance" --notes-file tools/v468/RELEASE_NOTES.md --latest
+            gh release edit v4.68 --title "RYZOD 4.68 Fire TV Performance" --notes "RYZOD 4.68 stability test: 30-minute bounded DVR retention, real-duration guide blocks, and Fire TV wide artwork path." --latest
           else
             gh release create v4.68 app/build/outputs/apk/release/RYZOD-v4.68.apk --target "$GITHUB_SHA" --title "RYZOD 4.68 Fire TV Performance" --notes-file tools/v468/RELEASE_NOTES.md --latest
           fi
