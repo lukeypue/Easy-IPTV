@@ -4,7 +4,7 @@ on:
   push:
     branches: [ryzod-v4.55-verified]
     paths:
-      - '.github/RYZOD_468_RELEASE_TRIGGER'
+      - '.github/RYZOD_467_RELEASE_TRIGGER'
 permissions:
   contents: write
 concurrency:
