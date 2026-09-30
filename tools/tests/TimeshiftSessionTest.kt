@@ -31,13 +31,16 @@ class TimeshiftSessionTest {
         assertTrue(message, condition())
     }
 
-    private fun storageContext(dir: File): Context {
+    private fun storageContext(dir: File, probe: (() -> Unit)? = null): Context {
         val app = ApplicationProvider.getApplicationContext<Context>()
         ShadowStatFs.registerStats(dir.absolutePath, 2_000_000, 1_500_000, 1_500_000)
         return object : ContextWrapper(app) {
             override fun getApplicationContext(): Context = this
             override fun getFilesDir(): File = dir
-            override fun getExternalFilesDirs(type: String?): Array<File> = emptyArray()
+            override fun getExternalFilesDirs(type: String?): Array<File> {
+                probe?.invoke()
+                return emptyArray()
+            }
         }
     }
 
@@ -81,9 +84,15 @@ class TimeshiftSessionTest {
         dir.deleteRecursively()
     }
 
-    @Test fun recordingTeeKeepsUsingTheSingleExistingProviderConnection() {
+    @Test fun recordingTeeWaitsForAsyncStorageAndUsesOnlyTheExistingProviderConnection() {
         val dir = Files.createTempDirectory("ryzod-record-tee").toFile()
-        val context = storageContext(dir)
+        val probeEntered = CountDownLatch(1)
+        val releaseProbe = CountDownLatch(1)
+        val teeEntered = CountDownLatch(1)
+        val context = storageContext(dir) {
+            probeEntered.countDown()
+            check(releaseProbe.await(5, TimeUnit.SECONDS))
+        }
         TsProvider().use { provider ->
             val recording = File(dir, "recording.ts")
             val keepRecording = AtomicBoolean(true)
@@ -91,7 +100,8 @@ class TimeshiftSessionTest {
             var recordingError: Throwable? = null
             try {
                 Timeshift.start(context, provider.url("last"))
-                waitFor("DVR did not begin") { Timeshift.bytesWritten >= 188 * 3 }
+                assertTrue(probeEntered.await(3, TimeUnit.SECONDS))
+                assertTrue(Timeshift.isPreparing)
                 val service = Robolectric.buildService(RecordingService::class.java).get()
                 val tee = RecordingService::class.java.getDeclaredMethod(
                     "teeFromTimeshift", FileOutputStream::class.java, java.lang.Long::class.java,
@@ -101,11 +111,16 @@ class TimeshiftSessionTest {
                     try {
                         FileOutputStream(recording).use { out ->
                             val active: () -> Boolean = { keepRecording.get() }
+                            teeEntered.countDown()
                             tee.invoke(service, out, null, active)
                         }
                     } catch (error: Throwable) { recordingError = error }
                     finally { finished.countDown() }
                 }
+                assertTrue(teeEntered.await(3, TimeUnit.SECONDS))
+                assertFalse("Tee must wait for its preparing DVR", finished.await(100, TimeUnit.MILLISECONDS))
+                assertEquals(0, provider.requests.get())
+                releaseProbe.countDown()
                 waitFor("Tee did not save bytes") { recording.length() >= 188 * 6 }
                 keepRecording.set(false)
                 assertTrue(finished.await(3, TimeUnit.SECONDS))
@@ -113,6 +128,7 @@ class TimeshiftSessionTest {
                 assertEquals("Recording the watched channel must not open another provider stream", 1, provider.requests.get())
                 assertEquals(0x47.toByte(), recording.inputStream().use { it.read().toByte() })
             } finally {
+                releaseProbe.countDown()
                 keepRecording.set(false)
                 Timeshift.stop()
             }

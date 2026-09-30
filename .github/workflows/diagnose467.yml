@@ -13,18 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Generate locked 4.66 baseline and candidate changes
-        run: |
-          bash tools/generate_v463.sh
-          python3 tools/apply_v464.py
-          python3 tools/prepare_v465_tests.py
-          python3 tools/apply_v465.py
-          python3 tools/apply_v466.py
-          if test -f tools/apply_v467.py; then python3 tools/apply_v467.py; fi
-          if test -f tools/apply_v467_memory.py; then python3 tools/apply_v467_memory.py; fi
-          python3 tools/apply_v467_review.py
-          python3 tools/apply_v467_icons.py
-          cp tools/tests/*Test.kt app/src/test/java/com/easyiptv/player/
+      - name: Generate complete reviewed 4.67 candidate
+        run: bash tools/generate_v467.sh
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -34,17 +24,6 @@ jobs:
           gradle-version: '8.7'
       - name: Run performance and existing feature tests
         run: gradle testDebugUnitTest --no-daemon --stacktrace
-      - name: Inspect shipped 4.66 launcher resources
-        if: always()
-        run: |
-          curl --fail --location --silent --show-error https://github.com/lukeypue/Easy-IPTV/releases/download/v4.66/RYZOD-v4.66.apk -o /tmp/RYZOD-v4.66.apk
-          echo '307d6421ac6cca983c8a1dee026a6f1648b6c0e0f1ec9026d1eac012576d2a7c  /tmp/RYZOD-v4.66.apk' | sha256sum --check
-          AAPT="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -n 1)"
-          mkdir -p app/build/launcher-audit
-          "$AAPT" dump xmltree /tmp/RYZOD-v4.66.apk AndroidManifest.xml > app/build/launcher-audit/manifest466.txt
-          "$AAPT" dump resources /tmp/RYZOD-v4.66.apk > app/build/launcher-audit/resources466.txt
-          cat app/build/launcher-audit/manifest466.txt
-          grep -A 25 -E 'spec resource .*ryzod_(launcher|tv_banner|tv_artwork)' app/build/launcher-audit/resources466.txt || true
       - name: Summarize test results
         if: always()
         run: |
@@ -64,7 +43,5 @@ jobs:
         if: always()
         with:
           name: RYZOD-467-tests
-          path: |
-            app/build/test-results
-            app/build/launcher-audit
+          path: app/build/test-results
           if-no-files-found: error
