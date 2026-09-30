@@ -11,3 +11,5 @@ python3 tools/apply_v467_memory.py
 python3 tools/apply_v467_review.py
 python3 tools/apply_v467_epg.py
 python3 tools/apply_v467_icons.py
+
+python3 tools/apply_v468.py
