@@ -9,14 +9,7 @@ m=P.read_text(); g=G.read_text()
 u=m.find("ZAKO_V431_FRESH_UPDATE")
 if u < 0: raise SystemExit("fresh updater marker missing")
 start=m.find("val freshUrl = java.net.URL(",u)
-end=m.find("val normalizedRaw = raw.trim().let { body ->
-    // Defensive recovery for a manifest accidentally published with literal \\n escapes.
-    if (body.startsWith("{\\\\n") || body.contains("\\\\n  \\\"versionCode\\\"")) {
-        body.replace("\\\\r", "").replace("\\\\n", "\n").replace("\\\\t", "\t")
-    } else body
-}
-val obj = org.json.JSONObject(normalizedRaw)",start)
-if start < 0 or end < 0: raise SystemExit("fresh updater block bounds missing")
+end=m.find("val obj = org.json.JSONObject(raw)",start)\nif start < 0 or end < 0: raise SystemExit("fresh updater block bounds missing")
 end += len("val obj = org.json.JSONObject(raw)")
 new='''// RYZOD_V458_UPDATER_RELIABILITY
 val manifestUrl = "https://raw.githubusercontent.com/lukeypue/Easy-IPTV/main/latest-v2.json?ts=" + System.currentTimeMillis()
