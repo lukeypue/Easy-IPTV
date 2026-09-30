@@ -15,8 +15,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Generate locked baseline and reviewed 4.68 changes
-        run: bash tools/generate_v467.sh
       - name: Verify existing recording and playback safeguards
         run: |
           python3 tools/verify_v449_schedule_core.py
