@@ -137,7 +137,7 @@ internal object Timeshift {
             if (!isCurrent(session)) return
             val root = File(target.root, "session-${System.currentTimeMillis()}-${session.id}-${System.nanoTime()}")
             session.root = root
-            val historyMs = if (target.kind == StorageKind.USB) 8L * 60L * 60L * 1000L else 90L * 60L * 1000L
+            val historyMs = 30L * 60L * 1000L
             val localRing = TimeshiftRing.open(root, historyMs, target.maxRingBytes)
             session.ring = localRing
             session.storageKind = target.kind
