@@ -9,3 +9,4 @@ Fresh repaired-branch release run.
 Self-trigger registered workflow.
 Kick reliable inspection-release workflow.
 Trigger RYZOD 4.69 updater bootstrap.
+Retry 4.69 after validated patcher normalization.
