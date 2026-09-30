@@ -17,7 +17,7 @@ class LauncherActivityIconTest {
     private val context get() = ApplicationProvider.getApplicationContext<Context>()
 
     @Test
-    @Config(sdk = [25, 28, 30], qualifiers = "w960dp-h540dp-land-television-xhdpi")
+    @Config(sdk = [26, 28, 30], qualifiers = "w960dp-h540dp-land-television-xhdpi")
     fun televisionLaunchActivityExposesLegacyBitmapIconAndLogo() {
         val pm = context.packageManager
         val activity = pm.getActivityInfo(ComponentName(context, MainActivity::class.java), 0)

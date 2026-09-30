@@ -56,4 +56,23 @@ class TimeshiftRingRegressionTest {
             assertTrue(dir.listFiles()!!.size <= 3)
         } finally { ring.close(); dir.deleteRecursively() }
     }
+
+    @Test fun pinnedReaderProtectsItsSegmentUntilReleaseThenReclaimsHistory() {
+        val dir = Files.createTempDirectory("ryzod-ring-lease").toFile()
+        val ring = TimeshiftRing.open(dir, 3_600_000, 8L * 1024 * 1024)
+        try {
+            ring.append(packets, packets.size)
+            val reader = ring.openReader(0)
+            repeat(50) { ring.append(packets, packets.size) }
+            assertEquals("An active recording reader keeps its segment", 0L, ring.snapshot().oldestVirtualByte)
+            val bytes = ByteArray(188)
+            assertEquals(188, reader.read(bytes))
+            assertEquals(0x47.toByte(), bytes[0])
+            reader.close()
+            val snapshot = ring.snapshot()
+            assertTrue(snapshot.oldestVirtualByte > 0L)
+            assertTrue("Lease release must immediately reclaim excess history", snapshot.totalBytesOnDisk <= 8L * 1024 * 1024)
+        } finally { ring.close(); dir.deleteRecursively() }
+    }
+
 }
