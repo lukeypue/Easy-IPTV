@@ -5,7 +5,6 @@ import android.content.Context
 import android.graphics.drawable.AdaptiveIconDrawable
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
-import android.graphics.drawable.LayerDrawable
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.*
 import org.junit.Test
@@ -19,13 +18,8 @@ class LauncherArtworkTest {
     private val context get() = ApplicationProvider.getApplicationContext<Context>()
 
     private fun assertWideArtwork(drawable: Drawable?) {
-        assertTrue("TV tile must be a full-width drawable", drawable is LayerDrawable)
-        val tile = drawable as LayerDrawable
-        assertEquals(1, tile.numberOfLayers)
-        val density = context.resources.displayMetrics.density
-        assertEquals((160 * density).toInt(), tile.getLayerWidth(0))
-        assertEquals((90 * density).toInt(), tile.getLayerHeight(0))
-        val artwork = tile.getDrawable(0) as BitmapDrawable
+        assertTrue("TV tile must be a legacy bitmap drawable", drawable is BitmapDrawable)
+        val artwork = drawable as BitmapDrawable
         val expected = context.getDrawable(R.drawable.ryzod_tv_artwork_466) as BitmapDrawable
         assertTrue("The wide artwork must fill the tile", artwork.bitmap.sameAs(expected.bitmap))
         assertEquals(16.0 / 9.0, artwork.bitmap.width.toDouble() / artwork.bitmap.height, 0.002)

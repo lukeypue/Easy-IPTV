@@ -7,6 +7,10 @@ import android.os.Looper
 import androidx.media3.common.Player
 import androidx.test.core.app.ApplicationProvider
 import java.io.File
+import java.io.ByteArrayInputStream
+import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketTimeoutException
@@ -139,10 +143,12 @@ class DvrOwnershipRegressionTest {
                 waitFor("New DVR did not ingest") { Timeshift.bytesWritten >= 188 * 3 }
                 val generation = Timeshift.generation()
                 var response: String? = null
-                val until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+                // This must finish before the independent header timeout: a
+                // tune actively retires clients, rather than waiting them out.
+                val until = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(1500)
                 while (response == null && System.nanoTime() < until) {
                     Socket("127.0.0.1", serverPort()).use { socket ->
-                        socket.soTimeout = 500
+                        socket.soTimeout = 250
                         socket.getOutputStream().write(("GET /live?offset=0&generation=$generation HTTP/1.1\r\nHost: localhost\r\n\r\n").toByteArray())
                         response = runCatching { socket.getInputStream().bufferedReader().readLine() }.getOrNull()
                     }
@@ -162,6 +168,38 @@ class DvrOwnershipRegressionTest {
         }
     }
 
+    @Test fun cancellingRecordingPreventsItsQueuedTakeoverFromStoppingPlayback() {
+        val dir = Files.createTempDirectory("ryzod-cancel-takeover").toFile()
+        val context = storageContext(dir)
+        val service = Robolectric.buildService(RecordingService::class.java).create()
+        ReviewProvider().use { provider ->
+            try {
+                val watchedPlayer = Playback.open(context, prefs(),
+                    listOf(Playable("watch", provider.url("watch"), true)), 0, null, false)
+                waitFor("DVR did not prime") { Timeshift.bytesWritten >= 512 * 1024 }
+                shadowOf(Looper.getMainLooper()).idle()
+                service.get().onStartCommand(Intent(app, RecordingService::class.java).apply {
+                    action = RecordingService.ACTION_START
+                    putExtra("url", provider.url("record"))
+                    putExtra("name", "cancelled takeover")
+                }, 0, 1)
+                waitFor("Recording never entered its direct takeover") { Recorder.usesProviderConnection }
+                service.get().onStartCommand(Intent(app, RecordingService::class.java).apply {
+                    action = RecordingService.ACTION_STOP
+                }, 0, 2)
+                shadowOf(Looper.getMainLooper()).idle()
+                assertSame("A cancelled recording's queued takeover stopped the watched channel",
+                    watchedPlayer, Playback.player)
+                assertTrue(Timeshift.active)
+                assertEquals("Cancelled takeover must not open its provider stream", 1L, provider.recordRequest.count)
+            } finally {
+                service.destroy()
+                Playback.releaseAll()
+                dir.deleteRecursively()
+            }
+        }
+    }
+
     @Test fun incompleteHttpHeadersHaveADeadlineWithoutNeedingAChannelChange() {
         val dir = Files.createTempDirectory("ryzod-http-deadline").toFile()
         ReviewProvider().use { provider ->
@@ -173,6 +211,50 @@ class DvrOwnershipRegressionTest {
                     val closed = try { socket.getInputStream().read() == -1 } catch (_: SocketTimeoutException) { false }
                     assertTrue("Incomplete headers held a reader worker indefinitely", closed)
                 }
+            } finally {
+                Timeshift.stop()
+                stopServer()
+                dir.deleteRecursively()
+            }
+        }
+    }
+
+    @Test fun failedResponseHeaderReleasesItsRealRingReaderLease() {
+        val dir = Files.createTempDirectory("ryzod-header-lease").toFile()
+        ReviewProvider().use { provider ->
+            try {
+                Timeshift.start(storageContext(dir), provider.url("watch"))
+                waitFor("DVR did not ingest") { Timeshift.bytesWritten >= 188 * 3 }
+                val generation = Timeshift.generation()
+                val attemptedWrite = AtomicBoolean()
+                // Fault-inject only the physical socket output. Request parsing,
+                // generation validation, ring acquisition and cleanup stay real.
+                val failedSocket = object : Socket() {
+                    override fun setTcpNoDelay(on: Boolean) { }
+                    override fun setSoTimeout(timeout: Int) { }
+                    override fun getInputStream(): InputStream = ByteArrayInputStream(
+                        "GET /live?offset=0&generation=$generation HTTP/1.1\r\nHost: localhost\r\n\r\n".toByteArray())
+                    override fun getOutputStream(): OutputStream = object : OutputStream() {
+                        override fun write(value: Int) {
+                            attemptedWrite.set(true)
+                            throw IOException("Retired client disconnected during response header")
+                        }
+                    }
+                }
+                val (type, instance) = serverInstance()
+                val handle = type.declaredMethods.single { it.name == "handle" }.apply { isAccessible = true }
+                if (handle.parameterCount == 1) handle.invoke(instance, failedSocket)
+                else handle.invoke(instance, failedSocket, generation)
+                assertTrue("Fixture never reached the HTTP response", attemptedWrite.get())
+                val session = Timeshift::class.java.getDeclaredField("current").apply { isAccessible = true }.get(Timeshift)
+                val ring = session.javaClass.getDeclaredField("ring").apply { isAccessible = true }.get(session) as TimeshiftRing
+                val leases = synchronized(ring) {
+                    @Suppress("UNCHECKED_CAST")
+                    val segments = TimeshiftRing::class.java.getDeclaredField("segments").apply { isAccessible = true }
+                        .get(ring) as Iterable<TimeshiftRing.SegmentMeta>
+                    segments.sumOf { it.activeReaders }
+                }
+                assertEquals("A failed response header stranded a disk retention lease", 0, leases)
             } finally {
                 Timeshift.stop()
                 stopServer()

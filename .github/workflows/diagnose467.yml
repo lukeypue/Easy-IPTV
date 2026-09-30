@@ -22,6 +22,8 @@ jobs:
           python3 tools/apply_v466.py
           if test -f tools/apply_v467.py; then python3 tools/apply_v467.py; fi
           if test -f tools/apply_v467_memory.py; then python3 tools/apply_v467_memory.py; fi
+          python3 tools/apply_v467_review.py
+          python3 tools/apply_v467_icons.py
           cp tools/tests/*Test.kt app/src/test/java/com/easyiptv/player/
       - uses: actions/setup-java@v5
         with:
