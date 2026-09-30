@@ -1,0 +1,110 @@
+                            val buf = ByteArray(64 * 1024)
+                            val carry = ByteArray(188)
+                            var carryLen = 0
+                            var aligned = false
+                            var pend = java.io.ByteArrayOutputStream()
+                            var lastChunkAt = android.os.SystemClock.elapsedRealtime()
+
+                            fun appendToRing(data: ByteArray, off: Int, len: Int) {
+                                if (len <= 0) return
+                                try {
+                                    if (!isCurrent(session)) return
+                                    localRing.append(data, off, len)
+                                } catch (e: Exception) {
+                                    storageFailed = true
+                                    throw e
+                                }
+                                session.bytesWritten += len
+                                session.lastByteAt = System.currentTimeMillis()
+                            }
+
+                            fun writePackets(data: ByteArray, off0: Int, len0: Int) {
+                                // ZAKO_V441_TS_RESYNC: never assume a weak TS feed stays aligned forever.
+                                // If one expected packet boundary loses 0x47, stop feeding corrupt framing,
+                                // preserve the remaining bytes, and let the existing three-sync detector
+                                // re-lock on the next read.
+                                var off = off0
+                                var len = len0
+                                if (carryLen > 0) {
+                                    val need = 188 - carryLen
+                                    if (len < need) {
+                                        System.arraycopy(data, off, carry, carryLen, len)
+                                        carryLen += len
+                                        return
+                                    }
+                                    System.arraycopy(data, off, carry, carryLen, need)
+                                    if (carry[0] != 0x47.toByte()) {
+                                        session.syncResyncEvents++
+                                        StabilityCore.note("dvr_ts_sync_lost source=carry count=$session.syncResyncEvents")
+                                        aligned = false
+                                        pend = java.io.ByteArrayOutputStream()
+                                        pend.write(carry, 0, 188)
+                                        pend.write(data, off + need, len - need)
+                                        carryLen = 0
+                                        return
+                                    }
+                                    appendToRing(carry, 0, 188)
+                                    carryLen = 0
+                                    off += need
+                                    len -= need
+                                }
+                                val whole = (len / 188) * 188
+                                if (whole > 0) {
+                                    var badAt = -1
+                                    var pos = off
+                                    val end = off + whole
+                                    while (pos < end) {
+                                        if (data[pos] != 0x47.toByte()) {
+                                            badAt = pos
+                                            break
+                                        }
+                                        pos += 188
+                                    }
+                                    if (badAt >= 0) {
+                                        val goodLen = badAt - off
+                                        if (goodLen > 0) appendToRing(data, off, goodLen)
+                                        session.syncResyncEvents++
+                                        StabilityCore.note("dvr_ts_sync_lost source=body count=$session.syncResyncEvents")
+                                        aligned = false
+                                        pend = java.io.ByteArrayOutputStream()
+                                        pend.write(data, badAt, (off + len) - badAt)
+                                        carryLen = 0
+                                        return
+                                    }
+                                    appendToRing(data, off, whole)
+                                }
+                                val rem = len - whole
+                                if (rem > 0) {
+                                    System.arraycopy(data, off + whole, carry, 0, rem)
+                                    carryLen = rem
+                                }
+                            }
+
+                            while (isCurrent(session)) {
+                                val n = inp.read(buf)
+                                if (n < 0) break
+                                if (!isCurrent(session)) break
+                                val nowChunkAt = android.os.SystemClock.elapsedRealtime()
+                                val inputGapMs = nowChunkAt - lastChunkAt
+                                if (inputGapMs >= 750L) {
+                                    session.weakGapEvents++
+                                    StabilityCore.note("dvr_input_gap ms=$inputGapMs count=$session.weakGapEvents bytes=$session.bytesWritten")
+                                }
+                                lastChunkAt = nowChunkAt
+                                if (!aligned) {
+                                    pend.write(buf, 0, n)
+                                    val pb = pend.toByteArray()
+                                    val sync = findTsSync(pb, pb.size)
+                                    if (sync >= 0) {
+                                        aligned = true
+                                        writePackets(pb, sync, pb.size - sync)
+                                        pend = java.io.ByteArrayOutputStream()
+                                    } else if (pb.size > 8192) {
+                                        val keep = pb.copyOfRange(pb.size - 512, pb.size)
+                                        pend = java.io.ByteArrayOutputStream()
+                                        pend.write(keep)
+                                    }
+                                    continue
+                                }
+                                writePackets(buf, 0, n)
+                            }

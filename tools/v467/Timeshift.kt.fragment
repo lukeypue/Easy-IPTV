@@ -1,0 +1,209 @@
+internal object Timeshift {
+    // RYZOD_V467_SESSION_OWNERSHIP: a retired writer can only mutate its own
+    // counters/ring. One ingest worker and one cleanup worker serve all tunes.
+    private class Session(val id: Long, val requestedAt: Long) {
+        @Volatile var cancelled = false
+        @Volatile var running = true
+        @Volatile var preparing = true
+        @Volatile var call: okhttp3.Call? = null
+        @Volatile var ring: TimeshiftRing? = null
+        @Volatile var root: File? = null
+        @Volatile var bytesWritten = 0L
+        @Volatile var startedAtElapsedMs = 0L
+        @Volatile var startedAtWallMs = 0L
+        @Volatile var lastByteAt = 0L
+        @Volatile var weakGapEvents = 0L
+        @Volatile var syncResyncEvents = 0L
+        @Volatile var reconnectEvents = 0L
+        @Volatile var storageKind: StorageKind? = null
+    }
+
+    private val ids = java.util.concurrent.atomic.AtomicLong()
+    private val control = Any()
+    @Volatile private var current: Session? = null
+    private val ingest = java.util.concurrent.ThreadPoolExecutor(
+        1, 1, 0L, java.util.concurrent.TimeUnit.MILLISECONDS,
+        java.util.concurrent.ArrayBlockingQueue<Runnable>(1),
+        java.util.concurrent.ThreadFactory { r -> Thread(r, "ryzod-dvr-ingest").apply { isDaemon = true } },
+        java.util.concurrent.ThreadPoolExecutor.DiscardOldestPolicy()
+    )
+    private val cleanup = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "ryzod-dvr-cleanup").apply { isDaemon = true }
+    }
+    // Accessed only by the single ingest worker. Scan abandoned data once per
+    // storage root per process, never during a remote/UI callback.
+    private val inspectedRoots = HashSet<String>()
+    private val liveStreamClient = Net.streamClient.newBuilder()
+        .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(12, java.util.concurrent.TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .build()
+
+    val bytesWritten: Long get() = current?.bytesWritten ?: 0L
+    val active: Boolean get() = current?.let { it.running && !it.cancelled } == true
+    val isPreparing: Boolean get() = current?.let { it.preparing && !it.cancelled && it.running } == true
+    val file: File? get() = null // compatibility only; no append-only file
+    val startedAtElapsedMs: Long get() = current?.startedAtElapsedMs ?: 0L
+    val startedAtWallMs: Long get() = current?.startedAtWallMs ?: 0L
+    val lastByteAt: Long get() = current?.lastByteAt ?: 0L
+    val throughputBps: Double get() = 0.0
+    val weakGapEvents: Long get() = current?.weakGapEvents ?: 0L
+    val syncResyncEvents: Long get() = current?.syncResyncEvents ?: 0L
+    val reconnectEvents: Long get() = current?.reconnectEvents ?: 0L
+    val storageKind: StorageKind? get() = current?.storageKind
+
+    fun windowMs(): Long = startedAtElapsedMs.let { start ->
+        if (start > 0L) (android.os.SystemClock.elapsedRealtime() - start).coerceAtLeast(0L) else 0L
+    }
+    fun snapshot(): TimeshiftRing.RingSnapshot? = current?.ring?.snapshot()
+    fun oldestVirtualByte(): Long = snapshot()?.oldestVirtualByte ?: bytesWritten
+    fun newestVirtualByte(): Long = snapshot()?.newestVirtualByte ?: bytesWritten
+    fun generation(): Long = ids.get()
+    private fun isCurrent(session: Session): Boolean = current === session && !session.cancelled && session.running
+
+    fun openReader(virtualOffset: Long, expectedGeneration: Long = generation()): TimeshiftRing.RingReader? {
+        val session = current ?: return null
+        if (session.id != expectedGeneration || !isCurrent(session)) return null
+        val reader = runCatching { session.ring?.openReader(virtualOffset) }.getOrNull()
+        if (!isCurrent(session)) { reader?.close(); return null }
+        return reader
+    }
+
+    private fun findTsSync(b: ByteArray, len: Int): Int {
+        var i = 0
+        while (i + 376 < len) {
+            if (b[i] == 0x47.toByte() && b[i + 188] == 0x47.toByte() && b[i + 376] == 0x47.toByte()) return i
+            i++
+        }
+        return -1
+    }
+
+    /** Accept a channel change immediately. All storage discovery, probing,
+     * directory creation and stale-file cleanup happens on workers. */
+    fun start(context: Context, url: String, prefs: SharedPreferences? = null,
+              onReady: ((Boolean) -> Unit)? = null): Boolean {
+        val session: Session
+        val old: Session?
+        synchronized(control) {
+            old = current
+            old?.cancelled = true
+            session = Session(ids.incrementAndGet(), android.os.SystemClock.elapsedRealtime())
+            current = session
+        }
+        old?.call?.cancel()
+        val app = context.applicationContext
+        ingest.execute { runSession(app, url, session, onReady) }
+        return true
+    }
+
+    fun stop() {
+        val old = synchronized(control) {
+            val previous = current
+            previous?.cancelled = true
+            current = null
+            ids.incrementAndGet()
+            previous
+        }
+        old?.call?.cancel()
+        // The one ingest worker exits promptly on cancellation and queues its
+        // own cleanup. No UI thread waits for a writer, fsync, or file deletion.
+    }
+
+    private fun ready(session: Session, ok: Boolean, callback: ((Boolean) -> Unit)?) {
+        session.preparing = false
+        if (!ok) session.running = false
+        if (callback != null) android.os.Handler(android.os.Looper.getMainLooper()).post {
+            if (current === session && !session.cancelled) callback(ok)
+        }
+    }
+
+    private fun runSession(context: Context, url: String, session: Session, callback: ((Boolean) -> Unit)?) {
+        if (!isCurrent(session)) return
+        try {
+            val target = LiveStorageManager.choose(context)
+            if (!isCurrent(session)) return
+            if (target == null) {
+                StabilityCore.note("dvr_storage_unavailable session=${session.id}")
+                ready(session, false, callback)
+                return
+            }
+            if (inspectedRoots.add(target.root.absolutePath)) {
+                val abandoned = target.root.listFiles()?.filter {
+                    (it.isFile && it.name.startsWith("segment-") && it.name.endsWith(".ts")) ||
+                        (it.isDirectory && it.name.startsWith("session-"))
+                }.orEmpty()
+                cleanup.execute { abandoned.forEach { runCatching { it.deleteRecursively() } } }
+            }
+            if (!isCurrent(session)) return
+            val root = File(target.root, "session-${System.currentTimeMillis()}-${session.id}-${System.nanoTime()}")
+            session.root = root
+            val historyMs = if (target.kind == StorageKind.USB) 8L * 60L * 60L * 1000L else 90L * 60L * 1000L
+            val localRing = TimeshiftRing.open(root, historyMs, target.maxRingBytes)
+            session.ring = localRing
+            session.storageKind = target.kind
+            session.startedAtElapsedMs = android.os.SystemClock.elapsedRealtime()
+            session.startedAtWallMs = System.currentTimeMillis()
+            session.lastByteAt = session.startedAtWallMs
+            if (!isCurrent(session)) return
+            TimeshiftServer.ensureStarted()
+            if (!isCurrent(session)) return
+            if (TimeshiftServer.port == 0) {
+                ready(session, false, callback)
+                return
+            }
+            StabilityCore.note("dvr_ring_start session=${session.id} kind=${target.kind} budget=${target.maxRingBytes} setupMs=${android.os.SystemClock.elapsedRealtime() - session.requestedAt}")
+            ready(session, true, callback)
+            var reconnectDelayMs = 250L
+            while (isCurrent(session)) {
+                val beforeAttempt = session.bytesWritten
+                var storageFailed = false
+                try {
+                    val req = Request.Builder().url(url).header("User-Agent", Net.UA).build()
+                    val c = liveStreamClient.newCall(req)
+                    session.call = c
+                    if (!isCurrent(session)) { c.cancel(); break }
+                    c.execute().use { resp ->
+                        if (!resp.isSuccessful) throw java.io.IOException("HTTP ${resp.code}")
+                        val inp = resp.body?.byteStream()
+                        if (inp != null) {
+/* INGEST_PACKETS */
+                        }
+                    }
+                } catch (e: Exception) {
+                    if (!isCurrent(session)) break
+                    if (storageFailed) {
+                        StabilityCore.note("dvr_ring_write_failed session=${session.id} kind=${session.storageKind} type=${e.javaClass.simpleName}")
+                        session.running = false
+                        break
+                    }
+                    session.reconnectEvents++
+                    StabilityCore.note("dvr_provider_reconnect session=${session.id} count=${session.reconnectEvents} gaps=${session.weakGapEvents} resyncs=${session.syncResyncEvents} type=${e.javaClass.simpleName}")
+                } finally {
+                    session.call = null
+                }
+                if (session.bytesWritten > beforeAttempt + 188L * 50L) reconnectDelayMs = 250L
+                else reconnectDelayMs = (reconnectDelayMs * 2L).coerceAtMost(2_000L)
+                // Short cancellation-aware waits keep the next queued tune from
+                // waiting behind an old channel's exponential reconnect delay.
+                val until = android.os.SystemClock.elapsedRealtime() + reconnectDelayMs
+                while (isCurrent(session) && android.os.SystemClock.elapsedRealtime() < until) Thread.sleep(25)
+            }
+        } catch (e: Exception) {
+            if (isCurrent(session)) {
+                StabilityCore.note("dvr_session_failed session=${session.id} type=${e.javaClass.simpleName}")
+                ready(session, false, callback)
+            }
+        } finally {
+            session.running = false
+            session.preparing = false
+            session.call?.cancel()
+            session.call = null
+            val retiredRing = session.ring
+            val retiredRoot = session.root
+            cleanup.execute {
+                runCatching { retiredRing?.close() }
+                runCatching { retiredRoot?.delete() }
+            }
+        }
+    }
+}
