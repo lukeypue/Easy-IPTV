@@ -12,46 +12,11 @@ s=p.read_text()
 start=s.index("@Composable\nprivate fun LiveGridGuide(")
 end=s.index("\nprivate fun chIndexOf(", start)
 block=s[start:end]
-old='''                    repeat(4) { slot ->
-                        val slotStart = windowStart + slot * halfHour
-                        val slotEnd = slotStart + halfHour
-                        val entry = schedule.firstOrNull { slotStart in it.startMs until it.endMs }
-                            ?: schedule.firstOrNull { it.startMs in slotStart until slotEnd }
-                        val airing = entry != null && now in entry.startMs until entry.endMs
-                        Box(
-                            Modifier
-                                .weight(1f)
-                                .fillMaxHeight()
-                                .padding(start = 3.dp)
-                                .tvFocus(RoundedCornerShape(8.dp))
-                                .background(
-                                    if (airing) ProgramCyan.copy(alpha = 0.20f) else Surface2,
-                                    RoundedCornerShape(8.dp)
-                                )
-                                .clickable(enabled = entry != null) {
-                                    if (entry != null) selected = ch to entry
-                                }
-                                .padding(horizontal = 6.dp, vertical = 5.dp)
-                        ) {
-                            if (entry == null) {
-                                Text("—", color = Muted, fontSize = 10.sp)
-                            } else {
-                                Column {
-                                    Text(
-                                        entry.title,
-                                        color = if (airing) ProgramCyan else Ink,
-                                        fontSize = 10.sp,
-                                        fontWeight = if (airing) FontWeight.ExtraBold else FontWeight.SemiBold,
-                                        maxLines = 2, overflow = TextOverflow.Ellipsis
-                                    )
-                                    Text(
-                                        "${fmt.format(Date(entry.startMs))}–${fmt.format(Date(entry.endMs))}",
-                                        color = Ink, fontSize = 8.sp, maxLines = 1
-                                    )
-                                }
-                            }
-                        }
-                    }'''
+# Replace the slot loop structurally so harmless formatting changes in earlier
+# generators cannot break this release transform.
+slot_start=block.index("                    repeat(4) { slot ->")
+marker="                    }\\n                }\\n            }\\n        }"
+slot_end=block.index(marker, slot_start)+len("                    }")
 new='''                    val windowEnd = windowStart + 4L * halfHour
                     val visiblePrograms = schedule
                         .filter { it.endMs > windowStart && it.startMs < windowEnd }
@@ -60,48 +25,28 @@ new='''                    val windowEnd = windowStart + 4L * halfHour
                         var cursor = windowStart
                         visiblePrograms.forEach { entry ->
                             val visibleStart = maxOf(cursor, maxOf(entry.startMs, windowStart))
-                            if (visibleStart > cursor) {
-                                Spacer(Modifier.weight((visibleStart - cursor).toFloat(), fill = true))
-                            }
+                            if (visibleStart > cursor) Spacer(Modifier.weight((visibleStart - cursor).toFloat(), fill = true))
                             val visibleEnd = minOf(entry.endMs, windowEnd)
                             if (visibleEnd > visibleStart) {
                                 val airing = now in entry.startMs until entry.endMs
-                                Box(
-                                    Modifier
-                                        .weight((visibleEnd - visibleStart).toFloat(), fill = true)
-                                        .fillMaxHeight()
-                                        .padding(start = 3.dp)
-                                        .tvFocus(RoundedCornerShape(8.dp))
-                                        .background(
-                                            if (airing) ProgramCyan.copy(alpha = 0.20f) else Surface2,
-                                            RoundedCornerShape(8.dp)
-                                        )
-                                        .clickable { selected = ch to entry }
-                                        .padding(horizontal = 6.dp, vertical = 5.dp)
-                                ) {
+                                Box(Modifier.weight((visibleEnd - visibleStart).toFloat(), fill = true).fillMaxHeight()
+                                    .padding(start = 3.dp).tvFocus(RoundedCornerShape(8.dp))
+                                    .background(if (airing) ProgramCyan.copy(alpha = 0.20f) else Surface2, RoundedCornerShape(8.dp))
+                                    .clickable { selected = ch to entry }.padding(horizontal = 6.dp, vertical = 5.dp)) {
                                     Column {
-                                        Text(
-                                            entry.title,
-                                            color = if (airing) ProgramCyan else Ink,
-                                            fontSize = 10.sp,
+                                        Text(entry.title, color = if (airing) ProgramCyan else Ink, fontSize = 10.sp,
                                             fontWeight = if (airing) FontWeight.ExtraBold else FontWeight.SemiBold,
-                                            maxLines = 2, overflow = TextOverflow.Ellipsis
-                                        )
-                                        Text(
-                                            "${fmt.format(Date(entry.startMs))}–${fmt.format(Date(entry.endMs))}",
-                                            color = Ink, fontSize = 8.sp, maxLines = 1
-                                        )
+                                            maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                        Text("\${fmt.format(Date(entry.startMs))}–\${fmt.format(Date(entry.endMs))}",
+                                            color = Ink, fontSize = 8.sp, maxLines = 1)
                                     }
                                 }
                                 cursor = visibleEnd
                             }
                         }
-                        if (cursor < windowEnd) {
-                            Spacer(Modifier.weight((windowEnd - cursor).toFloat(), fill = true))
-                        }
+                        if (cursor < windowEnd) Spacer(Modifier.weight((windowEnd - cursor).toFloat(), fill = true))
                     }'''
-if block.count(old)!=1: raise SystemExit("4.68 guide slot anchor changed")
-block=block.replace(old,new,1)
+block=block[:slot_start]+new+block[slot_end:]
 s=s[:start]+block+s[end:]
 
 # Keep the fallback ring bounded to 30 minutes. 4.68's first priority is
