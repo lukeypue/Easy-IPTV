@@ -3,7 +3,12 @@ package com.easyiptv.player
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Base64
+import android.util.JsonReader
+import android.util.JsonToken
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
@@ -30,26 +35,37 @@ data class Movie(
     val name: String,
     val icon: String?,
     val categoryId: String?,
-    val url: String
+    val url: String,
+    val searchMeta: String = ""
 )
 data class SeriesItem(
     val id: String,
     val name: String,
     val icon: String?,
-    val categoryId: String?
+    val categoryId: String?,
+    val searchMeta: String = ""
 )
 data class Episode(
     val id: String,
     val title: String,
     val season: Int,
     val episodeNum: Int,
-    val url: String
+    val url: String,
+    val plot: String = ""
 )
 data class EpgEntry(
     val title: String,
     val desc: String,
     val startMs: Long,
     val endMs: Long
+)
+
+data class MediaInfo(
+    val description: String = "",
+    val year: String = "",
+    val rating: String = "",
+    val genre: String = "",
+    val duration: String = ""
 )
 
 data class AppData(
@@ -159,22 +175,9 @@ object DataCache {
                 )
             }
             root.put("live", liveArr)
-            val movArr = JSONArray()
-            data.movies.forEach { m ->
-                movArr.put(
-                    JSONObject().put("i", m.id).put("n", m.name).put("ic", m.icon ?: "")
-                        .put("c", m.categoryId ?: "").put("u", m.url)
-                )
-            }
-            root.put("movies", movArr)
-            val serArr = JSONArray()
-            data.series.forEach { s ->
-                serArr.put(
-                    JSONObject().put("i", s.id).put("n", s.name).put("ic", s.icon ?: "")
-                        .put("c", s.categoryId ?: "")
-                )
-            }
-            root.put("series", serArr)
+            // ZAKO_V436_SLIM_JSON_CACHE: VOD/Series rows are persisted once in SQLite,
+            // not duplicated into one giant JSON cache as well.
+            CatalogDiskIndex.get(context).replaceCatalog(key, data.movies, data.series)
             file(context, key).writeText(root.toString())
         } catch (e: Exception) {
             // Cache is a nice-to-have; never let it break the app.
@@ -198,27 +201,8 @@ object DataCache {
                     )
                 }
             } ?: emptyList()
-            val movies = root.optJSONArray("movies")?.let { arr ->
-                (0 until arr.length()).map { i ->
-                    val o = arr.getJSONObject(i)
-                    Movie(
-                        id = o.optString("i"), name = o.optString("n"),
-                        icon = o.optString("ic").ifBlank { null },
-                        categoryId = o.optString("c").ifBlank { null },
-                        url = o.optString("u")
-                    )
-                }
-            } ?: emptyList()
-            val series = root.optJSONArray("series")?.let { arr ->
-                (0 until arr.length()).map { i ->
-                    val o = arr.getJSONObject(i)
-                    SeriesItem(
-                        id = o.optString("i"), name = o.optString("n"),
-                        icon = o.optString("ic").ifBlank { null },
-                        categoryId = o.optString("c").ifBlank { null }
-                    )
-                }
-            } ?: emptyList()
+            val movies = CatalogDiskIndex.get(context).loadMovies(key)
+            val series = CatalogDiskIndex.get(context).loadSeries(key)
             if (live.isEmpty() && movies.isEmpty() && series.isEmpty()) return null
             AppData(
                 liveCats = catsFromJson(root.optJSONArray("liveCats")),
@@ -256,6 +240,20 @@ object Net {
             return resp.body?.string() ?: throw RuntimeException("Empty response")
         }
     }
+
+    // ZAKO_V432_STREAMING_CATALOG: bounded-memory JSON access for huge catalogs.
+    fun <T> withJsonReader(url: String, block: (JsonReader) -> T): T {
+        val req = Request.Builder().url(url).header("User-Agent", UA).build()
+        client.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}")
+            val body = resp.body ?: throw RuntimeException("Empty response")
+            body.charStream().use { chars ->
+                val reader = JsonReader(chars)
+                reader.isLenient = true
+                return block(reader)
+            }
+        }
+    }
 }
 
 /* ----------------------------- source interface ----------------------------- */
@@ -276,6 +274,8 @@ interface Source {
     /** Catalog-only refresh used after live playback has settled. */
     suspend fun loadOnDemandOnly(): AppData = loadAll()
     suspend fun epg(channelId: String, limit: Int): List<EpgEntry>
+    /** Lazy detail call. M3U/default sources simply have no separate metadata endpoint. */
+    suspend fun mediaInfo(movieId: String): MediaInfo? = null
     suspend fun seriesEpisodes(seriesId: String): Map<Int, List<Episode>>
 }
 
@@ -348,14 +348,75 @@ class XtreamSource(rawHost: String, private val user: String, private val pass: 
         throw RuntimeException("$action returned an unexpected response")
     }
 
-    /** One retry, sequentially. Loading two giant VOD JSON documents at the
-     * same time was needlessly hard on Fire TV memory and some IPTV panels
-     * throttle concurrent player_api calls. */
-    private fun getArrayWithRetry(action: String): JSONArray {
+    /**
+     * Stream one Xtream catalog object at a time. Supports the direct array used
+     * by normal panels and the common {data/results/streams/movies/vod/series}
+     * wrappers without materializing the whole document.
+     */
+    private fun streamRows(
+        action: String,
+        resetBeforeAttempt: () -> Unit = {},
+        consume: (Map<String, String>) -> Unit
+    ) {
+        // ZAKO_V433_RETRY_RESET: a failed mid-stream response may have emitted rows.
+        // Clear the destination before retrying so the second attempt cannot duplicate them.
         var last: Throwable? = null
         repeat(2) { attempt ->
+            resetBeforeAttempt()
             try {
-                return parseXtreamArray(Net.get(api(action)), action)
+                Net.withJsonReader(api(action)) { reader ->
+                    val wrappers = when (action) {
+                        "get_vod_streams" -> setOf("data", "results", "streams", "movies", "vod")
+                        "get_series" -> setOf("data", "results", "series")
+                        else -> setOf("data", "results")
+                    }
+
+                    fun readArray() {
+                        reader.beginArray()
+                        while (reader.hasNext()) {
+                            if (reader.peek() != JsonToken.BEGIN_OBJECT) {
+                                reader.skipValue()
+                                continue
+                            }
+                            val row = HashMap<String, String>(16)
+                            reader.beginObject()
+                            while (reader.hasNext()) {
+                                val key = reader.nextName()
+                                val value: String? = when (reader.peek()) {
+                                    JsonToken.STRING, JsonToken.NUMBER -> reader.nextString()
+                                    JsonToken.BOOLEAN -> reader.nextBoolean().toString()
+                                    JsonToken.NULL -> { reader.nextNull(); null }
+                                    else -> { reader.skipValue(); null }
+                                }
+                                if (value != null) row[key] = value
+                            }
+                            reader.endObject()
+                            consume(row)
+                        }
+                        reader.endArray()
+                    }
+
+                    when (reader.peek()) {
+                        JsonToken.BEGIN_ARRAY -> readArray()
+                        JsonToken.BEGIN_OBJECT -> {
+                            var found = false
+                            reader.beginObject()
+                            while (reader.hasNext()) {
+                                val key = reader.nextName()
+                                if (!found && key in wrappers && reader.peek() == JsonToken.BEGIN_ARRAY) {
+                                    readArray()
+                                    found = true
+                                } else {
+                                    reader.skipValue()
+                                }
+                            }
+                            reader.endObject()
+                            if (!found) throw RuntimeException("$action returned an unexpected response")
+                        }
+                        else -> throw RuntimeException("$action returned an unexpected response")
+                    }
+                }
+                return
             } catch (t: Throwable) {
                 last = t
                 if (attempt == 0) Thread.sleep(350)
@@ -370,19 +431,21 @@ class XtreamSource(rawHost: String, private val user: String, private val pass: 
                 runCatching { parseCats(Net.get(api("get_live_categories"))) }.getOrDefault(emptyList())
             }
             val liveD = async {
-                val arr = JSONArray(Net.get(api("get_live_streams")))
-                (0 until arr.length()).map { i ->
-                    val o = arr.getJSONObject(i)
-                    val id = o.opt("stream_id")?.toString() ?: ""
-                    LiveChannel(
+                // ZAKO_V433_STREAMING_LIVE: Live now uses the same bounded-memory parser
+                // as VOD/Series. LinkedHashMap preserves provider order and removes duplicate IDs.
+                val byId = LinkedHashMap<String, LiveChannel>()
+                streamRows("get_live_streams", resetBeforeAttempt = { byId.clear() }) { o ->
+                    val id = o["stream_id"]?.takeIf { it.isNotBlank() } ?: return@streamRows
+                    byId[id] = LiveChannel(
                         id = id,
-                        name = o.optString("name", "Channel"),
-                        icon = o.optString("stream_icon", "").ifBlank { null },
-                        categoryId = o.opt("category_id")?.toString(),
+                        name = o["name"]?.ifBlank { "Channel" } ?: "Channel",
+                        icon = o["stream_icon"].orEmpty().ifBlank { null },
+                        categoryId = o["category_id"],
                         url = "$base/live/$user/$pass/$id.ts",
-                        epgId = o.optString("epg_channel_id", "").ifBlank { null }
+                        epgId = o["epg_channel_id"].orEmpty().ifBlank { null }
                     )
                 }
+                byId.values.toList()
             }
             AppData(
                 liveCats = liveCatsD.await(),
@@ -396,52 +459,58 @@ class XtreamSource(rawHost: String, private val user: String, private val pass: 
     }
 
     override suspend fun loadOnDemandOnly(): AppData = withContext(Dispatchers.IO) {
-        // IMPORTANT: do these SEQUENTIALLY. Movie and series catalogs can each
-        // be several megabytes; concurrent body.string()+JSONArray parsing was
-        // the likely reason v4.18 could show live TV but an empty VOD library on
-        // low-memory Fire TV devices. Categories are optional and fetched only
-        // after the actual playable lists succeed.
+        // ZAKO_V432_STREAMING_CATALOG: Movies and Series remain sequential, but
+        // each network response is now decoded one object at a time. At no point
+        // do we keep raw response String + JSONArray + final list together.
         var movieErr: Throwable? = null
         var seriesErr: Throwable? = null
 
-        val movies = try {
-            val arr = getArrayWithRetry("get_vod_streams")
-            (0 until arr.length()).mapNotNull { i ->
-                val o = arr.optJSONObject(i) ?: return@mapNotNull null
-                val id = o.opt("stream_id")?.toString()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                val ext = o.optString("container_extension", "mp4").ifBlank { "mp4" }
-                Movie(
-                    id = id,
-                    name = o.optString("name", "Movie"),
-                    icon = o.optString("stream_icon", o.optString("movie_image", "")).ifBlank { null },
-                    categoryId = o.opt("category_id")?.toString(),
-                    url = "$base/movie/$user/$pass/$id.$ext"
+        val movies = ArrayList<Movie>()
+        try {
+            streamRows("get_vod_streams", resetBeforeAttempt = { movies.clear() }) { o ->
+                val id = o["stream_id"]?.takeIf { it.isNotBlank() } ?: return@streamRows
+                val ext = o["container_extension"]?.ifBlank { "mp4" } ?: "mp4"
+                val searchMeta = listOf(
+                    o["cast"].orEmpty(), o["director"].orEmpty(), o["genre"].orEmpty(),
+                    o["plot"].orEmpty(), o["releaseDate"] ?: o["releasedate"].orEmpty()
+                ).filter { it.isNotBlank() }.joinToString(" • ")
+                movies.add(
+                    Movie(
+                        id = id,
+                        name = o["name"]?.ifBlank { "Movie" } ?: "Movie",
+                        icon = (o["stream_icon"] ?: o["movie_image"]).orEmpty().ifBlank { null },
+                        categoryId = o["category_id"],
+                        url = "$base/movie/$user/$pass/$id.$ext",
+                        searchMeta = searchMeta
+                    )
                 )
             }
         } catch (t: Throwable) {
             movieErr = t
-            emptyList()
         }
 
-        val series = try {
-            val arr = getArrayWithRetry("get_series")
-            (0 until arr.length()).mapNotNull { i ->
-                val o = arr.optJSONObject(i) ?: return@mapNotNull null
-                val id = (o.opt("series_id") ?: o.opt("id"))?.toString()?.takeIf { it.isNotBlank() }
-                    ?: return@mapNotNull null
-                SeriesItem(
-                    id = id,
-                    name = o.optString("name", "Series"),
-                    icon = o.optString("cover", o.optString("stream_icon", "")).ifBlank { null },
-                    categoryId = o.opt("category_id")?.toString()
+        val series = ArrayList<SeriesItem>()
+        try {
+            streamRows("get_series", resetBeforeAttempt = { series.clear() }) { o ->
+                val id = (o["series_id"] ?: o["id"])?.takeIf { it.isNotBlank() } ?: return@streamRows
+                val searchMeta = listOf(
+                    o["cast"].orEmpty(), o["director"].orEmpty(), o["genre"].orEmpty(),
+                    o["plot"].orEmpty(), o["releaseDate"] ?: o["releasedate"].orEmpty()
+                ).filter { it.isNotBlank() }.joinToString(" • ")
+                series.add(
+                    SeriesItem(
+                        id = id,
+                        name = o["name"]?.ifBlank { "Series" } ?: "Series",
+                        icon = (o["cover"] ?: o["stream_icon"]).orEmpty().ifBlank { null },
+                        categoryId = o["category_id"],
+                        searchMeta = searchMeta
+                    )
                 )
             }
         } catch (t: Throwable) {
             seriesErr = t
-            emptyList()
         }
 
-        // Do not make a missing category endpoint hide otherwise valid content.
         val vodCats = runCatching { parseCats(Net.get(api("get_vod_categories"))) }.getOrDefault(emptyList())
         val seriesCats = runCatching { parseCats(Net.get(api("get_series_categories"))) }.getOrDefault(emptyList())
 
@@ -523,24 +592,65 @@ class XtreamSource(rawHost: String, private val user: String, private val pass: 
 
     override suspend fun epg(channelId: String, limit: Int): List<EpgEntry> =
         withContext(Dispatchers.IO) {
-            try {
-                var out = runCatching {
-                    parseEpgListings(Net.get(api("get_short_epg") + "&stream_id=$channelId&limit=$limit"))
-                }.getOrDefault(emptyList())
+            suspend fun requestEntries(url: String): List<EpgEntry> = try {
+                val body = EpgRequests.get(url)
+                currentCoroutineContext().ensureActive()
+                parseEpgListings(body)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                currentCoroutineContext().ensureActive()
+                emptyList()
+            }
 
+            try {
+                var out = requestEntries(api("get_short_epg") + "&stream_id=$channelId&limit=$limit")
+                currentCoroutineContext().ensureActive()
                 if (out.isEmpty()) {
-                    // Fallback: full-day guide table, then keep shows that haven't ended yet.
-                    out = runCatching {
-                        parseEpgListings(Net.get(api("get_simple_data_table") + "&stream_id=$channelId"))
-                    }.getOrDefault(emptyList())
+                    // Keep the existing fallback for a current channel, never for
+                    // a request cancelled because the viewer has already moved on.
+                    out = requestEntries(api("get_simple_data_table") + "&stream_id=$channelId")
                     val now = System.currentTimeMillis()
                     out = out.filter { it.endMs >= now }.sortedBy { it.startMs }.take(limit)
                 }
+                currentCoroutineContext().ensureActive()
                 out
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
+                currentCoroutineContext().ensureActive()
                 emptyList()
             }
         }
+
+    override suspend fun mediaInfo(movieId: String): MediaInfo? = withContext(Dispatchers.IO) {
+        try {
+            val id = URLEncoder.encode(movieId, "UTF-8")
+            val root = JSONObject(Net.get(api("get_vod_info") + "&vod_id=$id"))
+            val info = root.optJSONObject("info") ?: JSONObject()
+            val movie = root.optJSONObject("movie_data") ?: JSONObject()
+
+            fun pick(vararg keys: String): String {
+                for (k in keys) {
+                    val a = info.optString(k, "").trim()
+                    if (a.isNotBlank() && a != "null") return a
+                    val b = movie.optString(k, "").trim()
+                    if (b.isNotBlank() && b != "null") return b
+                }
+                return ""
+            }
+
+            MediaInfo(
+                description = pick("plot", "description", "overview"),
+                year = pick("year", "releasedate", "releaseDate"),
+                rating = pick("rating", "rating_5based", "tmdb_rating"),
+                genre = pick("genre"),
+                duration = pick("duration", "duration_secs")
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
 
     override suspend fun seriesEpisodes(seriesId: String): Map<Int, List<Episode>> =
         withContext(Dispatchers.IO) {
@@ -563,8 +673,10 @@ class XtreamSource(rawHost: String, private val user: String, private val pass: 
                 val ext = o.optString("container_extension", info?.optString("container_extension", "mp4") ?: "mp4")
                     .ifBlank { "mp4" }
                 val title = o.optString("title", info?.optString("title", "") ?: "").ifBlank { "Episode $num" }
+                val infoPlot = info?.optString("plot", info?.optString("description", "") ?: "") ?: ""
+                val plot = o.optString("plot", o.optString("description", infoPlot)).trim()
                 out.getOrPut(season) { ArrayList() }.add(
-                    Episode(id, title, season, num, "$base/series/$user/$pass/$id.$ext")
+                    Episode(id, title, season, num, "$base/series/$user/$pass/$id.$ext", plot)
                 )
             }
 
@@ -689,6 +801,9 @@ object EpgStore {
     val loading = androidx.compose.runtime.mutableStateOf(false)
     val loaded = androidx.compose.runtime.mutableStateOf(false)
 
+    val status = androidx.compose.runtime.mutableStateOf("")
+    val revision = androidx.compose.runtime.mutableIntStateOf(0)
+    @Volatile private var requestGeneration = 0L
     private var loadedUrl: String? = null
     private var byChannel: Map<String, List<EpgEntry>> = emptyMap()
     private var nameToId: Map<String, String> = emptyMap()
@@ -699,23 +814,27 @@ object EpgStore {
     /** Search every channel's schedule for upcoming shows matching the text. */
     fun search(q: String, limit: Int = 40): List<GuideHit> {
         val query = q.trim()
+        val titleQuery = TitleQuery(query)
         if (query.length < 2 || byChannel.isEmpty()) return emptyList()
         val now = System.currentTimeMillis()
-        val out = ArrayList<GuideHit>()
+        val out = ArrayList<Pair<Int, GuideHit>>()
         for ((cid, list) in byChannel) {
             val cname = idToName[cid] ?: cid
             for (e in list) {
-                if (e.endMs >= now && e.title.contains(query, ignoreCase = true)) {
-                    out.add(GuideHit(cid, cname, e))
+                if (e.endMs >= now) {
+                    titleQuery.rank(e.title)?.let { rank -> out.add(rank to GuideHit(cid, cname, e)) }
                 }
             }
         }
-        return out.sortedBy { it.entry.startMs }.take(limit)
+        return out.sortedWith(compareBy({ it.first }, { it.second.entry.startMs })).take(limit).map { it.second }
     }
 
     private fun norm(s: String): String = s.lowercase().replace(Regex("[^a-z0-9]"), "")
 
     fun clear() {
+        requestGeneration++
+        revision.intValue++
+        status.value = ""
         loadedUrl = null
         byChannel = emptyMap()
         nameToId = emptyMap()
@@ -725,7 +844,7 @@ object EpgStore {
     }
 
     /** Guide for one channel: match by guide id first, then by channel name. */
-    fun guide(epgId: String?, channelName: String): List<EpgEntry> {
+    fun guide(epgId: String?, channelName: String, fromMs: Long = System.currentTimeMillis()): List<EpgEntry> {
         if (byChannel.isEmpty()) return emptyList()
         val now = System.currentTimeMillis()
         val direct = epgId?.let { byChannel[it.lowercase()] }
@@ -733,14 +852,19 @@ object EpgStore {
             nameToId[norm(channelName)]?.let { byChannel[it] }
         } else null
         val list = direct ?: byName ?: return emptyList()
-        return list.filter { it.endMs >= now }
+        return list.filter { it.endMs >= fromMs }
     }
 
-    suspend fun load(url: String?) {
-        if (url.isNullOrBlank()) return
-        if (loadedUrl == url && loaded.value) return
+    suspend fun load(url: String?, force: Boolean = false) {
+        if (url.isNullOrBlank()) {
+            status.value = "Your provider has not supplied a guide URL. Channel playback and manual recording still work."
+            return
+        }
+        if (!force && loadedUrl == url && loaded.value) return
         if (loading.value) return
+        val generation = ++requestGeneration
         loading.value = true
+        status.value = "Updating guide from your provider…"
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             try {
                 val fmtZ = java.text.SimpleDateFormat("yyyyMMddHHmmss Z", java.util.Locale.US)
@@ -764,9 +888,12 @@ object EpgStore {
                 val names = HashMap<String, String>()
                 val idNames = HashMap<String, String>()
 
-                val req = okhttp3.Request.Builder().url(url).header("User-Agent", Net.UA).build()
-                Net.client.newCall(req).execute().use { resp ->
-                    val stream = resp.body?.byteStream() ?: return@use
+                val req = okhttp3.Request.Builder().url(url).header("User-Agent", Net.UA).header("Cache-Control", "no-cache").build()
+                val call = Net.client.newCall(req)
+                call.timeout().timeout(120, java.util.concurrent.TimeUnit.SECONDS)
+                call.execute().use { resp ->
+                    check(resp.isSuccessful) { "Provider returned HTTP ${resp.code}" }
+                    val stream = resp.body?.byteStream() ?: error("Provider returned an empty guide")
                     val parser = android.util.Xml.newPullParser()
                     parser.setInput(stream, null)
 
@@ -829,15 +956,25 @@ object EpgStore {
                 }
 
                 programmes.values.forEach { it.sortBy { e -> e.startMs } }
-                byChannel = programmes
-                nameToId = names
-                idToName = idNames
-                loadedUrl = url
-                loaded.value = programmes.isNotEmpty()
+                check(programmes.isNotEmpty()) { "No current guide entries supplied" }
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    if (generation != requestGeneration) return@withContext
+                    byChannel = programmes
+                    nameToId = names
+                    idToName = idNames
+                    loadedUrl = url
+                    loaded.value = true
+                    revision.intValue++
+                    status.value = "Guide updated from your provider."
+                }
             } catch (e: Exception) {
-                // Guide stays empty; the app still works fine without it.
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    if (generation != requestGeneration) return@withContext
+                    status.value = "Guide update failed: ${e.message ?: "provider unavailable"}. ${if (loaded.value) "Keeping the previous guide." else "Try again shortly."}"
+                }
             } finally {
-                loading.value = false
+                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable + kotlinx.coroutines.Dispatchers.Main) { if (generation == requestGeneration) loading.value = false }
             }
         }
     }

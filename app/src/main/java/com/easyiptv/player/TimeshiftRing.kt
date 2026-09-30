@@ -1,0 +1,265 @@
+package com.easyiptv.player
+
+import java.io.Closeable
+import java.io.File
+import java.io.FileOutputStream
+import java.io.RandomAccessFile
+import java.util.ArrayDeque
+import java.util.concurrent.atomic.AtomicLong
+
+/**
+ * Disk-first rolling MPEG-TS ring. Physical segment files may be deleted while
+ * the virtual byte timeline remains monotonic for the lifetime of the ring.
+ * Retention is bounded by both wall-clock history and a storage byte budget.
+ */
+internal class TimeshiftRing private constructor(
+    private val root: File,
+    private val historyMs: Long,
+    private val maxBytes: Long,
+) : Closeable {
+    companion object {
+        const val TS_PACKET_BYTES = 188
+        const val TARGET_SEGMENT_BYTES = 8L * 1024L * 1024L
+        private val ALIGNED_TARGET_BYTES = TARGET_SEGMENT_BYTES - (TARGET_SEGMENT_BYTES % TS_PACKET_BYTES)
+        private val ids = AtomicLong(0L)
+
+        fun open(root: File, historyMs: Long, maxBytes: Long): TimeshiftRing {
+            require(historyMs > 0L) { "historyMs must be positive" }
+            require(maxBytes >= ALIGNED_TARGET_BYTES) { "maxBytes must fit at least one segment" }
+            if (!root.exists() && !root.mkdirs()) error("Unable to create timeshift directory: $root")
+            require(root.isDirectory) { "Timeshift root is not a directory: $root" }
+            return TimeshiftRing(root, historyMs, maxBytes)
+        }
+    }
+
+    internal data class SegmentMeta(
+        val id: Long,
+        val file: File,
+        val virtualStartByte: Long,
+        var virtualEndByte: Long,
+        val openedElapsedMs: Long,
+        var closedElapsedMs: Long = 0L,
+        var byteLength: Long = 0L,
+        var finalized: Boolean = false,
+        var activeReaders: Int = 0,
+        var pendingDelete: Boolean = false,
+    )
+
+    internal data class RingSnapshot(
+        val oldestVirtualByte: Long,
+        val newestVirtualByte: Long,
+        val segmentCount: Int,
+        val totalBytesOnDisk: Long,
+    )
+
+    private val segments = ArrayDeque<SegmentMeta>()
+    private var current: SegmentMeta? = null
+    private var currentOut: FileOutputStream? = null
+    private var nextVirtualByte = 0L
+    @Volatile private var closed = false
+    private var retainedBytes = 0L
+    @Volatile private var latestSnapshot = RingSnapshot(0L, 0L, 0, 0L)
+
+    @Synchronized
+    fun append(packetBytes: ByteArray, length: Int) = append(packetBytes, 0, length)
+
+    @Synchronized
+    fun append(packetBytes: ByteArray, offset: Int, length: Int) {
+        check(!closed) { "TimeshiftRing is closed" }
+        require(offset >= 0 && length >= 0 && offset + length <= packetBytes.size) { "Invalid append range" }
+        require(length % TS_PACKET_BYTES == 0) { "append length must contain whole MPEG-TS packets" }
+        var sourceOffset = offset
+        var remaining = length
+        while (remaining > 0) {
+            ensureCurrentSegment()
+            val seg = current ?: error("No current segment")
+            val room = (ALIGNED_TARGET_BYTES - seg.byteLength).coerceAtLeast(TS_PACKET_BYTES.toLong())
+            val writeLen = minOf(remaining.toLong(), room).toInt()
+            val alignedWrite = writeLen - (writeLen % TS_PACKET_BYTES)
+            if (alignedWrite <= 0) {
+                finalizeCurrent()
+                continue
+            }
+            currentOut!!.write(packetBytes, sourceOffset, alignedWrite)
+            seg.byteLength += alignedWrite
+            retainedBytes += alignedWrite
+            nextVirtualByte += alignedWrite
+            seg.virtualEndByte = nextVirtualByte
+            sourceOffset += alignedWrite
+            remaining -= alignedWrite
+            if (seg.byteLength >= ALIGNED_TARGET_BYTES) finalizeCurrent()
+        }
+        publishSnapshot()
+        reclaimExpired(elapsedMs())
+        publishSnapshot()
+    }
+
+    // UI/remote reads never acquire the disk writer's monitor. A slow USB
+    // write, segment close or retention deletion cannot freeze navigation.
+    fun snapshot(): RingSnapshot = latestSnapshot
+
+    private fun publishSnapshot() {
+        latestSnapshot = RingSnapshot(
+            segments.peekFirst()?.virtualStartByte ?: nextVirtualByte,
+            nextVirtualByte, segments.size, retainedBytes
+        )
+    }
+
+    @Synchronized
+    fun openReader(virtualOffset: Long): RingReader {
+        check(!closed) { "TimeshiftRing is closed" }
+        val oldest = segments.peekFirst()?.virtualStartByte ?: nextVirtualByte
+        val clamped = virtualOffset.coerceIn(oldest, nextVirtualByte)
+        val segment = findSegmentForOffset(clamped) ?: segments.peekLast()
+            ?: error("Timeshift ring has no readable data")
+        segment.activeReaders++
+        return RingReader(this, segment, clamped)
+    }
+
+    @Synchronized
+    internal fun nextReadableSegment(afterId: Long): SegmentMeta? {
+        var seen = false
+        for (segment in segments) {
+            if (seen) {
+                segment.activeReaders++
+                return segment
+            }
+            if (segment.id == afterId) seen = true
+        }
+        return null
+    }
+
+    @Synchronized
+    internal fun releaseReader(segmentId: Long) {
+        val segment = segments.firstOrNull { it.id == segmentId } ?: return
+        if (segment.activeReaders > 0) segment.activeReaders--
+        if (segment.pendingDelete && segment.activeReaders == 0) {
+            reclaimExpired(elapsedMs())
+            publishSnapshot()
+        }
+    }
+
+    internal fun newestVirtualByte(): Long = latestSnapshot.newestVirtualByte
+
+    @Synchronized
+    private fun ensureCurrentSegment() {
+        if (current != null) return
+        val id = ids.incrementAndGet()
+        val file = File(root, "segment-${id.toString().padStart(8, '0')}.ts")
+        val meta = SegmentMeta(
+            id = id,
+            file = file,
+            virtualStartByte = nextVirtualByte,
+            virtualEndByte = nextVirtualByte,
+            openedElapsedMs = elapsedMs(),
+        )
+        currentOut = FileOutputStream(file, false)
+        current = meta
+        segments.addLast(meta)
+    }
+
+    @Synchronized
+    private fun finalizeCurrent() {
+        val seg = current ?: return
+        // Temporary DVR data needs visibility to readers, not crash durability.
+        // FileOutputStream writes are already visible; avoid an expensive USB fsync.
+        runCatching { currentOut?.close() }
+        currentOut = null
+        seg.finalized = true
+        seg.closedElapsedMs = elapsedMs()
+        current = null
+    }
+
+    private fun totalBytesOnDiskLocked(): Long = retainedBytes
+
+    @Synchronized
+    private fun reclaimExpired(nowMs: Long) {
+        while (true) {
+            val first = segments.peekFirst() ?: return
+            if (!first.finalized) return
+            val outsideWindow = first.closedElapsedMs > 0L && nowMs - first.closedElapsedMs > historyMs
+            val overByteBudget = totalBytesOnDiskLocked() > maxBytes
+            if (!outsideWindow && !overByteBudget) return
+            if (first.activeReaders > 0) {
+                first.pendingDelete = true
+                return
+            }
+            segments.removeFirst()
+            retainedBytes -= first.byteLength
+            runCatching { first.file.delete() }
+        }
+    }
+
+    @Synchronized
+    private fun findSegmentForOffset(offset: Long): SegmentMeta? {
+        return segments.firstOrNull { segment ->
+            offset >= segment.virtualStartByte &&
+                (offset < segment.virtualEndByte || (offset == nextVirtualByte && segment === segments.peekLast()))
+        }
+    }
+
+    override fun close() {
+        val files: List<File>
+        synchronized(this) {
+            if (closed) return
+            closed = true
+            finalizeCurrent()
+            files = segments.map { it.file }
+            segments.clear()
+            retainedBytes = 0L
+            publishSnapshot()
+        }
+        files.forEach { runCatching { it.delete() } }
+    }
+
+    private fun elapsedMs(): Long = System.nanoTime() / 1_000_000L
+
+    internal class RingReader internal constructor(
+        private val owner: TimeshiftRing,
+        initialSegment: SegmentMeta,
+        virtualOffset: Long,
+    ) : Closeable {
+        private var segment: SegmentMeta? = initialSegment
+        private var raf: RandomAccessFile? = RandomAccessFile(initialSegment.file, "r").apply {
+            val local = (virtualOffset - initialSegment.virtualStartByte).coerceAtLeast(0L)
+            seek((local / TS_PACKET_BYTES) * TS_PACKET_BYTES)
+        }
+        @Volatile private var closed = false
+
+        /**
+         * Returns >0 for bytes read, 0 when temporarily at the live writer tail,
+         * and -1 only after the reader itself has been closed/no segment remains.
+         */
+        fun read(buffer: ByteArray, offset: Int = 0, length: Int = buffer.size - offset): Int {
+            if (closed || owner.closed) return -1
+            require(offset >= 0 && length >= 0 && offset + length <= buffer.size)
+            while (true) {
+                val currentSegment = segment ?: return -1
+                val file = raf ?: return -1
+                val n = file.read(buffer, offset, length)
+                if (n > 0) return n
+                val next = owner.nextReadableSegment(currentSegment.id)
+                if (next == null) return 0
+                runCatching { file.close() }
+                owner.releaseReader(currentSegment.id)
+                segment = next
+                raf = RandomAccessFile(next.file, "r")
+            }
+        }
+
+        fun virtualPosition(): Long {
+            val seg = segment ?: return owner.newestVirtualByte()
+            val local = runCatching { raf?.filePointer ?: 0L }.getOrDefault(0L)
+            return seg.virtualStartByte + local
+        }
+
+        override fun close() {
+            if (closed) return
+            closed = true
+            runCatching { raf?.close() }
+            segment?.let { owner.releaseReader(it.id) }
+            raf = null
+            segment = null
+        }
+    }
+}

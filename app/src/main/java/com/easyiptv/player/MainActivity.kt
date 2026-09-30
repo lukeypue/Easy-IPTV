@@ -1,7 +1,17 @@
+// RYZOD_V467_NONBLOCKING_DVR
+// RYZOD_V465_SAVED_ITEM_MENUS
+// RYZOD_V464_SHARED_KEYBOARD_SEARCH_CATEGORY_ICONS
+// RYZOD_V463_RECORD_DOWNLOAD_REVIEW_PASS
+// RYZOD_V462_STREAM_DVR_KEYBOARD_STABILITY
+// RYZOD_V460_ACTION_AND_FAST_START_POLISH
+// RYZOD_V459_USER_REQUESTED_UI_FIXES\n// RYZOD_V457_FIRETV_CORRECTIONS
+// RYZOD_V456_VISUAL_UNIFICATION
+// RYZOD_V455_VERIFIED_FULL
 package com.easyiptv.player
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.content.res.Configuration
 import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
@@ -16,8 +26,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -33,6 +46,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -87,13 +101,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.key.Key
@@ -101,6 +118,7 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.nativeKeyEvent
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -117,12 +135,12 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import okhttp3.Request
 import java.io.File
@@ -131,18 +149,76 @@ import java.util.Date
 import java.util.Locale
 
 /* ----------------------------- palette ----------------------------- */
-private val Bg = Color(0xFF0E0F13)
-private val SurfaceCol = Color(0xFF171922)
-private val Surface2 = Color(0xFF1F2230)
-private val Line = Color(0xFF2A2E3D)
+private val Bg = Color(0xFF07111F)
+private val SurfaceCol = Color(0xFF101C2D)
+private val Surface2 = Color(0xFF16263A)
+private val Line = Color(0xFF29445F)
 private val Ink = Color(0xFFF2F3F5)
-private val Muted = Color(0xFF8A8F9A)
+private val Muted = Color(0xFFBFEFFF)
 private val Accent = Color(0xFFF5B944)
 private val Live = Color(0xFFFF3B5C)
+private val ProgramCyan = Color(0xFF58D9FF)
+private val ElectricCyan = Color(0xFF49E8FF)
+private val DeepBlue = Color(0xFF061424)
+private val PanelGlow = Color(0xFF1C3853)
+private val DownloadGreen = Color(0xFF35F06F)
+private val NeonGreen = Color(0xFF39FF88) // ZAKO_V452_CHANNEL_GREEN
+private val LimeBubble = Color(0xFFB8FF3D)
 
-private const val DVR_HISTORY_MS = 45L * 60L * 1000L
+// ZAKO_V440_RING_SEEK_WINDOW: seek bounds come from retained ring bytes.
 private const val DVR_REMOTE_SKIP_MS = 10_000L
 private const val DVR_PRIME_BYTES = 512L * 1024L
+private val BROWSE_PAGE_SIZE = CatalogRuntimePolicy.pageSize
+
+
+private class DvrSeekAccelerator {
+    data class Step(val deltaMs: Long, val gear: Int, val applyNow: Boolean)
+
+    private var direction = 0
+    private var gear = 0
+    private var lastPressAt = 0L
+    private var lastAppliedAt = 0L
+
+    fun next(dir: Int, repeatCount: Int): Step {
+        val now = android.os.SystemClock.uptimeMillis()
+        val freshBurst = direction != dir || now - lastPressAt > 1_400L
+        if (freshBurst) {
+            gear = 0
+        } else if (repeatCount == 0) {
+            gear = (gear + 1) % JUMPS.size
+        } else if (repeatCount > 0 && repeatCount % 6 == 0) {
+            gear = (gear + 1).coerceAtMost(JUMPS.lastIndex)
+        }
+        direction = dir
+        lastPressAt = now
+
+        val apply = repeatCount == 0 || now - lastAppliedAt >= 380L
+        if (apply) lastAppliedAt = now
+        return Step(JUMPS[gear] * dir, gear, apply)
+    }
+
+    fun reset() {
+        direction = 0
+        gear = 0
+        lastPressAt = 0L
+        lastAppliedAt = 0L
+    }
+
+    companion object {
+        private val JUMPS = longArrayOf(10_000L, 30_000L, 60_000L, 180_000L, 300_000L)
+
+        fun label(gear: Int, dir: Int): String {
+            val side = if (dir > 0) "FF" else "REW"
+            return when (gear) {
+                0 -> "$side 1×"
+                1 -> "$side 2×"
+                2 -> "$side 3×"
+                3 -> "$side 4×"
+                else -> "⚡ $side"
+            }
+        }
+    }
+}
 
 private val AppColors = darkColorScheme(
     primary = Accent,
@@ -205,8 +281,12 @@ private fun Modifier.tvFocus(shape: RoundedCornerShape = RoundedCornerShape(14.d
         var focused by remember { mutableStateOf(false) }
         this
             .onFocusChanged { focused = it.isFocused }
+            .graphicsLayer {
+                scaleX = if (focused) 1.018f else 1f
+                scaleY = if (focused) 1.018f else 1f
+            }
             .background(
-                color = if (focused) FocusPink.copy(alpha = 0.18f) else Color.Transparent,
+                color = if (focused) ElectricCyan.copy(alpha = 0.10f) else Color.Transparent,
                 shape = shape
             )
             .border(
@@ -220,7 +300,7 @@ private fun Modifier.tvFocus(shape: RoundedCornerShape = RoundedCornerShape(14.d
  * Fire TV's View focus search can climb from Media3's seek bar to the playback
  * row and then get "stuck" there. Wire every visible stock-controller button
  * DOWN to the progress bar, and the progress bar UP to Play/Pause. This affects
- * only VOD / saved recordings / downloads; live TV uses Zako's own controller.
+ * only VOD / saved recordings / downloads; live TV uses RYZOD's own controller.
  */
 @OptIn(UnstableApi::class)
 private fun wireStockPlayerDpad(root: PlayerView) {
@@ -303,19 +383,74 @@ data class MiniState(val queue: List<Playable>, val index: Int, val posMs: Long)
 /* Safety net for TV remotes: any button press no screen element handled lands here,
  * so the player can always react — menus can never become unreachable. */
 object PlayerKeys {
-    var handler: ((Int) -> Boolean)? = null
+    var handler: ((Int, android.view.KeyEvent?) -> Boolean)? = null
 
     /** Checked BEFORE the on-screen views get the press — used for channel
      *  up/down zapping, which must win over the video view's own key handling. */
     var priority: ((Int) -> Boolean)? = null
 }
 
+private val zako447SearchDebounceMs = CatalogRuntimePolicy.searchDebounceMs
+
+private val zako447MiniRows = LiveOverlay.visibleRowCount
+
+private val zako447InitialDestination = TvShell.initialDestination()
+private val zako447InitialFocus = TvShell.initialFocus()
+
+private fun zako447StartupState(hasPlaylist: Boolean, loading: Boolean, error: Boolean) = StartupPolicy.state(hasPlaylist, loading, error)
+
+private fun zako447AllowBackground(livePlaying: Boolean, playerBuffering: Boolean) = PlaybackResourcePolicy.allowBackgroundHeavyWork(livePlaying, playerBuffering)
+
+
+@Composable
+private fun RyzodBrandMark(compact: Boolean = true) {
+    AsyncImage(
+        model = R.drawable.ryzod_artwork_464,
+        contentDescription = "RYZOD Media Player", contentScale = ContentScale.Fit,
+        modifier = Modifier.size(if (compact) 46.dp else 62.dp)
+    )
+}
+
+@Composable
+private fun RyzodGridBackground() {
+    Canvas(Modifier.fillMaxSize()) {
+        val step = 54.dp.toPx()
+        var x=0f
+        while(x<=size.width){ drawLine(Color(0x102F6BFF),Offset(x,0f),Offset(x,size.height),1f); x+=step }
+        var y=0f
+        while(y<=size.height){ drawLine(Color(0x102F6BFF),Offset(0f,y),Offset(size.width,y),1f); y+=step }
+    }
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // RYZOD low-memory profile: cap poster/logo RAM cache on Fire TV.
+        coil.Coil.setImageLoader(
+            coil.ImageLoader.Builder(this)
+                .memoryCache {
+                    coil.memory.MemoryCache.Builder(this)
+                        .maxSizePercent(0.06)
+                        .build()
+                }
+                .crossfade(false)
+                .build()
+        )
+        StabilityCore.install(this)
+        StabilityCore.note("activity_create")
+        // ZAKO_V449_STARTUP_REARM
+        ScheduleStore.rearmAll(this, getSharedPreferences("easyiptv", MODE_PRIVATE))
         setContent {
             MaterialTheme(colorScheme = AppColors) {
-                Surface(modifier = Modifier.fillMaxSize(), color = Bg) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(Color(0xFF0A1D33), DeepBlue, Bg)
+                            )
+                        )
+                ) {
                     App()
                 }
             }
@@ -323,6 +458,10 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        // A cached playlist may be visible before the fresh provider refresh is
+        // finished. During that short window, swallow remote input so nobody can
+        // drive into half-built lists and trigger the startup crash/glitch path.
+        if (AppInputGate.startupLocked) return true
         if (event.action == android.view.KeyEvent.ACTION_DOWN &&
             PlayerKeys.priority?.invoke(event.keyCode) == true
         ) return true
@@ -330,7 +469,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent?): Boolean {
-        if (PlayerKeys.handler?.invoke(keyCode) == true) return true
+        if (PlayerKeys.handler?.invoke(keyCode, event) == true) return true
         return super.onKeyDown(keyCode, event)
     }
 
@@ -340,16 +479,35 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
-        // Fire TV storage + provider safety: when Zako is hidden, stop the live
+        StabilityCore.beforeBackground()
+        BackgroundWorkSupervisor.cancelNonEssential()
+        // Fire TV storage + provider safety: when RYZOD is hidden, stop the live
         // provider/DVR path instead of quietly writing video in the background.
         // The only exception is an active recording, which owns the one stream.
-        if (isChangingConfigurations) Playback.player?.pause()
+        if (isChangingConfigurations) Playback.pauseForConfiguration()
         else Playback.suspendForBackground()
         super.onStop()
     }
 
+    override fun onTrimMemory(level: Int) {
+        StabilityCore.onTrimMemory(level)
+        super.onTrimMemory(level)
+        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+            // Posters can consume a meaningful chunk of RAM on Fire TV. They are
+            // disposable network/cache images, so drop only Coil's MEMORY cache
+            // when Android says pressure is building. Disk cache and playback stay.
+            runCatching { coil.Coil.imageLoader(this).memoryCache?.clear() }
+        }
+    }
+
+    override fun onLowMemory() {
+        StabilityCore.onLowMemory()
+        super.onLowMemory()
+    }
+
     override fun onDestroy() {
         Playback.releaseAll()
+        StabilityCore.shutdown()
         super.onDestroy()
     }
 }
@@ -359,6 +517,7 @@ class MainActivity : ComponentActivity() {
 fun App() {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("easyiptv", Context.MODE_PRIVATE) }
+    LaunchedEffect(Unit) { prefs.edit().putBoolean("autoplay_last", false).apply() }
 
     var playlists by remember { mutableStateOf(PlaylistStore.load(prefs)) }
     var activeIdx by remember { mutableIntStateOf(PlaylistStore.activeIndex(prefs)) }
@@ -366,6 +525,9 @@ fun App() {
     var data by remember { mutableStateOf<AppData?>(null) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var reload by remember { mutableIntStateOf(0) }
+    // Cached data may paint immediately, but interaction stays locked until the
+    // fresh live refresh has completed (successfully or with a safe cached fallback).
+    var startupSettled by remember(activeIdx, reload) { mutableStateOf(false) }
 
     // Remembered across screens so "back" lands where you left off.
     var railSection by remember { mutableStateOf("live") }
@@ -382,6 +544,10 @@ fun App() {
     var catalogError by remember(activeIdx, reload) { mutableStateOf<String?>(null) }
     var catalogRetry by remember(activeIdx, reload) { mutableIntStateOf(0) }
 
+    LaunchedEffect(railSection) {
+        StabilityCore.noteScreen(railSection)
+    }
+
     // One-time "external drive found — use it?" prompt. Shows only if a drive is
     // plugged in, the setting is off, and we haven't asked about THIS drive yet.
     var showDrivePrompt by remember { mutableStateOf(false) }
@@ -391,7 +557,7 @@ fun App() {
         val asked = prefs.getBoolean("ext_prompt_shown", false)
         if (present && !Storage.isEnabled(prefs) && !asked) showDrivePrompt = true
     }
-    if (showDrivePrompt) {
+    if (showDrivePrompt && startupSettled) {
         val driveGb = remember { Storage.driveFreeBytes(context) }
         AlertDialog(
             onDismissRequest = {
@@ -427,9 +593,6 @@ fun App() {
 
     // The corner mini player: whatever you backed out of keeps playing here.
     var mini by remember { mutableStateOf<MiniState?>(null) }
-    // Only auto-tune to the last channel once per app start.
-    var autoTuned by remember { mutableStateOf(false) }
-
     fun openPlay(p: Nav.Play) {
         val target = p.queue.getOrNull(p.start)
         val remoteTarget = target?.url?.let { !it.startsWith("/") && !it.startsWith("file:") } == true
@@ -453,7 +616,7 @@ fun App() {
                     recordingActive && maxStreams == 1 ->
                         "Recording is using your 1-stream IPTV plan. Stay on this channel, stop recording, or set Provider streams to 2/3 only if your service includes them."
                     recordingActive ->
-                        "No provider stream is free for that change. Your Zako limit is $maxStreams; stop a recording/download or raise it only if your IPTV plan allows more."
+                        "No provider stream is free for that change. Your RYZOD limit is $maxStreams; stop a recording/download or raise it only if your IPTV plan allows more."
                     downloadSlots > 0 ->
                         "A download is using your available IPTV stream. Stop it in Downloads or raise Settings → Provider streams if your plan includes more connections."
                     else -> "No provider stream is free. Check Settings → Provider streams."
@@ -471,10 +634,16 @@ fun App() {
                 .putString("last_live_guide", target.guideKey ?: "")
                 .apply()
         }
-        nav = p
+        val currentLive = Playback.queue.getOrNull(Playback.currentIdxC.intValue)
+        val keepSession = target?.isLive == true && currentLive?.isLive == true &&
+            target.url == currentLive.url && Playback.player != null && Playback.liveMode
+        nav = if (keepSession) p.copy(queue = Playback.queue, start = Playback.currentIdxC.intValue, attach = true) else p
     }
 
     LaunchedEffect(Unit) {
+        // ZAKO_V432_STARTUP_POLISH: first paint + Live lineup win the startup race.
+        // Nonessential disk cleanup/queue maintenance starts after the UI settles.
+        kotlinx.coroutines.delay(2_200L)
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             DownloadStore.migrateLegacyRetention(prefs)
             DownloadStore.migrateLegacyEngine(context, prefs)
@@ -507,7 +676,18 @@ fun App() {
         playlists.getOrNull(activeIdx)?.let { DataCache.keyFor(it) }
     }
 
+    LaunchedEffect(playlists.isEmpty(), startupSettled) {
+        AppInputGate.startupLocked = StartupPolicy.shouldBlockInput(
+            hasPlaylist = playlists.isNotEmpty(),
+            refreshSettled = startupSettled
+        )
+    }
+    DisposableEffect(Unit) {
+        onDispose { AppInputGate.startupLocked = false }
+    }
+
     LaunchedEffect(source, reload) {
+        startupSettled = source == null
         data = null
         loadError = null
         EpgStore.clear()
@@ -546,7 +726,12 @@ fun App() {
                     DataCache.save(context, cacheKey, merged)
                 }
             } catch (e: Exception) {
-                if (data == null) loadError = e.message ?: "error"
+                loadError = e.message ?: "Provider refresh unavailable"
+            } finally {
+                // Unlock only after the fresh provider attempt has finished. If
+                // it failed but a cache exists, the cache is now a deliberate
+                // fallback rather than an accidental half-loaded startup state.
+                startupSettled = true
             }
         }
     }
@@ -557,7 +742,7 @@ fun App() {
     // Simple Mode skips it entirely to protect troublesome channels.
     LaunchedEffect(data, source, nav, railSection) {
         val s = source ?: return@LaunchedEffect
-        if (data == null || nav is Nav.Play || prefs.getBoolean("simple_mode", true)) return@LaunchedEffect
+        if (data == null || nav is Nav.Play) return@LaunchedEffect
         // Do not start XMLTV from Search: Search may already be lazily loading
         // the large Movies/Series catalog. Two large parses at once is exactly
         // the kind of CPU/GC competition we are removing for Fire TV.
@@ -570,6 +755,8 @@ fun App() {
     // only when the viewer opens an on-demand/search screen, never on a timer
     // behind live TV. This applies in normal AND Simple Mode.
     LaunchedEffect(railSection, source, activeIdx, data, catalogLoadedThisSession, catalogRetry) {
+        val catalogJob = kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]
+        if (catalogJob != null) BackgroundWorkSupervisor.replace("catalog", catalogJob)
         val s = source ?: return@LaunchedEffect
         val needsCatalog = railSection == "movies" || railSection == "series" || railSection == "search"
         val liveBase = data ?: return@LaunchedEffect
@@ -588,9 +775,11 @@ fun App() {
             if (catalog.movies.isEmpty() && catalog.series.isEmpty()) {
                 catalogError = "Your provider returned no Movies or Series on this request. Press Retry; if it repeats, the next test should capture the provider response/error."
             }
+            // ZAKO_V436_SQLITE_CATALOG_SAVE: the JSON part is now slim; VOD rows go to SQLite.
             if (cacheKey != null) kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                 DataCache.save(context, cacheKey, merged)
             }
+
         } catch (e: Exception) {
             // Stop automatic retry loops on a weak Fire Stick. The viewer gets
             // one explicit Retry button instead, with the actual failure text.
@@ -609,26 +798,8 @@ fun App() {
         }
     }
 
-    // Cable-box behavior: the app opens straight onto the channel you were
-    // last watching (Settings › "Start on last channel" turns this off).
-    LaunchedEffect(data) {
-        if (autoTuned || data == null || nav !is Nav.Home) return@LaunchedEffect
-        autoTuned = true
-        if (!prefs.getBoolean("autoplay_last", true)) return@LaunchedEffect
-        val url = prefs.getString("last_live_url", null) ?: return@LaunchedEffect
-        // Build the full channel lineup and start on the saved channel — so
-        // channel up/down works the moment the app opens, like a cable box.
-        val channels = data?.live ?: return@LaunchedEffect
-        val idx = channels.indexOfFirst { it.url == url || it.url == tsUrl(url) || liveAutoUrl(prefs, it.url) == url }
-        if (idx < 0) return@LaunchedEffect   // channel no longer in this playlist
-        openPlay(
-            Nav.Play(
-                channels.map { livePlayable(prefs, it) },
-                idx,
-                from = Nav.Home
-            )
-        )
-    }
+    // RYZOD_V460_FAST_START: never open a provider stream during app startup.
+    // The viewer chooses Live TV after the lightweight playlist/guide shell is ready.
 
     fun addPlaylist(p: Playlist) {
         val next = playlists + p
@@ -641,6 +812,7 @@ fun App() {
 
     when {
         playlists.isEmpty() -> AddPlaylistScreen(first = true, onSaved = { addPlaylist(it) }, onBack = null)
+        !startupSettled -> StartupLoadingScreen(playlists.getOrNull(activeIdx)?.name.orEmpty())
         nav is Nav.AddPlaylist -> AddPlaylistScreen(first = false, onSaved = { addPlaylist(it) }, onBack = { nav = Nav.Home })
         nav is Nav.Play -> {
             val pl = nav as Nav.Play
@@ -801,7 +973,7 @@ fun AddPlaylistScreen(first: Boolean, onSaved: (Playlist) -> Unit, onBack: (() -
             }
             Spacer(Modifier.width(10.dp))
             Column {
-                Text("Zako", fontWeight = FontWeight.ExtraBold, fontSize = 19.sp, color = Ink)
+                RyzodBrandMark(compact = false)
                 Text("TV made simple", fontSize = 12.sp, color = Muted)
             }
         }
@@ -956,6 +1128,7 @@ fun HomeScreen(
     onPlayLive: (List<Playable>, Int) -> Unit,
     onSeries: (SeriesItem) -> Unit
 ) {
+    val guideRefreshScope = rememberCoroutineScope()
     // Remote's Back button climbs out one level instead of leaving the app.
     BackHandler(enabled = depth == 1) { onBackToRoot() }
 
@@ -975,7 +1148,7 @@ fun HomeScreen(
         AlertDialog(
             onDismissRequest = { showExit = false },
             containerColor = SurfaceCol,
-            title = { Text("Leave Zako?", color = Ink) },
+            title = { Row(verticalAlignment = Alignment.CenterVertically) { RyzodBrandMark(compact = true); Spacer(Modifier.width(10.dp)); Text("Exit?", color = Ink) } },
             text = {
                 Text(
                     "Downloads in progress and scheduled DVR recordings keep working in the background even after you exit — the device just needs to stay powered on.",
@@ -998,6 +1171,12 @@ fun HomeScreen(
     }
 
     val railFocus = remember { FocusRequester() }
+    var railReturnRequest by remember { mutableIntStateOf(0) }
+    val safeData = data ?: AppData(
+        liveCats = emptyList(), live = emptyList(),
+        vodCats = emptyList(), movies = emptyList(),
+        seriesCats = emptyList(), series = emptyList()
+    )
 
     Column(Modifier.fillMaxSize()) {
         // header
@@ -1006,9 +1185,9 @@ fun HomeScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(Modifier.weight(1f)) {
-                Text("Zako", fontWeight = FontWeight.ExtraBold, fontSize = 17.sp, color = Ink)
+                RyzodBrandMark(compact = true)
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.size(7.dp).background(Accent, CircleShape))
+                    Box(Modifier.width(22.dp).height(3.dp).background(Accent, RoundedCornerShape(3.dp)))
                     Spacer(Modifier.width(6.dp))
                     Text(playlistName, fontSize = 11.sp, color = Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
@@ -1025,15 +1204,22 @@ fun HomeScreen(
                     kotlinx.coroutines.delay(15_000)
                 }
             }
+            if (loadError != null) {
+                Text(
+                    "OFFLINE / SAVED",
+                    fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Accent,
+                    modifier = Modifier.padding(end = 10.dp)
+                )
+            }
             Text(clock, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Ink)
         }
 
         when {
-            data == null && loadError == null -> Box(Modifier.weight(1f)) { LoadingBox("Loading your playlist…") }
-            loadError != null -> Box(Modifier.weight(1f)) { ErrorBox(loadError, onRetry) }
+            false && data == null && loadError == null -> Box(Modifier.weight(1f)) { LoadingBox("Loading your playlist…") }
+            false && loadError != null -> Box(Modifier.weight(1f)) { ErrorBox(loadError ?: "Provider refresh unavailable", onRetry) }
             else -> Row(Modifier.weight(1f)) {
                 HomeRail(
-                    data = data!!,
+                    data = safeData,
                     section = section,
                     depth = depth,
                     liveCat = liveCat,
@@ -1042,6 +1228,7 @@ fun HomeScreen(
                     onRoot = onRoot,
                     onBackToRoot = onBackToRoot,
                     externalFocus = railFocus,
+                    returnRequest = railReturnRequest,
                     onCat = { id ->
                         when (section) {
                             "live" -> onLiveCat(id)
@@ -1051,7 +1238,8 @@ fun HomeScreen(
                     }
                 )
                 Box(Modifier.weight(1f)) {
-                    if (catalogLoading && (section == "movies" || section == "series" || section == "search")) {
+                    // ZAKO_V425_FOCUS_FIX: panes own Left at their true boundary.
+                    if (catalogLoading && (section == "movies" || section == "series")) {
                         Row(
                             Modifier
                                 .align(Alignment.TopCenter)
@@ -1066,25 +1254,39 @@ fun HomeScreen(
                         }
                     }
                     when {
+                        data == null && loadError == null &&
+                            (section == "live" || section == "movies" || section == "series" || section == "search") ->
+                            LoadingBox("Loading your playlist…")
+                        data == null && loadError != null &&
+                            (section == "live" || section == "movies" || section == "series" || section == "search") ->
+                            ErrorBox(
+                                err = (loadError ?: "No internet connection") +
+                                    "\n\nDownloads and saved recordings still work. Choose them from the left menu.",
+                                onRetry = onRetry,
+                                title = "Live service unavailable"
+                            )
                         !catalogLoading && catalogError != null &&
                             (section == "movies" || section == "series") &&
-                            data!!.movies.isEmpty() && data!!.series.isEmpty() ->
+                            safeData.movies.isEmpty() && safeData.series.isEmpty() ->
                             ErrorBox(
                                 err = catalogError ?: "On-demand catalog request failed",
                                 onRetry = onRetryCatalog,
                                 title = "Couldn't load Movies & Series"
                             )
-                        depth == 1 && section == "live" -> LivePane(prefs, activeIdx, data!!, liveCat, onPlayLive, onLeftToRail = { runCatching { railFocus.requestFocus() } })
-                        depth == 1 && section == "movies" -> MoviesPane(prefs, data!!, movieCat, onPlay, onLeftToRail = { runCatching { railFocus.requestFocus() } })
-                        depth == 1 && section == "series" -> SeriesPane(source, data!!, seriesCat, onSeries, onLeftToRail = { runCatching { railFocus.requestFocus() } })
+                        depth == 1 && section == "live" -> LivePane(prefs, activeIdx, safeData, liveCat, onPlayLive,
+                            onLeftToRail = { railReturnRequest++ }, onRefreshGuide = {
+                                guideRefreshScope.launch { EpgStore.load(source?.xmltvUrl(), force = true) }
+                            })
+                        depth == 1 && section == "movies" -> MoviesPane(source, prefs, safeData, movieCat, onPlay, onLeftToRail = { railReturnRequest++ })
+                        depth == 1 && section == "series" -> SeriesPane(source, safeData, seriesCat, onSeries, onLeftToRail = { railReturnRequest++ })
                         section == "search" -> SearchTab(
-                            prefs, data!!, searchQuery, onSearchQuery, onPlay, onPlayLive, onSeries,
+                            source, prefs, safeData, searchQuery, onSearchQuery, onPlay, onPlayLive, onSeries,
                             onDemandWarning = if (!catalogLoading) catalogError else null
                         )
-                        section == "downloads" -> DownloadsPane(prefs, onPlay)
-                        section == "recordings" -> RecordingsPane(prefs, onPlay)
-                        section == "playlists" -> PlaylistsPane(playlists, activeIdx, onSelectPlaylist, onDeletePlaylist, onAddPlaylist)
-                        section == "settings" -> SettingsPane(prefs, onModeChanged = onRetry)
+                        section == "downloads" -> Box(Modifier.fillMaxSize().onPreviewKeyEvent { if (it.type == KeyEventType.KeyDown && it.key == Key.DirectionLeft) { railReturnRequest++; true } else false }) { DownloadsPane(prefs, onPlay) }
+                        section == "recordings" -> Box(Modifier.fillMaxSize().onPreviewKeyEvent { if (it.type == KeyEventType.KeyDown && it.key == Key.DirectionLeft) { railReturnRequest++; true } else false }) { RecordingsPane(prefs, onPlay) }
+                        section == "playlists" -> Box(Modifier.fillMaxSize().onPreviewKeyEvent { if (it.type == KeyEventType.KeyDown && it.key == Key.DirectionLeft) { railReturnRequest++; true } else false }) { PlaylistsPane(playlists, activeIdx, onSelectPlaylist, onDeletePlaylist, onAddPlaylist) }
+                        section == "settings" -> Box(Modifier.fillMaxSize().onPreviewKeyEvent { if (it.type == KeyEventType.KeyDown && it.key == Key.DirectionLeft) { railReturnRequest++; true } else false }) { SettingsPane(prefs, onModeChanged = onRetry) }
                         else -> Column(
                             Modifier.fillMaxSize(),
                             verticalArrangement = Arrangement.Center,
@@ -1097,7 +1299,7 @@ fun HomeScreen(
                 // The SAME stream you were watching, showing in the corner while
                 // you browse. Highlight it and press OK to go back full screen —
                 // nothing reloads, because it's one continuous stream.
-                if (mini != null && Playback.player != null) {
+                if (mini != null && Playback.player != null && Recorder.activeName.value == null) {
                     val mp = mini.queue.getOrNull(Playback.currentIdxC.intValue)
                         ?: mini.queue.getOrNull(mini.index)
                     if (mp != null) {
@@ -1131,6 +1333,9 @@ fun HomeScreen(
                                             }
                                         },
                                         update = { it.player = Playback.player },
+                                        // The shared player outlives this corner view. Remove
+                                        // its listeners when returning to full-screen playback.
+                                        onRelease = { it.player = null },
                                         modifier = Modifier.fillMaxSize()
                                     )
                                     // Phones: the video view eats touches, so this
@@ -1198,60 +1403,61 @@ private fun HomeRail(
     onRoot: (String) -> Unit,
     onBackToRoot: () -> Unit,
     externalFocus: FocusRequester,
+    returnRequest: Int,
     onCat: (String) -> Unit
 ) {
-    // Simple Mode changes the LIVE playback engine only. Movies, Series,
-    // Search, Downloads, and saved Recordings remain available.
-    val firstRootFocus = remember { FocusRequester() }
-    LaunchedEffect(depth) {
-        if (depth == 0) {
-            kotlinx.coroutines.delay(100)
-            runCatching { firstRootFocus.requestFocus() }
-        }
+    val railState = androidx.compose.foundation.lazy.rememberLazyListState()
+    val cats = when (section) { "live" -> data.liveCats; "movies" -> data.vodCats; else -> data.seriesCats }
+    val extras = when (section) {
+        "live" -> listOf("fav" to "★ Favorites", "all" to "All channels")
+        "movies" -> listOf("all" to "All movies")
+        else -> listOf("all" to "All series")
     }
+    val selected = when (section) { "live" -> liveCat; "movies" -> movieCat; else -> seriesCat }
+    val categoryIds = extras.map { it.first } + cats.map { it.id }
+    val selectedIndex = categoryIds.indexOf(selected).coerceAtLeast(0)
+    suspend fun restoreRailFocus() {
+        val index = if (depth == 0) RootItems.indexOfFirst { it.first == section }.coerceAtLeast(0) else selectedIndex + 1
+        railState.scrollToItem(index)
+        androidx.compose.runtime.withFrameNanos { }
+        androidx.compose.runtime.withFrameNanos { }
+        runCatching { externalFocus.requestFocus() }
+    }
+    LaunchedEffect(depth, section) { if (depth == 0) restoreRailFocus() }
+    LaunchedEffect(returnRequest) { if (returnRequest > 0) restoreRailFocus() }
     LazyColumn(
-        modifier = Modifier.width(126.dp).fillMaxHeight().background(SurfaceCol),
+        state = railState,
+        modifier = Modifier
+            .width(126.dp)
+            .fillMaxHeight()
+            .background(SurfaceCol)
+            .onKeyEvent { ev ->
+                if (depth == 1 && ev.type == KeyEventType.KeyDown && ev.key == Key.DirectionLeft) {
+                    onBackToRoot()
+                    true
+                } else false
+            },
         contentPadding = PaddingValues(vertical = 6.dp)
     ) {
         if (depth == 0) {
             itemsIndexed(RootItems) { pos, p ->
                 RailItem(
                     p.second, section == p.first,
-                    modifier = if (pos == 0) Modifier.focusRequester(firstRootFocus) else Modifier
+                    modifier = if (p.first == section) Modifier.focusRequester(externalFocus) else Modifier
                 ) { onRoot(p.first) }
             }
         } else {
             item { RailItem("←  Main menu", false) { onBackToRoot() } }
-            val cats: List<Category>
-            val extras: List<Pair<String, String>>
-            val selected: String
-            when (section) {
-                "live" -> {
-                    cats = data.liveCats
-                    extras = listOf("fav" to "★ Favorites", "all" to "All channels")
-                    selected = liveCat
-                }
-                "movies" -> {
-                    cats = data.vodCats
-                    extras = listOf("all" to "All movies")
-                    selected = movieCat
-                }
-                else -> {
-                    cats = data.seriesCats
-                    extras = listOf("all" to "All series")
-                    selected = seriesCat
-                }
-            }
-            items(extras) { p ->
+            itemsIndexed(extras) { ix, p ->
                 RailItem(
                     p.second, selected == p.first,
-                    modifier = if (selected == p.first) Modifier.focusRequester(externalFocus) else Modifier
+                    modifier = if (selectedIndex == ix) Modifier.focusRequester(externalFocus) else Modifier
                 ) { onCat(p.first) }
             }
-            items(cats) { c ->
+            itemsIndexed(cats) { ix, c ->
                 RailItem(
                     c.name, selected == c.id,
-                    modifier = if (selected == c.id) Modifier.focusRequester(externalFocus) else Modifier
+                    modifier = if (selectedIndex == extras.size + ix) Modifier.focusRequester(externalFocus) else Modifier
                 ) { onCat(c.id) }
             }
         }
@@ -1260,29 +1466,65 @@ private fun HomeRail(
 
 @Composable
 private fun RailItem(label: String, active: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    // ZAKO_V432_LIME_BUBBLES: lightweight rounded category bubbles, no blur/shaders.
     Row(
         modifier = modifier
+            .padding(horizontal = 6.dp, vertical = 3.dp)
             .fillMaxWidth()
-            .tvFocus(RoundedCornerShape(8.dp))
-            .background(if (active) Surface2 else SurfaceCol)
+            .tvFocus(RoundedCornerShape(24.dp))
+            .background(
+                if (active) LimeBubble.copy(alpha = 0.22f) else PanelGlow.copy(alpha = 0.60f),
+                RoundedCornerShape(24.dp)
+            )
+            .border(
+                if (active) 2.dp else 1.dp,
+                if (active) LimeBubble else ElectricCyan.copy(alpha = 0.22f),
+                RoundedCornerShape(24.dp)
+            )
             .clickable { onClick() }
-            .padding(vertical = 10.dp),
+            .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(
-            Modifier.width(3.dp).height(18.dp)
-                .background(if (active) Accent else Color.Transparent)
+            Modifier.size(if (active) 8.dp else 6.dp)
+                .background(if (active) LimeBubble else ElectricCyan.copy(alpha = 0.65f), CircleShape)
         )
-        Spacer(Modifier.width(8.dp))
+        Spacer(Modifier.width(9.dp))
         Text(
             label,
-            color = if (active) Ink else Muted,
+            color = if (active) LimeBubble else Ink,
             fontSize = 12.sp,
-            fontWeight = if (active) FontWeight.Bold else FontWeight.SemiBold,
+            fontWeight = if (active) FontWeight.ExtraBold else FontWeight.SemiBold,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(end = 6.dp)
         )
+    }
+}
+
+@Composable
+private fun StartupLoadingScreen(playlistName: String) {
+    Column(
+        Modifier.fillMaxSize().background(Bg).padding(32.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        RyzodBrandMark(compact = false)
+        Spacer(Modifier.height(18.dp))
+        CircularProgressIndicator(color = Accent)
+        Spacer(Modifier.height(18.dp))
+        Text("Preparing your TV experience…", color = Ink, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(7.dp))
+        Text(
+            "Please wait while RYZOD refreshes your channels and gets everything ready for smooth browsing and playback.",
+            color = Muted, fontSize = 13.sp
+        )
+        if (playlistName.isNotBlank()) {
+            Spacer(Modifier.height(5.dp))
+            Text(playlistName, color = Accent, fontSize = 11.sp)
+        }
+        Spacer(Modifier.height(7.dp))
+        Text("Usually only takes a few seconds.", color = Muted, fontSize = 10.sp)
     }
 }
 
@@ -1329,12 +1571,17 @@ fun LivePane(
     data: AppData,
     selectedCat: String,
     onPlayLive: (List<Playable>, Int) -> Unit,
-    onLeftToRail: () -> Unit = {}
+    onLeftToRail: () -> Unit = {},
+    onRefreshGuide: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val favKey = "fav_live_$activeIdx"
     var favs by remember(activeIdx) { mutableStateOf(prefs.getStringSet(favKey, emptySet())?.toSet() ?: emptySet()) }
     var expandedId by remember { mutableStateOf<String?>(null) }
+    var manualDayOffset by remember { mutableIntStateOf(0) }
+    // ZAKO_V431_LIVE_INFO
+    var liveInfo by remember { mutableStateOf<Pair<LiveChannel, EpgEntry?>?>(null) }
+    var showGridGuide by remember { mutableStateOf(true) }
     val fmt = remember { SimpleDateFormat("h:mm a", Locale.getDefault()) }
     val guideLoading = EpgStore.loading.value
     val guideReady = EpgStore.loaded.value
@@ -1346,13 +1593,19 @@ fun LivePane(
         prefs.edit().putStringSet(favKey, n).apply()
     }
 
-    val filtered = data.live.filter { c ->
-        when (selectedCat) {
-            "all" -> true
-            "fav" -> favs.contains(c.id)
-            else -> c.categoryId == selectedCat
+    // ZAKO_V433_REMEMBER_FILTERS: category lists only rebuild when their inputs change.
+    val filtered = remember(data.live, selectedCat, favs) {
+        data.live.filter { c ->
+            when (selectedCat) {
+                "all" -> true
+                "fav" -> favs.contains(c.id)
+                else -> c.categoryId == selectedCat
+            }
         }
     }
+
+    // ZAKO_V432_LIVE_QUEUE: map this category once, not on every channel click.
+    val playableQueue = remember(filtered, activeIdx) { filtered.map { livePlayable(prefs, it) } }
 
     // Come back to Live TV and the list is scrolled right where you left it.
     val listState = androidx.compose.runtime.saveable.rememberSaveable(
@@ -1365,17 +1618,89 @@ fun LivePane(
     val currentIdxInList = remember(filtered, currentUrl) {
         if (currentUrl == null) -1 else filtered.indexOfFirst { it.url == currentUrl }
     }
-    val currentRowFocus = remember { FocusRequester() }
-    LaunchedEffect(selectedCat) {
-        if (currentIdxInList >= 0) {
+    // ZAKO_V425_LIVE_WRAP: one requester per row lets first/last wrap reliably.
+    val rowFocusers = remember(selectedCat, filtered.size) {
+        List(filtered.size.coerceAtLeast(1)) { FocusRequester() }
+    }
+    val liveNavScope = rememberCoroutineScope()
+    LaunchedEffect(selectedCat, currentIdxInList, filtered.size) {
+        if (currentIdxInList >= 0 && currentIdxInList < rowFocusers.size) {
             kotlinx.coroutines.delay(120)
             runCatching { listState.scrollToItem(currentIdxInList) }
-            kotlinx.coroutines.delay(120)
-            runCatching { currentRowFocus.requestFocus() }
+            kotlinx.coroutines.delay(80)
+            runCatching { rowFocusers[currentIdxInList].requestFocus() }
         }
     }
 
+    // ZAKO_V431_LIVE_INFO action sheet uses only the already-loaded EPG row.
+    liveInfo?.let { pair ->
+        val infoChannel = pair.first
+        val entry = pair.second
+        val recordable = infoChannel.url.endsWith(".ts")
+        AlertDialog(
+            onDismissRequest = { liveInfo = null },
+            containerColor = SurfaceCol,
+            title = { Text(entry?.title ?: infoChannel.name, color = Ink, fontWeight = FontWeight.ExtraBold) },
+            text = {
+                Column {
+                    Text(infoChannel.name, color = ProgramCyan, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    if (entry != null) {
+                        Text("${fmt.format(Date(entry.startMs))}–${fmt.format(Date(entry.endMs))}", color = Ink, fontSize = 11.sp)
+                        Spacer(Modifier.height(7.dp))
+                        Text(entry.desc.ifBlank { "No description was supplied by the guide." }, color = Ink, fontSize = 12.sp)
+                    } else {
+                        Text("Program information is not available for this channel right now.", color = Muted, fontSize = 12.sp)
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    TextButton(
+                        modifier = Modifier.tvFocus(RoundedCornerShape(16.dp)),
+                        onClick = { toggleFav(infoChannel.id) }
+                    ) {
+                        Text(if (favs.contains(infoChannel.id)) "★ REMOVE FAVORITE" else "☆ ADD FAVORITE", color = Accent, fontWeight = FontWeight.Bold)
+                    }
+                    if (recordable && entry != null) {
+                        TextButton(
+                            modifier = Modifier.tvFocus(RoundedCornerShape(16.dp)),
+                            onClick = {
+                                val airing = System.currentTimeMillis() in entry.startMs until entry.endMs
+                                if (airing) {
+                                    Recorder.start(context, infoChannel.url, "${entry.title} (${infoChannel.name})", entry.endMs + 2 * 60 * 1000)
+                                    toast(context, "Recording ${entry.title}.")
+                                    liveInfo = null
+                                } else {
+                                    toast(context, ScheduleStore.add(context, prefs, entry.title, infoChannel.name, infoChannel.url, entry.startMs, entry.endMs))
+                                    liveInfo = null
+                                }
+                            }
+                        ) { Text("● RECORD", color = Live, fontWeight = FontWeight.Bold) }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(modifier = Modifier.tvFocus(RoundedCornerShape(16.dp)), onClick = { liveInfo = null }) {
+                    Text("CLOSE", color = Ink)
+                }
+            }
+        )
+    }
+
     Column(Modifier.fillMaxSize()) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text("RYZOD GUIDE", color=ProgramCyan, fontSize=12.sp, fontWeight=FontWeight.ExtraBold)
+            TextButton(onClick = onRefreshGuide, enabled = !guideLoading,
+                modifier = Modifier.tvFocus(RoundedCornerShape(12.dp))) {
+                Text(if (guideLoading) "UPDATING…" else "↻ UPDATE GUIDE", color = Ink, fontSize = 11.sp)
+            }
+        }
+        Text("Guide information comes directly from your provider. Updates may take 1–2 minutes or longer for large guides.",
+            color = Muted, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 12.dp))
+        EpgStore.status.value.takeIf { it.isNotBlank() }?.let { message ->
+            Text(message, color = Muted, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 12.dp))
+        }
         if (guideLoading) {
             Text(
                 "Downloading TV guide… this can take a minute or two.",
@@ -1383,7 +1708,14 @@ fun LivePane(
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
             )
         }
-        if (filtered.isEmpty()) {
+        if (showGridGuide && filtered.isNotEmpty()) {
+            LiveGridGuide(
+                prefs = prefs, channels = filtered,
+                favs = favs, onToggleFavorite = { toggleFav(it) },
+                onPlayLive = onPlayLive,
+                onClose = { }
+            )
+        } else if (filtered.isEmpty()) {
             Column(
                 Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.Center,
@@ -1407,22 +1739,37 @@ fun LivePane(
                     Column(
                         Modifier
                             .fillMaxWidth()
-                            .then(
-                                if (chIdx == currentIdxInList) Modifier.focusRequester(currentRowFocus)
-                                else Modifier
-                            )
+                            .focusRequester(rowFocusers[chIdx])
                             .onPreviewKeyEvent { ev ->
-                                if (ev.type == KeyEventType.KeyDown && ev.key == Key.DirectionLeft) {
-                                    onLeftToRail(); true
-                                } else false
+                                if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                                when {
+                                    ev.key == Key.DirectionLeft -> { onLeftToRail(); true }
+                                    ev.key == Key.DirectionUp && chIdx == 0 && filtered.size > 1 -> {
+                                        liveNavScope.launch {
+                                            val target = filtered.lastIndex
+                                            listState.scrollToItem(target)
+                                            kotlinx.coroutines.delay(40)
+                                            runCatching { rowFocusers[target].requestFocus() }
+                                        }
+                                        true
+                                    }
+                                    ev.key == Key.DirectionDown && chIdx == filtered.lastIndex && filtered.size > 1 -> {
+                                        liveNavScope.launch {
+                                            listState.scrollToItem(0)
+                                            kotlinx.coroutines.delay(40)
+                                            runCatching { rowFocusers[0].requestFocus() }
+                                        }
+                                        true
+                                    }
+                                    else -> false
+                                }
                             }
                             .tvFocus()
                             .background(SurfaceCol, RoundedCornerShape(14.dp))
                             .clickable {
                                 // Hand the player this WHOLE category, starting on this
                                 // channel — that's what makes channel up/down work.
-                                val q = filtered.map { livePlayable(prefs, it) }
-                                onPlayLive(q, filtered.indexOfFirst { it.id == ch.id }.coerceAtLeast(0))
+                                onPlayLive(playableQueue, chIdx.coerceIn(0, (playableQueue.size - 1).coerceAtLeast(0)))
                             }
                             .padding(10.dp)
                     ) {
@@ -1438,21 +1785,27 @@ fun LivePane(
                                 if (current != null) {
                                     Text(
                                         "${fmt.format(Date(current.startMs))}–${fmt.format(Date(current.endMs))}  •  ${current.title}",
-                                        color = Accent, fontSize = 12.sp,
+                                        color = Color(0xFFFFE45C), fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                                         maxLines = 1, overflow = TextOverflow.Ellipsis
                                     )
                                 }
                             }
-                            if (schedule.isNotEmpty()) {
-                                IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = {
-                                    expandedId = if (expandedId == ch.id) null else ch.id
-                                }) {
-                                    Icon(
-                                        Icons.Filled.Today,
-                                        contentDescription = "See what's on later",
-                                        tint = if (expandedId == ch.id) Accent else Muted
-                                    )
-                                }
+                            IconButton(
+                                modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)),
+                                onClick = { liveInfo = ch to current }
+                            ) {
+                                Text("ⓘ", color = NeonGreen, fontSize = 20.sp, fontWeight = FontWeight.Black)
+                            }
+                            // ZAKO_V450_UNIVERSAL_GUIDE: every playlist channel always has
+                            // a guide/timer entry, even when the provider supplies zero EPG rows.
+                            IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = {
+                                expandedId = if (expandedId == ch.id) null else ch.id
+                            }) {
+                                Icon(
+                                    Icons.Filled.Today,
+                                    contentDescription = if (schedule.isNotEmpty()) "See what's on later" else "Open time guide",
+                                    tint = if (expandedId == ch.id) Accent else Muted
+                                )
                             }
                             IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = { toggleFav(ch.id) }) {
                                 Icon(
@@ -1462,9 +1815,34 @@ fun LivePane(
                                 )
                             }
                         }
-                        if (expandedId == ch.id && schedule.isNotEmpty()) {
+                        if (expandedId == ch.id) {
                             Spacer(Modifier.height(6.dp))
                             val dayFmt = remember { SimpleDateFormat("EEE h:mm a", Locale.getDefault()) }
+                            // ZAKO_V452_SEVEN_DAY_TIMER
+                            Text(if(schedule.isEmpty()) "No program information from provider • Manual timer available"
+                                else "Manual timer • choose any day/time up to 7 days",
+                                color=ElectricCyan,fontSize=11.sp,fontWeight=FontWeight.Bold)
+                            LazyRow(horizontalArrangement=Arrangement.spacedBy(5.dp)) {
+                                items(7) { day ->
+                                    val cal=java.util.Calendar.getInstance().apply{add(java.util.Calendar.DAY_OF_YEAR,day)}
+                                    val label=SimpleDateFormat(if(day==0)"'Today'" else "EEE M/d",Locale.getDefault()).format(cal.time)
+                                    Chip(label,manualDayOffset==day){manualDayOffset=day}
+                                }
+                            }
+                            Spacer(Modifier.height(4.dp))
+                            val chosen=java.util.Calendar.getInstance().apply{
+                                add(java.util.Calendar.DAY_OF_YEAR,manualDayOffset);set(java.util.Calendar.MINUTE,0);
+                                set(java.util.Calendar.SECOND,0);set(java.util.Calendar.MILLISECOND,0)
+                            }
+                            LazyRow(horizontalArrangement=Arrangement.spacedBy(5.dp)) {
+                                items(24) { hour ->
+                                    val startMs=(chosen.clone() as java.util.Calendar).apply{set(java.util.Calendar.HOUR_OF_DAY,hour)}.timeInMillis
+                                    val endMs=startMs+60L*60L*1000L
+                                    if(endMs>now) Chip(SimpleDateFormat("h a",Locale.getDefault()).format(Date(startMs)),false) {
+                                        toast(context,ScheduleStore.add(context,prefs,"Manual Recording",ch.name,ch.url,startMs,endMs))
+                                    }
+                                }
+                            }
                             schedule.take(30).forEach { e ->
                                 val isNow = now in e.startMs until e.endMs
                                 Row(
@@ -1474,7 +1852,7 @@ fun LivePane(
                                     Text(
                                         dayFmt.format(Date(e.startMs)),
                                         fontSize = 12.sp,
-                                        color = if (isNow) Accent else Muted,
+                                        color = if (isNow) Accent else ElectricCyan,
                                         modifier = Modifier.width(96.dp)
                                     )
                                     Text(
@@ -1520,10 +1898,239 @@ fun LivePane(
     }
 }
 
+
+@Composable
+private fun LiveGridGuide(
+    prefs: SharedPreferences,
+    channels: List<LiveChannel>,
+    favs: Set<String>,
+    onToggleFavorite: (String) -> Unit,
+    onPlayLive: (List<Playable>, Int) -> Unit,
+    onClose: () -> Unit
+) {
+    val context = LocalContext.current
+    val fmt = remember { SimpleDateFormat("h:mm a", Locale.getDefault()) }
+    var page by remember { mutableIntStateOf(0) }
+    var selected by remember { mutableStateOf<Pair<LiveChannel, EpgEntry>?>(null) }
+    val returnUrl = prefs.getString("last_live_url", null)
+    val returnIndex = channels.indexOfFirst { it.url == returnUrl }.coerceAtLeast(0)
+    val returnFocus = remember(returnUrl, channels.size) { FocusRequester() }
+    val guideListState = androidx.compose.foundation.lazy.rememberLazyListState()
+    LaunchedEffect(returnUrl, channels.size) {
+        if (channels.isNotEmpty()) {
+            runCatching { guideListState.scrollToItem(returnIndex.coerceIn(0, channels.lastIndex)) }
+            kotlinx.coroutines.delay(120)
+            runCatching { returnFocus.requestFocus() }
+        }
+    }
+    var manualChannel by remember { mutableStateOf<LiveChannel?>(null) }
+    var manualDay by remember { mutableIntStateOf(0) }
+    var manualHour by remember { mutableIntStateOf(java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)) }
+    var manualMinute by remember { mutableIntStateOf((java.util.Calendar.getInstance().get(java.util.Calendar.MINUTE)/5)*5) }
+    var confirmManual by remember { mutableStateOf<Triple<LiveChannel,Long,Long>?>(null) }
+    BackHandler { onClose() }
+
+    val guideRevision = EpgStore.revision.intValue
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(30_000)
+            now = System.currentTimeMillis()
+        }
+    }
+    val halfHour = 30L * 60L * 1000L
+    val base = now - (now % halfHour)
+    val windowStart = base + page * 4L * halfHour
+
+    Column(Modifier.fillMaxSize()) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("CHANNEL", color = Ink, fontSize = 10.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(142.dp))
+            repeat(4) { slot ->
+                Text(
+                    fmt.format(Date(windowStart + slot * halfHour)),
+                    color = Ink, fontSize = 10.sp, fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+        // RYZOD_V459_GUIDE_SEPARATORS
+        Box(Modifier.fillMaxWidth().height(1.dp).background(Color.White.copy(alpha=.55f)))
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            TextButton(modifier = Modifier.tvFocus(RoundedCornerShape(14.dp)), onClick = { page = (page - 1).coerceAtLeast(-1) }) {
+                Text("◀ EARLIER", color = Ink, fontSize = 10.sp)
+            }
+            TextButton(modifier = Modifier.tvFocus(RoundedCornerShape(14.dp)), onClick = { page = 0 }) {
+                Text("NOW", color = ProgramCyan, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            }
+            TextButton(modifier = Modifier.tvFocus(RoundedCornerShape(14.dp)), onClick = { page = (page + 1).coerceAtMost(23) }) {
+                Text("LATER ▶", color = Ink, fontSize = 10.sp)
+            }
+        }
+        LazyColumn(
+            state = guideListState,
+            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier.weight(1f)
+        ) {
+            itemsIndexed(channels, key = { _, ch -> ch.id }) { chIndex, ch ->
+                val schedule = EpgStore.guide(ch.epgId, ch.name, windowStart)
+                Row(
+                    Modifier.fillMaxWidth().height(58.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        Modifier.width(142.dp).fillMaxHeight()
+                            .then(if(ch.url==returnUrl) Modifier.focusRequester(returnFocus) else Modifier)
+                            .border(if(ch.url==returnUrl) 3.dp else 1.dp,if(ch.url==returnUrl) Accent else Color.White.copy(alpha=.45f),RoundedCornerShape(8.dp))
+                            .background(SurfaceCol, RoundedCornerShape(8.dp))
+                            .tvFocus(RoundedCornerShape(8.dp)).clickable { manualChannel = ch }.padding(5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        ChannelIcon(ch.name, ch.icon, 30.dp)
+                        Spacer(Modifier.width(5.dp))
+                        Text(ch.name, color = Ink, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                    Row(Modifier.weight(1f).fillMaxHeight()) {
+                        val cells = GuideGeometry.cells(schedule, windowStart, windowStart + 4L * halfHour)
+                        cells.forEach { cell ->
+                            val entry = cell.entry
+                            val airing = entry != null && now in entry.startMs until entry.endMs
+                            Box(Modifier.weight((cell.endMs - cell.startMs).toFloat()).fillMaxHeight()
+                                .padding(start = 2.dp)
+                                .tvFocus(RoundedCornerShape(4.dp))
+                                .background(if (airing) ProgramCyan.copy(alpha = 0.20f) else Surface2, RoundedCornerShape(4.dp))
+                                .clickable { selected = ch to (entry ?: EpgEntry("Manual Recording",
+                                    "No program information from provider.", cell.startMs, cell.endMs)) }
+                                .padding(horizontal = 6.dp, vertical = 5.dp)) {
+                                if (entry == null) Text("No information", color = Muted, fontSize = 10.sp, maxLines = 1)
+                                else Column {
+                                    Text(entry.title, color = Color(0xFFFFE45C), fontSize = 10.sp,
+                                        fontWeight = if (airing) FontWeight.ExtraBold else FontWeight.SemiBold,
+                                        maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                    Text("${fmt.format(Date(entry.startMs))}–${fmt.format(Date(entry.endMs))}",
+                                        color = Ink, fontSize = 8.sp, maxLines = 1)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    manualChannel?.let { ch ->
+        val chosen=java.util.Calendar.getInstance().apply {
+            add(java.util.Calendar.DAY_OF_YEAR,manualDay)
+            set(java.util.Calendar.HOUR_OF_DAY,manualHour);set(java.util.Calendar.MINUTE,manualMinute)
+            set(java.util.Calendar.SECOND,0);set(java.util.Calendar.MILLISECOND,0)
+        }
+        AlertDialog(onDismissRequest={manualChannel=null},containerColor=SurfaceCol,
+            title={Text("Schedule "+ch.name,color=Ink,fontWeight=FontWeight.ExtraBold)},
+            text={Column {
+                Text("Day • next 7 days",color=Muted,fontSize=11.sp)
+                LazyRow(horizontalArrangement=Arrangement.spacedBy(4.dp)){items(7){day->
+                    val cal=java.util.Calendar.getInstance().apply{add(java.util.Calendar.DAY_OF_YEAR,day)}
+                    val label=SimpleDateFormat(if(day==0)"'Today'" else "EEE M/d",Locale.getDefault()).format(cal.time)
+                    Chip(label,manualDay==day){manualDay=day}
+                }}
+                Text("Hour • 24 hours",color=Muted,fontSize=11.sp)
+                LazyRow(horizontalArrangement=Arrangement.spacedBy(4.dp)){items(24){hour->
+                    val cal=(chosen.clone() as java.util.Calendar).apply{set(java.util.Calendar.HOUR_OF_DAY,hour)}
+                    Chip(SimpleDateFormat("h a",Locale.getDefault()).format(cal.time),manualHour==hour){manualHour=hour}
+                }}
+                Text("Minutes • every 5 minutes",color=Muted,fontSize=11.sp)
+                LazyRow(horizontalArrangement=Arrangement.spacedBy(4.dp)){items(12){ix->
+                    val minute=ix*5; Chip(String.format(Locale.US,"%02d",minute),manualMinute==minute){manualMinute=minute}
+                }}
+                Spacer(Modifier.height(6.dp))
+                Text("Start: "+SimpleDateFormat("EEE h:mm a",Locale.getDefault()).format(chosen.time),color=Accent,fontWeight=FontWeight.Bold)
+            }},
+            confirmButton={TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(14.dp)),onClick={
+                val st=chosen.timeInMillis
+                if(st<=System.currentTimeMillis()) toast(context,"Choose a future time.")
+                else { confirmManual=Triple(ch,st,st+60L*60L*1000L);manualChannel=null }
+            }){Text("RECORD",color=Live,fontWeight=FontWeight.Bold)}},
+            dismissButton={TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(14.dp)),onClick={manualChannel=null}){Text("CLOSE",color=Ink)}}
+        )
+    }
+    confirmManual?.let { req ->
+        val ch=req.first;val st=req.second;val en=req.third
+        val whenText=SimpleDateFormat("EEEE 'at' h:mm a",Locale.getDefault()).format(Date(st))
+        AlertDialog(onDismissRequest={confirmManual=null},containerColor=SurfaceCol,
+            title={Text("Are you sure?",color=Ink,fontWeight=FontWeight.ExtraBold)},
+            text={Text("Are you sure you want to record "+whenText+" on "+ch.name+"?",color=Ink)},
+            confirmButton={TextButton(onClick={toast(context,ScheduleStore.add(context,prefs,"Manual Recording",ch.name,ch.url,st,en));confirmManual=null}){Text("YES, RECORD",color=Live,fontWeight=FontWeight.Bold)}},
+            dismissButton={TextButton(onClick={confirmManual=null}){Text("CLOSE",color=Ink)}})
+    }
+
+    selected?.let { pair ->
+        val ch = pair.first
+        val entry = pair.second
+        val airing = System.currentTimeMillis() in entry.startMs until entry.endMs
+        val recordable = ch.url.endsWith(".ts")
+        AlertDialog(
+            onDismissRequest = { selected = null },
+            containerColor = SurfaceCol,
+            title = { Text(entry.title, color = Ink, fontWeight = FontWeight.ExtraBold) },
+            text = {
+                Column {
+                    Text(ch.name, color = ProgramCyan, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        "${fmt.format(Date(entry.startMs))}–${fmt.format(Date(entry.endMs))}",
+                        color = Ink, fontSize = 11.sp
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        entry.desc.ifBlank { "No description was supplied in the lightweight guide." },
+                        color = Ink, fontSize = 12.sp
+                    )
+                }
+            },
+            confirmButton = {
+                // RYZOD_V459_ONE_ACTION_ROW
+                Row(horizontalArrangement=Arrangement.spacedBy(3.dp),verticalAlignment=Alignment.CenterVertically) {
+                    if(airing) TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(14.dp)),onClick={
+                        val queue=channels.map{livePlayable(prefs,it)};selected=null;onPlayLive(queue,chIndexOf(channels,ch))
+                    }) { Text("▶ WATCH",color=ProgramCyan,fontWeight=FontWeight.Bold,fontSize=10.sp) }
+                    if(recordable) TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(14.dp)),onClick={
+                        if(airing) {
+                            Recorder.start(context,ch.url,entry.title+" ("+ch.name+")",entry.endMs+2*60*1000);toast(context,"Recording "+entry.title+".");selected=null
+                        } else { toast(context,ScheduleStore.add(context,prefs,entry.title,ch.name,ch.url,entry.startMs,entry.endMs));selected=null }
+                    }) { Text(if(airing)"● RECORD" else "● SCHEDULE",color=Live,fontWeight=FontWeight.Bold,fontSize=10.sp) }
+                    TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(14.dp)),onClick={onToggleFavorite(ch.id)}) {
+                        Text(if(favs.contains(ch.id))"★ FAVORITE" else "☆ FAVORITE",color=Accent,fontWeight=FontWeight.Bold,fontSize=10.sp)
+                    }
+                    TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(14.dp)),onClick={selected=null}) { Text("CLOSE",color=Ink,fontSize=10.sp) }
+                }
+            },
+            dismissButton = {}
+        )
+    }
+}
+
+private fun chIndexOf(channels: List<LiveChannel>, target: LiveChannel): Int =
+    channels.indexOfFirst { it.id == target.id && it.url == target.url }.coerceAtLeast(0)
+
+
 /* The timeshift DVR records the classic (.ts) live stream — the one every
  * provider supports and the only one that can be recorded. */
 private fun tsUrl(url: String): String =
     if (url.endsWith(".m3u8")) url.removeSuffix(".m3u8") + ".ts" else url
+
+// ZAKO_V437_WEAK_CHANNEL_CORE: Steady mode uses the provider's HLS form when
+// available. HLS segment retries tolerate bursty/overloaded sports feeds much
+// better than a single long MPEG-TS socket. If HLS is rejected, Playback falls
+// back to classic TS automatically for that channel.
+private fun hlsUrl(url: String): String = when {
+    url.endsWith(".ts", ignoreCase = true) -> url.dropLast(3) + ".m3u8"
+    else -> url
+}
 
 private fun liveAutoUrl(prefs: SharedPreferences, url: String): String = url
 
@@ -1582,37 +2189,76 @@ internal object RecentChannels {
 }
 
 internal object Timeshift {
-    @Volatile var bytesWritten: Long = 0L
-    @Volatile var active: Boolean = false
-    @Volatile var file: File? = null
-    /** Monotonic start of this channel's temporary DVR window. Used only for
-     * the on-demand mini-guide timeline; no periodic background task. */
-    @Volatile var startedAtElapsedMs: Long = 0L
-        private set
-    @Volatile var startedAtWallMs: Long = 0L
-        private set
+    // RYZOD_V467_SESSION_OWNERSHIP: a retired writer can only mutate its own
+    // counters/ring. One ingest worker and one cleanup worker serve all tunes.
+    private class Session(val id: Long, val requestedAt: Long) {
+        @Volatile var cancelled = false
+        @Volatile var running = true
+        @Volatile var preparing = true
+        @Volatile var call: okhttp3.Call? = null
+        @Volatile var ring: TimeshiftRing? = null
+        @Volatile var root: File? = null
+        @Volatile var bytesWritten = 0L
+        @Volatile var startedAtElapsedMs = 0L
+        @Volatile var startedAtWallMs = 0L
+        @Volatile var lastByteAt = 0L
+        @Volatile var weakGapEvents = 0L
+        @Volatile var syncResyncEvents = 0L
+        @Volatile var reconnectEvents = 0L
+        @Volatile var storageKind: StorageKind? = null
+    }
 
-    fun windowMs(): Long = if (startedAtElapsedMs > 0L)
-        (android.os.SystemClock.elapsedRealtime() - startedAtElapsedMs).coerceAtLeast(0L)
-    else 0L
+    private val ids = java.util.concurrent.atomic.AtomicLong()
+    private val control = Any()
+    @Volatile private var current: Session? = null
+    private val ingest = java.util.concurrent.ThreadPoolExecutor(
+        1, 1, 0L, java.util.concurrent.TimeUnit.MILLISECONDS,
+        java.util.concurrent.ArrayBlockingQueue<Runnable>(1),
+        java.util.concurrent.ThreadFactory { r -> Thread(r, "ryzod-dvr-ingest").apply { isDaemon = true } },
+        java.util.concurrent.ThreadPoolExecutor.DiscardOldestPolicy()
+    )
+    private val cleanup = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "ryzod-dvr-cleanup").apply { isDaemon = true }
+    }
+    // Accessed only by the single ingest worker. Scan abandoned data once per
+    // storage root per process, never during a remote/UI callback.
+    private val inspectedRoots = HashSet<String>()
+    private val liveStreamClient = Net.streamClient.newBuilder()
+        .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(12, java.util.concurrent.TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .build()
 
-    // ---- writer-flow diagnostics (panel: watch the WRITER, not just the player) ----
-    @Volatile var lastByteAt: Long = 0L          // when the last provider byte arrived
-    @Volatile var throughputBps: Double = 0.0    // (legacy; kept for the dead-feed timing)
+    val bytesWritten: Long get() = current?.bytesWritten ?: 0L
+    val active: Boolean get() = current?.let { it.running && !it.cancelled } == true
+    val isPreparing: Boolean get() = current?.let { it.preparing && !it.cancelled && it.running } == true
+    val file: File? get() = null // compatibility only; no append-only file
+    val startedAtElapsedMs: Long get() = current?.startedAtElapsedMs ?: 0L
+    val startedAtWallMs: Long get() = current?.startedAtWallMs ?: 0L
+    val lastByteAt: Long get() = current?.lastByteAt ?: 0L
+    val throughputBps: Double get() = 0.0
+    val weakGapEvents: Long get() = current?.weakGapEvents ?: 0L
+    val syncResyncEvents: Long get() = current?.syncResyncEvents ?: 0L
+    val reconnectEvents: Long get() = current?.reconnectEvents ?: 0L
+    val storageKind: StorageKind? get() = current?.storageKind
 
-    @Volatile private var gen = 0L
-    @Volatile private var currentCall: okhttp3.Call? = null
-    /** Append-only DVR safety cap. Internal eMMC stays deliberately small; a
-     * verified removable drive gets a larger (<4 GiB) cap that remains safe on
-     * FAT32-like volumes. When the cap is reached Playback falls back to direct
-     * live instead of freezing at the end of the file. */
-    @Volatile var capBytes: Long = 1_000_000_000L
-        private set
-    @Volatile var hitCap: Boolean = false
-        private set
+    fun windowMs(): Long = startedAtElapsedMs.let { start ->
+        if (start > 0L) (android.os.SystemClock.elapsedRealtime() - start).coerceAtLeast(0L) else 0L
+    }
+    fun snapshot(): TimeshiftRing.RingSnapshot? = current?.ring?.snapshot()
+    fun oldestVirtualByte(): Long = snapshot()?.oldestVirtualByte ?: bytesWritten
+    fun newestVirtualByte(): Long = snapshot()?.newestVirtualByte ?: bytesWritten
+    fun generation(): Long = ids.get()
+    private fun isCurrent(session: Session): Boolean = current === session && !session.cancelled && session.running
 
-    /** Find the first verified TS packet boundary in a buffer: three 0x47 sync
-     *  bytes exactly 188 apart. Returns the offset, or -1 if none found. */
+    fun openReader(virtualOffset: Long, expectedGeneration: Long = generation()): TimeshiftRing.RingReader? {
+        val session = current ?: return null
+        if (session.id != expectedGeneration || !isCurrent(session)) return null
+        val reader = runCatching { session.ring?.openReader(virtualOffset) }.getOrNull()
+        if (!isCurrent(session)) { reader?.close(); return null }
+        return reader
+    }
+
     private fun findTsSync(b: ByteArray, len: Int): Int {
         var i = 0
         while (i + 376 < len) {
@@ -1622,165 +2268,261 @@ internal object Timeshift {
         return -1
     }
 
-    /** MPEG-TS packets are exactly 188 bytes, sync byte 0x47. The writer only
-     *  ever publishes WHOLE packets (see the carry buffer in start()), so the
-     *  file is always packet-aligned and reconnect seams are clean. */
-    @Synchronized
-    fun start(context: Context, url: String, prefs: SharedPreferences? = null) {
-        stopInternal()
-        val dir = if (prefs != null) Storage.timeshiftDir(context, prefs) else context.cacheDir
-        val f = File(dir, "timeshift.ts")
-        runCatching { f.delete() }
-        file = f
-        bytesWritten = 0L
-        hitCap = false
-        capBytes = if (prefs != null && Storage.usingDrive(context, prefs)) 3_500_000_000L else 1_000_000_000L
-        startedAtElapsedMs = android.os.SystemClock.elapsedRealtime()
-        startedAtWallMs = System.currentTimeMillis()
-        active = true
-        lastByteAt = System.currentTimeMillis()
-        throughputBps = 0.0
-        val myGen = ++gen
-        Thread {
-            while (active && gen == myGen && bytesWritten < capBytes) {
+    /** Accept a channel change immediately. All storage discovery, probing,
+     * directory creation and stale-file cleanup happens on workers. */
+    fun start(context: Context, url: String, prefs: SharedPreferences? = null,
+              onReady: ((Boolean) -> Unit)? = null): Boolean {
+        val session: Session
+        val old: Session?
+        synchronized(control) {
+            old = current
+            old?.cancelled = true
+            session = Session(ids.incrementAndGet(), android.os.SystemClock.elapsedRealtime())
+            current = session
+        }
+        old?.call?.cancel()
+        TimeshiftServer.retireClients(generation())
+        val app = context.applicationContext
+        ingest.execute { runSession(app, url, session, onReady) }
+        return true
+    }
+
+    fun stop() {
+        val old = synchronized(control) {
+            val previous = current
+            previous?.cancelled = true
+            current = null
+            ids.incrementAndGet()
+            previous
+        }
+        old?.call?.cancel()
+        TimeshiftServer.retireClients(generation())
+        // The one ingest worker exits promptly on cancellation and queues its
+        // own cleanup. No UI thread waits for a writer, fsync, or file deletion.
+    }
+
+    private fun ready(session: Session, ok: Boolean, callback: ((Boolean) -> Unit)?) {
+        session.preparing = false
+        if (!ok) session.running = false
+        if (callback != null) android.os.Handler(android.os.Looper.getMainLooper()).post {
+            if (current === session && !session.cancelled) callback(ok)
+        }
+    }
+
+    private fun runSession(context: Context, url: String, session: Session, callback: ((Boolean) -> Unit)?) {
+        if (!isCurrent(session)) return
+        try {
+            val target = LiveStorageManager.choose(context)
+            if (!isCurrent(session)) return
+            if (target == null) {
+                StabilityCore.note("dvr_storage_unavailable session=${session.id}")
+                ready(session, false, callback)
+                return
+            }
+            if (inspectedRoots.add(target.root.absolutePath)) {
+                val abandoned = target.root.listFiles()?.filter {
+                    (it.isFile && it.name.startsWith("segment-") && it.name.endsWith(".ts")) ||
+                        (it.isDirectory && it.name.startsWith("session-"))
+                }.orEmpty()
+                cleanup.execute { abandoned.forEach { runCatching { it.deleteRecursively() } } }
+            }
+            if (!isCurrent(session)) return
+            val root = File(target.root, "session-${System.currentTimeMillis()}-${session.id}-${System.nanoTime()}")
+            session.root = root
+            val historyMs = 30L * 60L * 1000L
+            val localRing = TimeshiftRing.open(root, historyMs, target.maxRingBytes)
+            session.ring = localRing
+            session.storageKind = target.kind
+            session.startedAtElapsedMs = android.os.SystemClock.elapsedRealtime()
+            session.startedAtWallMs = System.currentTimeMillis()
+            session.lastByteAt = session.startedAtWallMs
+            if (!isCurrent(session)) return
+            TimeshiftServer.ensureStarted()
+            if (!isCurrent(session)) return
+            if (TimeshiftServer.port == 0) {
+                ready(session, false, callback)
+                return
+            }
+            StabilityCore.note("dvr_ring_start session=${session.id} kind=${target.kind} budget=${target.maxRingBytes} setupMs=${android.os.SystemClock.elapsedRealtime() - session.requestedAt}")
+            ready(session, true, callback)
+            var reconnectDelayMs = 250L
+            while (isCurrent(session)) {
+                val beforeAttempt = session.bytesWritten
+                var storageFailed = false
                 try {
                     val req = Request.Builder().url(url).header("User-Agent", Net.UA).build()
-                    val c = Net.streamClient.newCall(req)
-                    currentCall = c
+                    val c = liveStreamClient.newCall(req)
+                    session.call = c
+                    if (!isCurrent(session)) { c.cancel(); break }
                     c.execute().use { resp ->
+                        if (!resp.isSuccessful) throw java.io.IOException("HTTP ${resp.code}")
                         val inp = resp.body?.byteStream()
                         if (inp != null) {
-                            java.io.FileOutputStream(f, true).use { out ->
-                                val buf = ByteArray(64 * 1024)
-                                var sinceCheck = 0L
-                                // SEAM RULE (v4.16): only WHOLE 188-byte packets
-                                // ever reach the published file. Partial packets
-                                // wait in this carry buffer until completed by
-                                // the next read. The file length is therefore
-                                // ALWAYS packet-aligned — no truncation on
-                                // disconnect, and the localhost reader position
-                                // can never end up mid-packet after a reconnect.
-                                val carry = ByteArray(188)
-                                var carryLen = 0
-                                var aligned = false
-                                var pend = java.io.ByteArrayOutputStream()
+                            val buf = ByteArray(64 * 1024)
+                            val carry = ByteArray(188)
+                            var carryLen = 0
+                            var aligned = false
+                            var pend = java.io.ByteArrayOutputStream()
+                            var lastChunkAt = android.os.SystemClock.elapsedRealtime()
 
-                                fun writePackets(data: ByteArray, off0: Int, len0: Int) {
-                                    var off = off0
-                                    var len = len0
-                                    // Complete a partial packet from last read.
-                                    if (carryLen > 0) {
-                                        val need = 188 - carryLen
-                                        if (len < need) {
-                                            System.arraycopy(data, off, carry, carryLen, len)
-                                            carryLen += len
-                                            return
-                                        }
-                                        System.arraycopy(data, off, carry, carryLen, need)
-                                        out.write(carry, 0, 188)
-                                        bytesWritten += 188
-                                        carryLen = 0
-                                        off += need
-                                        len -= need
-                                    }
-                                    // Write all whole packets; keep the tail.
-                                    val whole = (len / 188) * 188
-                                    if (whole > 0) {
-                                        out.write(data, off, whole)
-                                        bytesWritten += whole
-                                    }
-                                    val rem = len - whole
-                                    if (rem > 0) {
-                                        System.arraycopy(data, off + whole, carry, 0, rem)
-                                        carryLen = rem
-                                    }
+                            fun appendToRing(data: ByteArray, off: Int, len: Int) {
+                                if (len <= 0) return
+                                try {
+                                    if (!isCurrent(session)) return
+                                    localRing.append(data, off, len)
+                                } catch (e: Exception) {
+                                    storageFailed = true
+                                    throw e
                                 }
-
-                                while (active && gen == myGen && bytesWritten < capBytes) {
-                                    val n = inp.read(buf)
-                                    if (n < 0) break
-                                    if (!active || gen != myGen) break
-                                    if (!aligned) {
-                                        // Find a verified packet boundary once per
-                                        // connection, then stream through the
-                                        // whole-packet writer from there.
-                                        pend.write(buf, 0, n)
-                                        val pb = pend.toByteArray()
-                                        val sync = findTsSync(pb, pb.size)
-                                        if (sync >= 0) {
-                                            aligned = true
-                                            writePackets(pb, sync, pb.size - sync)
-                                            pend = java.io.ByteArrayOutputStream()
-                                        } else if (pb.size > 8192) {
-                                            val keep = pb.copyOfRange(pb.size - 512, pb.size)
-                                            pend = java.io.ByteArrayOutputStream()
-                                            pend.write(keep)
-                                        }
-                                        continue
-                                    }
-                                    writePackets(buf, 0, n)
-                                    // Lightweight flow tracking for the dead-feed check.
-                                    lastByteAt = System.currentTimeMillis()
-                                    // Storage floor: never squeeze the device.
-                                    sinceCheck += n
-                                    if (sinceCheck > 32_000_000) {
-                                        sinceCheck = 0
-                                        val free = runCatching {
-                                            android.os.StatFs(f.parentFile!!.absolutePath).availableBytes
-                                        }.getOrDefault(Long.MAX_VALUE)
-                                        if (free < 1_500_000_000L) break
-                                    }
-                                }
-                                // Connection over: the carry remainder is simply
-                                // dropped — it was never visible to the reader.
+                                session.bytesWritten += len
+                                session.lastByteAt = System.currentTimeMillis()
                             }
+
+                            fun writePackets(data: ByteArray, off0: Int, len0: Int) {
+                                // ZAKO_V441_TS_RESYNC: never assume a weak TS feed stays aligned forever.
+                                // If one expected packet boundary loses 0x47, stop feeding corrupt framing,
+                                // preserve the remaining bytes, and let the existing three-sync detector
+                                // re-lock on the next read.
+                                var off = off0
+                                var len = len0
+                                if (carryLen > 0) {
+                                    val need = 188 - carryLen
+                                    if (len < need) {
+                                        System.arraycopy(data, off, carry, carryLen, len)
+                                        carryLen += len
+                                        return
+                                    }
+                                    System.arraycopy(data, off, carry, carryLen, need)
+                                    if (carry[0] != 0x47.toByte()) {
+                                        session.syncResyncEvents++
+                                        StabilityCore.note("dvr_ts_sync_lost source=carry count=$session.syncResyncEvents")
+                                        aligned = false
+                                        pend = java.io.ByteArrayOutputStream()
+                                        pend.write(carry, 0, 188)
+                                        pend.write(data, off + need, len - need)
+                                        carryLen = 0
+                                        return
+                                    }
+                                    appendToRing(carry, 0, 188)
+                                    carryLen = 0
+                                    off += need
+                                    len -= need
+                                }
+                                val whole = (len / 188) * 188
+                                if (whole > 0) {
+                                    var badAt = -1
+                                    var pos = off
+                                    val end = off + whole
+                                    while (pos < end) {
+                                        if (data[pos] != 0x47.toByte()) {
+                                            badAt = pos
+                                            break
+                                        }
+                                        pos += 188
+                                    }
+                                    if (badAt >= 0) {
+                                        val goodLen = badAt - off
+                                        if (goodLen > 0) appendToRing(data, off, goodLen)
+                                        session.syncResyncEvents++
+                                        StabilityCore.note("dvr_ts_sync_lost source=body count=$session.syncResyncEvents")
+                                        aligned = false
+                                        pend = java.io.ByteArrayOutputStream()
+                                        pend.write(data, badAt, (off + len) - badAt)
+                                        carryLen = 0
+                                        return
+                                    }
+                                    appendToRing(data, off, whole)
+                                }
+                                val rem = len - whole
+                                if (rem > 0) {
+                                    System.arraycopy(data, off + whole, carry, 0, rem)
+                                    carryLen = rem
+                                }
+                            }
+
+                            while (isCurrent(session)) {
+                                val n = inp.read(buf)
+                                if (n < 0) break
+                                if (!isCurrent(session)) break
+                                val nowChunkAt = android.os.SystemClock.elapsedRealtime()
+                                val inputGapMs = nowChunkAt - lastChunkAt
+                                if (inputGapMs >= 750L) {
+                                    session.weakGapEvents++
+                                    StabilityCore.note("dvr_input_gap ms=$inputGapMs count=$session.weakGapEvents bytes=$session.bytesWritten")
+                                }
+                                lastChunkAt = nowChunkAt
+                                if (!aligned) {
+                                    pend.write(buf, 0, n)
+                                    val pb = pend.toByteArray()
+                                    val sync = findTsSync(pb, pb.size)
+                                    if (sync >= 0) {
+                                        aligned = true
+                                        writePackets(pb, sync, pb.size - sync)
+                                        pend = java.io.ByteArrayOutputStream()
+                                    } else if (pb.size > 8192) {
+                                        val keep = pb.copyOfRange(pb.size - 512, pb.size)
+                                        pend = java.io.ByteArrayOutputStream()
+                                        pend.write(keep)
+                                    }
+                                    continue
+                                }
+                                writePackets(buf, 0, n)
+                            }
+
                         }
                     }
                 } catch (e: Exception) {
-                    // Connection dropped or cancelled — fall through.
+                    if (!isCurrent(session)) break
+                    if (storageFailed) {
+                        StabilityCore.note("dvr_ring_write_failed session=${session.id} kind=${session.storageKind} type=${e.javaClass.simpleName}")
+                        session.running = false
+                        break
+                    }
+                    session.reconnectEvents++
+                    StabilityCore.note("dvr_provider_reconnect session=${session.id} count=${session.reconnectEvents} gaps=${session.weakGapEvents} resyncs=${session.syncResyncEvents} type=${e.javaClass.simpleName}")
+                } finally {
+                    session.call = null
                 }
-                if (active && gen == myGen) {
-                    try { Thread.sleep(1_000) } catch (e: InterruptedException) { break }
-                }
+                if (session.bytesWritten > beforeAttempt + 188L * 50L) reconnectDelayMs = 250L
+                else reconnectDelayMs = (reconnectDelayMs * 2L).coerceAtMost(2_000L)
+                // Short cancellation-aware waits keep the next queued tune from
+                // waiting behind an old channel's exponential reconnect delay.
+                val until = android.os.SystemClock.elapsedRealtime() + reconnectDelayMs
+                while (isCurrent(session) && android.os.SystemClock.elapsedRealtime() < until) Thread.sleep(25)
             }
-            if (gen == myGen) {
-                if (bytesWritten >= capBytes) hitCap = true
-                active = false
+        } catch (e: Exception) {
+            if (isCurrent(session)) {
+                StabilityCore.note("dvr_session_failed session=${session.id} type=${e.javaClass.simpleName}")
+                ready(session, false, callback)
             }
-        }.apply { isDaemon = true; name = "timeshift-writer" }.start()
-    }
-
-    @Synchronized
-    fun stop() {
-        stopInternal()
-        runCatching { file?.delete() }
-        file = null
-    }
-
-    private fun stopInternal() {
-        active = false
-        gen++
-        bytesWritten = 0L
-        hitCap = false
-        startedAtElapsedMs = 0L
-        startedAtWallMs = 0L
-        // Sever the old provider connection IMMEDIATELY. Without this, a stale
-        // downloader could sit on a dead provider socket for minutes — the
-        // provider then sees ghost connections stack up and throttles the
-        // account, which is why playback used to get worse the longer you
-        // channel-surfed. Cancel = connection closed, thread exits, all clean.
-        runCatching { currentCall?.cancel() }
-        currentCall = null
+        } finally {
+            session.running = false
+            session.preparing = false
+            session.call?.cancel()
+            session.call = null
+            val retiredRing = session.ring
+            val retiredRoot = session.root
+            cleanup.execute {
+                runCatching { retiredRing?.close() }
+                runCatching { retiredRoot?.delete() }
+            }
+        }
     }
 }
 
-/* Serves the growing DVR file to the player as a plain localhost stream —
- * the exact same kind of stream the player already plays perfectly from
- * providers. When playback reaches the end of what's recorded so far, the
- * server simply waits for more before sending it. No custom player internals. */
+
+// ZAKO_V440_RING_SERVER: localhost playback follows the virtual byte timeline
+// across physical segment boundaries. Reclaimed history is clamped by RingReader
+// and reaching the live tail waits for more bytes instead of rebuilding player.
 private object TimeshiftServer {
     @Volatile var port = 0
-    private var server: java.net.ServerSocket? = null
+    @Volatile private var server: java.net.ServerSocket? = null
+    private val clients = java.util.concurrent.ConcurrentHashMap<java.net.Socket, Long>()
+    private val handlers = java.util.concurrent.ThreadPoolExecutor(
+        0, 2, 30L, java.util.concurrent.TimeUnit.SECONDS,
+        java.util.concurrent.SynchronousQueue<Runnable>(),
+        java.util.concurrent.ThreadFactory { r -> Thread(r, "ryzod-dvr-reader").apply { isDaemon = true } }
+    )
 
     @Synchronized
     fun ensureStarted() {
@@ -1794,130 +2536,80 @@ private object TimeshiftServer {
                 latch.countDown()
                 while (true) {
                     val sock = try { ss.accept() } catch (_: Exception) { break }
-                    Thread { handle(sock) }.apply { isDaemon = true }.start()
+                    val acceptedGeneration = Timeshift.generation()
+                    clients[sock] = acceptedGeneration
+                    // A tune/stop can race accept and registration. Recheck
+                    // after registration so retirement cannot miss this socket.
+                    if (acceptedGeneration != Timeshift.generation() || server !== ss) {
+                        clients.remove(sock)
+                        runCatching { sock.close() }
+                        continue
+                    }
+                    try { handlers.execute { handle(sock, acceptedGeneration) } }
+                    catch (_: java.util.concurrent.RejectedExecutionException) {
+                        clients.remove(sock)
+                        runCatching { sock.close() }
+                    }
                 }
             } catch (_: Exception) {
                 latch.countDown()
             }
-        }.apply { isDaemon = true; name = "tshift-server" }.start()
+        }.apply { isDaemon = true; name = "tshift-ring-server" }.start()
         runCatching { latch.await(2, java.util.concurrent.TimeUnit.SECONDS) }
     }
 
-    /**
-     * v4.20: the LIVE tail deliberately has UNKNOWN final length again.
-     *
-     * v4.19 advertised the future 1 GB / 3.5 GB DVR cap as Content-Length so
-     * Media3 would expose a normal seek bar. For MPEG-TS, that can make the
-     * extractor inspect near the advertised end — bytes that may not exist for
-     * hours — while this server patiently tail-follows. Real Fire TV testing
-     * showed exactly that symptom: 0% / black picture for minutes while the
-     * writer kept producing a perfectly playable recording.
-     *
-     * Rewind/FF is now Zako-controlled. A query-string offset means "start this
-     * new unknown-length tail at a byte that ALREADY EXISTS"; it is not an HTTP
-     * Range and we never claim unwritten bytes exist.
-     */
-    /** Snap a localhost DVR open to a nearby PAT packet (PID 0). This scan
-     * happens only on tune/seek, never in the writer hot loop. Starting Media3
-     * at a program table greatly improves TS relock on older Fire TV hardware. */
-    private fun patAlignedStart(f: File, requested: Long, written: Long): Long {
-        if (written < 188L * 3L) return (requested / 188L) * 188L
-        val alignedRequested = (requested.coerceIn(0L, written) / 188L) * 188L
-        val scanBytes = 1024L * 1024L
-        val scanStart = if (alignedRequested == 0L) 0L else (alignedRequested - scanBytes).coerceAtLeast(0L)
-        val scanEnd = if (alignedRequested == 0L) minOf(written, scanBytes) else minOf(written, alignedRequested + 188L)
-        val length = (scanEnd - scanStart).coerceAtLeast(0L).toInt()
-        if (length < 188) return alignedRequested
-        return runCatching {
-            java.io.RandomAccessFile(f, "r").use { raf ->
-                raf.seek(scanStart)
-                val b = ByteArray(length)
-                val n = raf.read(b)
-                if (n < 188) return@use alignedRequested
-                var firstPat = -1
-                var lastPat = -1
-                var i = 0
-                while (i + 188 <= n) {
-                    if (b[i] == 0x47.toByte()) {
-                        val pid = ((b[i + 1].toInt() and 0x1F) shl 8) or (b[i + 2].toInt() and 0xFF)
-                        val payloadStart = (b[i + 1].toInt() and 0x40) != 0
-                        if (pid == 0 && payloadStart) {
-                            if (firstPat < 0) firstPat = i
-                            lastPat = i
-                        }
-                    }
-                    i += 188
-                }
-                val chosen = if (alignedRequested == 0L) firstPat else lastPat
-                if (chosen >= 0) scanStart + chosen else alignedRequested
+    fun retireClients(currentGeneration: Long) {
+        clients.entries.forEach { (socket, generation) ->
+            if (generation != currentGeneration && clients.remove(socket, generation)) {
+                runCatching { socket.close() }
             }
-        }.getOrDefault(alignedRequested)
+        }
     }
 
-    private fun handle(sock: java.net.Socket) {
+    private fun handle(sock: java.net.Socket, acceptedGeneration: Long) {
         try {
             sock.tcpNoDelay = true
-            val reader = java.io.BufferedReader(java.io.InputStreamReader(sock.getInputStream()))
-            val requestLine = reader.readLine() ?: return
+            // Incomplete localhost requests must not occupy the bounded reader
+            // workers forever. Generation retirement also interrupts writes.
+            sock.soTimeout = 2_000
+            val request = java.io.BufferedReader(java.io.InputStreamReader(sock.getInputStream()))
+            val requestLine = request.readLine() ?: return
             while (true) {
-                val line = reader.readLine() ?: break
+                val line = request.readLine() ?: break
                 if (line.isEmpty()) break
-                // Intentionally ignore Range headers. The growing live resource
-                // has no truthful fixed final length, so app-driven ?offset= is
-                // the only DVR seek mechanism.
             }
-
             val target = runCatching {
                 val path = requestLine.substringAfter(' ').substringBefore(' ')
                 val query = path.substringAfter('?', "")
-                query.split('&')
-                    .firstOrNull { it.startsWith("offset=") }
-                    ?.substringAfter('=')
-                    ?.toLongOrNull()
-                    ?: 0L
+                query.split('&').firstOrNull { it.startsWith("offset=") }
+                    ?.substringAfter('=')?.toLongOrNull() ?: 0L
             }.getOrDefault(0L)
-            val myFile = Timeshift.file ?: return
-            val writtenNow = minOf(Timeshift.bytesWritten, myFile.length())
-            var startPos = target.coerceIn(0L, writtenNow.coerceAtLeast(0L))
-            // The writer publishes only complete 188-byte TS packets. Keep every
-            // app-driven seek on the same boundary, then snap to a nearby PAT so
-            // the TS extractor sees a clean program map after tune/seek.
-            startPos = (startPos / 188L) * 188L
-            startPos = patAlignedStart(myFile, startPos, writtenNow)
 
-            val out = java.io.BufferedOutputStream(sock.getOutputStream())
-            val headers = buildString {
-                append("HTTP/1.1 200 OK\r\n")
-                append("Content-Type: video/mp2t\r\n")
-                append("Cache-Control: no-store\r\n")
-                append("Connection: close\r\n\r\n")
-            }
-            out.write(headers.toByteArray())
-            out.flush()
+            val expectedGeneration = requestLine.substringAfter("generation=", "")
+                .substringBefore('&').substringBefore(' ').toLongOrNull() ?: return
+            if (expectedGeneration != acceptedGeneration) return
+            val ringReader = Timeshift.openReader(target, expectedGeneration) ?: return
+            ringReader.use { rr ->
+                // Retirement can close the socket during the response header.
+                // Acquire and release the reader around that write too.
+                val out = java.io.BufferedOutputStream(sock.getOutputStream())
+                out.write(
+                    ("HTTP/1.1 200 OK\r\n" +
+                        "Content-Type: video/mp2t\r\n" +
+                        "Cache-Control: no-store\r\n" +
+                        "Connection: close\r\n\r\n").toByteArray()
+                )
+                out.flush()
 
-            java.io.RandomAccessFile(myFile, "r").use { raf ->
-                var pos = startPos
                 val buf = ByteArray(64 * 1024)
                 var idleTicks = 0
-                while (true) {
-                    if (Timeshift.file !== myFile) break
-                    val real = minOf(Timeshift.bytesWritten, raf.length())
-                    val avail = real - pos
-                    if (avail > 0) {
+                while (Timeshift.generation() == expectedGeneration && Timeshift.active) {
+                    val n = rr.read(buf)
+                    if (n > 0) {
                         idleTicks = 0
-                        raf.seek(pos)
-                        val want = if (buf.size.toLong() < avail) buf.size else avail.toInt()
-                        val n = raf.read(buf, 0, want)
-                        if (n > 0) {
-                            out.write(buf, 0, n)
-                            out.flush()
-                            pos += n
-                        } else {
-                            Thread.sleep(50)
-                        }
-                    } else if (!Timeshift.active) {
-                        break
-                    } else {
+                        out.write(buf, 0, n)
+                        out.flush()
+                    } else if (n == 0 && Timeshift.active) {
                         Thread.sleep(50)
                         if (++idleTicks >= 40) {
                             idleTicks = 0
@@ -1931,12 +2623,15 @@ private object TimeshiftServer {
                             }
                             if (gone) break
                         }
+                    } else {
+                        break
                     }
                 }
             }
         } catch (_: Exception) {
-            // Client hung up (seek/channel change/app exit) — normal.
+            // Client hung up, channel changed, or storage disappeared.
         } finally {
+            clients.remove(sock)
             runCatching { sock.close() }
         }
     }
@@ -1944,6 +2639,8 @@ private object TimeshiftServer {
     @Synchronized
     fun stop() {
         runCatching { server?.close() }
+        clients.keys.forEach { runCatching { it.close() } }
+        clients.clear()
         server = null
         port = 0
     }
@@ -1982,6 +2679,79 @@ object Playback {
     private var liveDvrMediaSources: androidx.media3.exoplayer.source.DefaultMediaSourceFactory? = null
     private var browserVodMediaSources: androidx.media3.exoplayer.source.DefaultMediaSourceFactory? = null
     private var vodUaFallbackUsed = false
+    private var skipNativePause = false
+    private var pausePreparing = false
+    private var pauseResumeRequested = false
+
+    /** Starts temporary storage only for an explicit Pause or recording request.
+     * Stops direct playback before opening the writer: still one provider stream. */
+    private fun beginTemporaryLive(keepPlaying: Boolean): Boolean {
+        val p = player ?: return false
+        val ctx = appContext ?: return false
+        val ch = queue.getOrNull(currentIdxC.intValue) ?: return false
+        if (!liveMode || !ch.isLive) return false
+        if (Timeshift.active) return true
+        playbackGen++
+        val myGen = playbackGen
+        pausePreparing = true
+        pauseResumeRequested = keepPlaying
+        simpleRaw = false
+        directLive = false
+        stopGovernor()
+        p.stop()
+        p.clearMediaItems()
+        p.playWhenReady = keepPlaying
+        Timeshift.start(ctx, tsUrl(ch.url), prefsRef) { ready ->
+            if (myGen != playbackGen || player !== p || !liveMode) return@start
+            if (!ready) {
+                pausePreparing = false
+                Timeshift.stop()
+                toast(ctx, "Pause recording unavailable: check free storage. Returning to live TV.")
+                zapTo(currentIdxC.intValue)
+            } else {
+                startDvrWhenPrimed(p, ch, myGen, keepPlaying)
+            }
+        }
+        return true
+    }
+
+    fun pauseForConfiguration() {
+        skipNativePause = true
+        player?.pause()
+        android.os.Handler(android.os.Looper.getMainLooper()).post { skipNativePause = false }
+    }
+
+    fun setPlaying(playing: Boolean) {
+        val p = player ?: return
+        if (pausePreparing) {
+            pauseResumeRequested = playing
+            p.playWhenReady = playing
+        } else if (liveMode && !playing && !Timeshift.active) {
+            beginTemporaryLive(false)
+        } else p.playWhenReady = playing
+    }
+
+    fun returnToLive(): Boolean {
+        if (!liveMode || queue.isEmpty()) return false
+        if (Recorder.activeName.value != null) return seekDvrBy(Timeshift.windowMs())
+        zapTo(currentIdxC.intValue)
+        return true
+    }
+
+    fun togglePlaying() {
+        setPlaying(if (pausePreparing) !pauseResumeRequested else !(player?.playWhenReady ?: false))
+    }
+
+    /** Retry localhost playback without deleting the paused channel history. */
+    private fun recoverTemporaryLive(): Boolean {
+        if (!liveMode || !Timeshift.active || Timeshift.isPreparing) return false
+        val p = player ?: return false
+        val ch = queue.getOrNull(currentIdxC.intValue) ?: return false
+        val pos = dvrAbsolutePositionMs()
+        val offset = (pos * dvrBytesPerMs()).toLong().coerceIn(Timeshift.oldestVirtualByte(), Timeshift.newestVirtualByte())
+        setGrowingDvrSource(p, ch, offset, pos, p.playWhenReady)
+        return true
+    }
 
     private fun mediaItemFor(pl: Playable, forceClassic: Boolean): MediaItem {
         val u = if (forceClassic && pl.isLive) tsUrl(pl.url) else pl.url
@@ -1995,8 +2765,8 @@ object Playback {
     private fun ensurePlayer(context: Context, prefs: SharedPreferences): ExoPlayer {
         appContext = context.applicationContext
         prefsRef = prefs
-        simpleRaw = prefs.getBoolean("simple_mode", true)
         player?.let { return it }
+        simpleRaw = prefs.getBoolean("simple_mode", true)
         val bufferSec = prefs.getInt("buffer_sec", 30)
         // How much video to collect before showing the picture (and 2x that
         // after a stall). Bigger = slower channel changes but steadier playback
@@ -2018,21 +2788,27 @@ object Playback {
         // more protected than before. (The old 1.5s "fast start" drained on the
         // first network dip and caused a stall loop.)
         val steadyRecovery = prefs.getBoolean("live_steady_recovery", false)
-        val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(
-                (bufferSec * 1000).coerceAtMost(60_000),
-                (bufferSec * 1000 * 3).coerceIn(60_000, 90_000),
-                lockMs,                                    // collect the chosen cushion before starting
-                if (steadyRecovery) (lockMs * 2).coerceAtLeast(6_000) else lockMs
-            )
-            .setBackBuffer(10_000, false)
-            // Let Media3 size the byte target from the track (panel: the fixed
-            // 24MB cap could stop loading before enough SECONDS were banked,
-            // which showed up as the buffer % filling very slowly). Time is the
-            // controlling constraint, exactly like the smooth 4.9 build.
-            .setTargetBufferBytes(C.LENGTH_UNSET)
-            .setPrioritizeTimeOverSizeThresholds(true)
-            .build()
+        // ZAKO_V439_SAFE_BUFFER_INVARIANTS: Media3 requires both playback thresholds
+        // to be <= minBufferMs. Steady may request a deeper recovery cushion, but
+        // the value passed into DefaultLoadControl is clamped before player creation.
+        val minBufferMs = (bufferSec * 1000).coerceAtMost(60_000)
+        val requestedStartMs = if (steadyRecovery) maxOf(lockMs, 6_000) else lockMs
+        val requestedRebufferMs = if (steadyRecovery) maxOf(lockMs * 3, 12_000).coerceAtMost(20_000) else lockMs
+        val safeStartMs = minOf(requestedStartMs, minBufferMs)
+        val safeRebufferMs = minOf(requestedRebufferMs, minBufferMs)
+        StabilityCore.note("v439_buffer_policy steady=$steadyRecovery min=$minBufferMs start=$safeStartMs rebuffer=$safeRebufferMs")
+        // ZAKO_V433_BUFFER_CAP: keep the proven startup/rebuffer cushion, but stop
+        // VOD or DVR-behind-live from reserving a 60-90s unbounded sample buffer.
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+        val lowRam = am?.isLowRamDevice == true || (am?.memoryClass ?: 512) <= 256
+        val maxBufferMs = (bufferSec * 1000 * 3).coerceIn(30_000, 60_000)
+        val loadControl = PlaybackMemoryPolicy.create(
+            lowRam = lowRam,
+            minBufferMs = minBufferMs,
+            maxBufferMs = maxBufferMs,
+            startBufferMs = safeStartMs,
+            rebufferMs = safeRebufferMs
+        )
         // Some IPTV MPEG-TS streams carry CEA-608 captions without declaring
         // them in PMT metadata. Tell Media3 to expose channel 1 when present so
         // the CC toggle can actually select those captions. This adds no polling.
@@ -2074,7 +2850,7 @@ object Playback {
             .setLoadErrorHandlingPolicy(androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy(8))
         // DVR Live is a still-growing MPEG-TS stream. Do NOT ask Media3 to
         // discover a fixed duration or do native constant-bitrate seeking here;
-        // Zako owns the 45-minute DVR window and reopens the localhost stream at
+        // RYZOD owns the bounded pause-recording window and reopens the localhost stream at
         // already-written packet offsets. The tolerant TS flags help Fire TV lock
         // onto provider streams that begin between keyframes.
         val liveDvrExtractors = androidx.media3.extractor.DefaultExtractorsFactory()
@@ -2115,6 +2891,16 @@ object Playback {
         applyCaptionPreference(p, prefs.getBoolean("cc_enabled", false))
         p.addListener(object : Player.Listener {
             private var prevIdx = 0
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                if (pausePreparing && reason == Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST) {
+                    pauseResumeRequested = playWhenReady
+                }
+                if (!playWhenReady && reason == Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST &&
+                    liveMode && !skipNativePause && !backgroundSuspended && !pausePreparing && !Timeshift.active &&
+                    p.playbackState != Player.STATE_IDLE && p.playbackState != Player.STATE_ENDED) {
+                    beginTemporaryLive(false)
+                }
+            }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
                 playStateC.intValue = playbackState
@@ -2132,7 +2918,7 @@ object Playback {
                     val myGen = playbackGen
                     android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                         if (myGen == playbackGen && liveMode && player === p) {
-                            zapTo(currentIdxC.intValue, preserveDirect = directLive)
+                            if (!recoverTemporaryLive()) zapTo(currentIdxC.intValue, preserveDirect = directLive)
                         }
                     }, 700)
                 }
@@ -2144,6 +2930,18 @@ object Playback {
             }
 
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                // ZAKO_V437_LIVE_EDGE_RECOVERY: Media3 documents this as the
+                // correct recovery when an HLS/live player falls behind the live window.
+                if (liveMode && error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) {
+                    StabilityCore.note("live_edge_recover")
+                    p.seekToDefaultPosition()
+                    p.prepare()
+                    p.playWhenReady = true
+                    return
+                }
+                if (liveMode && prefsRef?.getBoolean("live_steady_recovery", false) == true) {
+                    StabilityCore.note("steady_player_error_safe code=${error.errorCode} direct=$directLive")
+                }
                 // VOD-only compatibility retry: if the provider explicitly
                 // rejects our normal UA with 403/406, rebuild the SAME queue
                 // once with a browser-style UA. No polling and no live-TV cost.
@@ -2185,8 +2983,10 @@ object Playback {
                         if (liveMode) {
                             // Timeshift trouble? After 3 strikes, flip to direct
                             // provider playback so video ALWAYS works.
-                            noteLiveFail()
-                            zapTo(currentIdxC.intValue, preserveDirect = directLive)
+                            if (!recoverTemporaryLive()) {
+                                noteLiveFail()
+                                zapTo(currentIdxC.intValue, preserveDirect = directLive)
+                            }
                         } else {
                             p.prepare()
                             p.play()
@@ -2251,31 +3051,14 @@ object Playback {
             if (simpleRaw) { governorRunning = false; return }
             runCatching {
                 if (liveMode) {
-                    // The append-only DVR must never turn into a hard stop. If
-                    // its safety cap is reached, transparently continue the same
-                    // channel on the direct provider path. Pause/rewind/record
-                    // are unavailable until the next channel tune, but LIVE TV
-                    // keeps playing instead of freezing at the end of the file.
-                    if (!directLive && Timeshift.hitCap) {
-                        directLive = true
-                        zapTo(currentIdxC.intValue, preserveDirect = true)
-                        return@runCatching
-                    }
                     val now = System.currentTimeMillis()
                     val cushionMs = p.totalBufferedDuration
 
-                    // Optional cushion assist. Default is NORMAL 1.0x playback:
-                    // collect the lock-in buffer once, then leave speed alone.
-                    // Customers with especially bursty providers can opt into a
-                    // gentle 0.95x refill when the cushion gets dangerously thin.
+                    // ZAKO_V437_NO_SPEED_GOVERNOR: do not manipulate live playback
+                    // speed to manufacture a cushion. Keep A/V clocking at 1.0x;
+                    // reserve comes from startup/rebuffer thresholds and HLS/direct recovery.
                     val steadyRecovery = prefsRef?.getBoolean("live_steady_recovery", false) == true
-                    if (!steadyRecovery) {
-                        if (p.playbackParameters.speed != 1.0f) p.setPlaybackSpeed(1.0f)
-                    } else if (p.isPlaying) {
-                        val cur = p.playbackParameters.speed
-                        if (cushionMs < 4_000 && cur > 0.96f) p.setPlaybackSpeed(0.95f)
-                        else if (cushionMs > 6_000 && cur < 1.0f) p.setPlaybackSpeed(1.0f)
-                    }
+                    if (p.playbackParameters.speed != 1.0f) p.setPlaybackSpeed(1.0f)
 
                     // Progress-based stall recovery (light): only act when the
                     // buffer has been frozen several seconds while buffering.
@@ -2300,7 +3083,7 @@ object Playback {
                                 stallRestarts <= 1 -> {
                                     stallRestarts = 2
                                     bufferingSince = 0L; lastBufMs = -1L
-                                    zapTo(currentIdxC.intValue, preserveDirect = directLive)
+                                    if (!recoverTemporaryLive()) zapTo(currentIdxC.intValue, preserveDirect = directLive)
                                 }
                                 else -> streamDeadC.value = true
                             }
@@ -2357,6 +3140,8 @@ object Playback {
         private set
     private var liveFails = 0
     private var retriesP = 0
+    // ZAKO_V438_STEADY_CRASH_HOTFIX: Steady must never force a guessed transport
+    // or recursively rebuild the player from inside Media3's error callback.
     // Bumped on every channel change / retry / stop. Delayed callbacks
     // capture the value and refuse to run if it has moved on (stale).
     @Volatile private var playbackGen = 0L
@@ -2373,7 +3158,7 @@ object Playback {
         return if (ms >= 2_000L && bytes >= 188L * 20L) bytes.toDouble() / ms.toDouble() else 0.0
     }
 
-    /** Approximate playhead within Zako's own temporary DVR window. */
+    /** Approximate playhead within RYZOD's own temporary DVR window. */
     fun dvrAbsolutePositionMs(): Long {
         if (!liveMode || simpleRaw || directLive) return player?.currentPosition?.coerceAtLeast(0L) ?: 0L
         val window = Timeshift.windowMs()
@@ -2395,21 +3180,24 @@ object Playback {
         val p = player ?: return false
         val rate = dvrBytesPerMs()
         if (rate <= 0.0) return false
-        val window = Timeshift.windowMs()
         val current = dvrAbsolutePositionMs()
-        // Cable-box style temporary history: expose only the most recent 45
-        // minutes even if the append-only USB file happens to contain more.
-        // Channel changes already reset Timeshift, matching the expected DVR UX.
-        val oldestAllowed = (window - DVR_HISTORY_MS).coerceAtLeast(0L)
-        // Stay a fraction behind the byte currently being appended so a forward
-        // jump can relock cleanly. If the viewer paused only a few seconds, one
-        // FF press still lands essentially at LIVE.
-        val liveSafe = (window - 500L).coerceAtLeast(oldestAllowed)
-        val targetMs = (current + deltaMs).coerceIn(oldestAllowed, liveSafe)
-        var offset = (targetMs * rate).toLong().coerceAtLeast(0L)
-        val maxWritten = Timeshift.bytesWritten.coerceAtLeast(0L)
-        offset = offset.coerceAtMost(maxWritten)
+        val oldestByte = Timeshift.oldestVirtualByte()
+        val newestByte = Timeshift.newestVirtualByte()
+        if (newestByte <= oldestByte) return false
+
+        // ZAKO_V440_RING_SEEK_WINDOW: the rewind limit is the oldest segment
+        // still retained on USB/internal storage, not a hard-coded 45 minutes.
+        // Keep ~500 ms behind the writer tail so Media3 can relock cleanly.
+        val liveCushionBytes = (500.0 * rate).toLong().coerceAtLeast(188L)
+        val liveSafeByte = (newestByte - liveCushionBytes).coerceAtLeast(oldestByte)
+        val requestedByte = ((current + deltaMs).coerceAtLeast(0L) * rate).toLong()
+        var offset = requestedByte.coerceIn(oldestByte, liveSafeByte)
         offset = (offset / 188L) * 188L
+        if (offset < oldestByte) {
+            offset = ((oldestByte + 187L) / 188L) * 188L
+            if (offset > liveSafeByte) offset = liveSafeByte
+        }
+        val targetMs = (offset.toDouble() / rate).toLong().coerceAtLeast(0L)
         reopenDvrAtOffset(offset, targetMs)
         return true
     }
@@ -2424,7 +3212,7 @@ object Playback {
         dvrSourceOffsetBytes = offset.coerceAtLeast(0L)
         dvrSourceBaseMs = baseMs.coerceAtLeast(0L)
         val uri = Uri.parse(
-            "http://127.0.0.1:${TimeshiftServer.port}/live/${System.nanoTime()}?offset=$dvrSourceOffsetBytes"
+            "http://127.0.0.1:${TimeshiftServer.port}/live/${System.nanoTime()}?offset=$dvrSourceOffsetBytes&generation=${Timeshift.generation()}"
         )
         val item = MediaItem.Builder()
             .setUri(uri)
@@ -2449,9 +3237,22 @@ object Playback {
             override fun run() {
                 if (myGen != playbackGen || player !== p || !liveMode || simpleRaw || directLive) return
                 val waited = android.os.SystemClock.elapsedRealtime() - started
-                val ready = Timeshift.bytesWritten >= DVR_PRIME_BYTES || waited >= 2_000L
+                // ZAKO_V441_STEADY_CUSHION: weak-channel mode trades a few seconds of
+                // tune latency for enough retained video to ride through short provider stalls.
+                val steadyRecovery = prefsRef?.getBoolean("live_steady_recovery", false) == true
+                val ready = if (steadyRecovery) {
+                    (waited >= 4_000L && Timeshift.bytesWritten >= DVR_PRIME_BYTES) || waited >= 7_000L
+                } else {
+                    Timeshift.bytesWritten >= DVR_PRIME_BYTES || waited >= 2_000L
+                }
                 if (ready) {
-                    setGrowingDvrSource(p, ch, 0L, 0L, keepPlaying)
+                    if (steadyRecovery) StabilityCore.note(
+                        "steady_prime waited=$waited bytes=${Timeshift.bytesWritten} gaps=${Timeshift.weakGapEvents} resyncs=${Timeshift.syncResyncEvents} reconnects=${Timeshift.reconnectEvents}"
+                    )
+                    val requestedPlaying = if (pausePreparing) pauseResumeRequested else keepPlaying
+                    pausePreparing = false
+                    setGrowingDvrSource(p, ch, 0L, 0L, requestedPlaying)
+                    startGovernor()
                 } else {
                     main.postDelayed(this, 100L)
                 }
@@ -2553,6 +3354,7 @@ object Playback {
         if (q.isEmpty()) return
         val i = ((idx % q.size) + q.size) % q.size
         val ch = q[i]
+        liveProviderReserved = true
         currentIdxC.intValue = i
         everReadyC.value = false
         videoFpsC.floatValue = 0f
@@ -2566,26 +3368,21 @@ object Playback {
         p.setPlaybackSpeed(1.0f)
         dvrSourceOffsetBytes = 0L
         dvrSourceBaseMs = 0L
-        if (directLive || simpleRaw) {
-            // Direct from the provider: the proven ultra-light path.
-            Timeshift.stop()
-            val item = MediaItem.Builder()
-                .setUri(Uri.parse(tsUrl(ch.url)))
-                .setMediaMetadata(MediaMetadata.Builder().setTitle(ch.name).build())
-                .build()
-            p.setMediaItem(item)
-            p.prepare()
-            p.playWhenReady = true
-        } else {
-            TimeshiftServer.ensureStarted()
-            Timeshift.start(ctx, tsUrl(ch.url), prefsRef)
-            // Do not hand Media3 an empty just-created file. Bank a small TS
-            // prefix first, then start the dedicated growing-DVR extractor path.
-            p.stop()
-            p.clearMediaItems()
-            val myGen = playbackGen
-            startDvrWhenPrimed(p, ch, myGen, keepPlaying = true)
-        }
+        pausePreparing = false
+        pauseResumeRequested = false
+        stopGovernor()
+        Timeshift.stop()
+        simpleRaw = prefsRef?.getBoolean("simple_mode", true) ?: true
+        directLive = true
+        p.stop()
+        p.clearMediaItems()
+        val item = MediaItem.Builder()
+            .setUri(Uri.parse(tsUrl(ch.url)))
+            .setMediaMetadata(MediaMetadata.Builder().setTitle(ch.name).build())
+            .build()
+        p.setMediaItem(item)
+        p.prepare()
+        p.playWhenReady = true
         // Remember this channel for next app start.
         prefsRef?.edit()
             ?.putString("last_live_name", ch.name)
@@ -2624,6 +3421,7 @@ object Playback {
             // Movies / episodes / downloads / recordings: no periodic live-TV
             // supervision at all. Keep the Fire Stick focused on decode/render.
             liveMode = false
+            liveProviderReserved = false
             vodUaFallbackUsed = false
             stopGovernor()
             Timeshift.stop()
@@ -2647,32 +3445,33 @@ object Playback {
     /** True only when the current live picture is actually being fed by the
      * one DVR writer. `liveMode` alone is NOT enough (v4.17 could be in direct
      * rescue and create a 0-byte recording). */
-    fun canTeeRecording(): Boolean = liveMode && !simpleRaw && !directLive && Timeshift.active && Timeshift.file != null
+    fun canTeeRecording(): Boolean = liveMode && !simpleRaw && !directLive && Timeshift.active && (Timeshift.snapshot() != null || Timeshift.isPreparing)
 
     /** Recording a direct-rescue live channel must return to the one-connection
      * DVR path first; otherwise a tee has no source and a second network stream
      * would violate the provider connection rule. */
     fun prepareCurrentForRecording(): Boolean {
-        if (!liveMode || simpleRaw) return false
-        if (!canTeeRecording()) {
-            directLive = false
-            zapTo(currentIdxC.intValue)
-        }
-        return Timeshift.active && Timeshift.file != null
+        if (!liveMode) return false
+        if (!canTeeRecording()) beginTemporaryLive(true)
+        return Timeshift.active && (Timeshift.snapshot() != null || Timeshift.isPreparing)
     }
 
     @Volatile private var backgroundSuspended = false
+    @Volatile private var liveProviderReserved = false
 
     /** Stop hidden live playback/DVR work. An active recording is the one
      * intentional exception: it owns the single provider stream while hidden. */
     fun suspendForBackground() {
         val p = player ?: return
+        backgroundSuspended = true
         if (Recorder.activeName.value != null) {
             p.pause()
             return
         }
         if (liveMode && queue.isNotEmpty()) {
+            pausePreparing = false
             backgroundSuspended = true
+            liveProviderReserved = false
             playbackGen++
             stopGovernor()
             Timeshift.stop()
@@ -2687,16 +3486,17 @@ object Playback {
         val p = player ?: return
         if (backgroundSuspended && liveMode && queue.isNotEmpty()) {
             backgroundSuspended = false
-            if (!simpleRaw) startGovernor()
-            zapTo(currentIdxC.intValue)
+            if (Timeshift.active) p.play() else zapTo(currentIdxC.intValue)
         } else if (queue.isNotEmpty()) {
+            backgroundSuspended = false
             p.play()
         }
     }
 
     fun livePathLabel(): String = when {
-        simpleRaw -> "SMOOTH LIVE"
-        directLive -> "DIRECT RESCUE"
+        Timeshift.active -> "PAUSE RECORDING"
+        simpleRaw -> "LIVE • PAUSE AVAILABLE"
+        directLive -> "LIVE • PAUSE AVAILABLE"
         liveMode -> "DVR LIVE"
         else -> "ON DEMAND"
     }
@@ -2719,7 +3519,9 @@ object Playback {
     fun providerConnectionSlots(): Int {
         val cur = queue.getOrNull(currentIdxC.intValue) ?: return 0
         if (cur.url.startsWith("/") || cur.url.startsWith("file:")) return 0
-        if (player == null || playStateC.intValue == Player.STATE_IDLE) return 0
+        if (player == null) return 0
+        if (liveProviderReserved) return 1
+        if (playStateC.intValue == Player.STATE_IDLE) return 0
         return if (liveMode && !simpleRaw && !directLive) {
             if (Timeshift.active) 1 else 0
         } else 1
@@ -2750,7 +3552,9 @@ object Playback {
 
     /** Full stop: close the one stream, stop the DVR recorder, free the decoders. */
     fun releaseAll() {
+        liveProviderReserved = false
         playbackGen++
+        pausePreparing = false
         stopGovernor()
         Timeshift.stop()
         TimeshiftServer.stop()
@@ -2784,15 +3588,91 @@ private object BrowseFocusMemory {
 }
 
 /* ----------------------------- movies pane ----------------------------- */
+
+@Composable
+private fun VodInfoDialog(
+    source: Source?,
+    prefs: SharedPreferences,
+    movie: Movie,
+    onPlay: (Playable) -> Unit,
+    onClose: () -> Unit
+) {
+    val context = LocalContext.current
+    var info by remember(movie.id) { mutableStateOf<MediaInfo?>(null) }
+    var loaded by remember(movie.id) { mutableStateOf(false) }
+
+    LaunchedEffect(movie.id, source) {
+        info = try { source?.mediaInfo(movie.id) } catch (_: Exception) { null }
+        loaded = true
+    }
+
+    val meta = info
+    AlertDialog(
+        onDismissRequest = onClose,
+        containerColor = SurfaceCol,
+        title = { Text(movie.name, color = Ink, fontWeight = FontWeight.ExtraBold) },
+        text = {
+            Column {
+                Text(
+                    when {
+                        !loaded -> "Loading info…"
+                        meta?.description?.isNotBlank() == true -> meta.description
+                        else -> "No description was supplied by this playlist/provider."
+                    },
+                    color = Ink, fontSize = 13.sp
+                )
+                if (loaded && meta != null) {
+                    val facts = listOfNotNull(
+                        meta.year.takeIf { it.isNotBlank() }?.let { "Year $it" },
+                        meta.rating.takeIf { it.isNotBlank() }?.let { "Rating $it" },
+                        meta.genre.takeIf { it.isNotBlank() },
+                        meta.duration.takeIf { it.isNotBlank() }?.let { "Length $it" }
+                    )
+                    if (facts.isNotEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(facts.joinToString("  •  "), color = ProgramCyan, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+            }
+        },
+        confirmButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(18.dp)),onClick={
+                    onClose();onPlay(Playable(movie.name,movie.url,isLive=false,artwork=movie.icon))
+                }) { Text("▶ PLAY",color=ProgramCyan,fontWeight=FontWeight.Bold) }
+                TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(18.dp)),onClick={
+                    toast(context,DownloadStore.start(context,prefs,movie.name,movie.url))
+                }) { Text("⬇ DOWNLOAD",color=DownloadGreen,fontWeight=FontWeight.Bold) }
+                TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(18.dp)),onClick=onClose) {
+                    Text("CLOSE",color=Ink)
+                }
+            }
+        },
+        dismissButton = {}
+    )
+}
+
 @Composable
 fun MoviesPane(
+    source: Source?,
     prefs: SharedPreferences,
     data: AppData,
     selectedCat: String,
     onPlay: (Playable) -> Unit,
     onLeftToRail: () -> Unit = {}
 ) {
+    var paneHasFocus by remember { mutableStateOf(false) }
+    BackHandler(enabled = paneHasFocus) { onLeftToRail() }
+
     val context = LocalContext.current
+    var infoMovie by remember { mutableStateOf<Movie?>(null) }
+    infoMovie?.let { movie ->
+        VodInfoDialog(
+            source = source, prefs = prefs, movie = movie, onPlay = onPlay,
+            onClose = { infoMovie = null }
+        )
+    }
 
     if (data.movies.isEmpty()) {
         Column(
@@ -2807,7 +3687,10 @@ fun MoviesPane(
         return
     }
 
-    val filtered = data.movies.filter { selectedCat == "all" || it.categoryId == selectedCat }
+    // ZAKO_V433_REMEMBER_FILTERS
+    val filtered = remember(data.movies, selectedCat) {
+        data.movies.filter { selectedCat == "all" || it.categoryId == selectedCat }
+    }
     val restoreUrl = remember(selectedCat) {
         if (BrowseFocusMemory.movieCategory == selectedCat) BrowseFocusMemory.movieUrl else null
     }
@@ -2816,6 +3699,18 @@ fun MoviesPane(
     }
     val targetFocus = remember(selectedCat, restoreUrl) { FocusRequester() }
     val gridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState()
+    var visibleMovieCount by remember(selectedCat, filtered.size) {
+        mutableIntStateOf(minOf(filtered.size, maxOf(BROWSE_PAGE_SIZE * 2, targetIdx + BROWSE_PAGE_SIZE)))
+    }
+    val visibleMovies = remember(filtered, visibleMovieCount) { filtered.take(visibleMovieCount) }
+    LaunchedEffect(gridState, filtered.size) {
+        androidx.compose.runtime.snapshotFlow { gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }
+            .collect { last ->
+                if (last >= visibleMovieCount - 10 && visibleMovieCount < filtered.size) {
+                    visibleMovieCount = minOf(filtered.size, visibleMovieCount + BROWSE_PAGE_SIZE)
+                }
+            }
+    }
 
     LaunchedEffect(selectedCat, filtered.size, restoreUrl) {
         if (BrowseFocusMemory.movieCategory != selectedCat) {
@@ -2829,11 +3724,15 @@ fun MoviesPane(
         }
     }
 
-    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().onFocusChanged { paneHasFocus = it.hasFocus }.focusGroup()) {
+        TextButton(onClick = onLeftToRail, modifier = Modifier.tvFocus(RoundedCornerShape(10.dp))) {
+            Text("← CATEGORIES", color = Accent, fontWeight = FontWeight.Bold)
+        }
+
         Text(
-            "OK plays • Hold OK to add a movie to Downloads",
-            color = Muted,
-            fontSize = 10.sp,
+            "OK opens details • choose PLAY or DOWNLOAD",
+            color = Ink,
+            fontSize = 11.sp,
             modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 5.dp, bottom = 2.dp)
         )
         LazyVerticalGrid(
@@ -2844,7 +3743,7 @@ fun MoviesPane(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             modifier = Modifier.weight(1f)
         ) {
-            gridItemsIndexed(filtered, key = { _, item -> item.url }) { index, m ->
+            gridItemsIndexed(visibleMovies, key = { _, item -> item.url }) { index, m ->
                 val target = index == targetIdx
                 PosterGridCard(
                     name = (if (WatchStore.isWatched(prefs, m.url)) "✓  " else "") + m.name,
@@ -2856,10 +3755,12 @@ fun MoviesPane(
                                 onLeftToRail(); true
                             } else false
                         },
+                    onInfo = { infoMovie = m },
                     onClick = {
+                        // ZAKO_V428_MOVIE_DETAILS: X1-style details first.
                         BrowseFocusMemory.movieCategory = selectedCat
                         BrowseFocusMemory.movieUrl = m.url
-                        onPlay(Playable(m.name, m.url, isLive = false, artwork = m.icon))
+                        infoMovie = m
                     },
                     onDownload = {
                         BrowseFocusMemory.movieCategory = selectedCat
@@ -2881,6 +3782,9 @@ fun SeriesPane(
     onSeries: (SeriesItem) -> Unit,
     onLeftToRail: () -> Unit = {}
 ) {
+    var paneHasFocus by remember { mutableStateOf(false) }
+    BackHandler(enabled = paneHasFocus) { onLeftToRail() }
+
     if (source?.supportsSeries != true || data.series.isEmpty()) {
         Column(
             Modifier.fillMaxSize().padding(32.dp),
@@ -2900,7 +3804,10 @@ fun SeriesPane(
         return
     }
 
-    val filtered = data.series.filter { selectedCat == "all" || it.categoryId == selectedCat }
+    // ZAKO_V433_REMEMBER_FILTERS
+    val filtered = remember(data.series, selectedCat) {
+        data.series.filter { selectedCat == "all" || it.categoryId == selectedCat }
+    }
     val restoreId = remember(selectedCat) {
         if (BrowseFocusMemory.seriesCategory == selectedCat) BrowseFocusMemory.seriesId else null
     }
@@ -2909,6 +3816,18 @@ fun SeriesPane(
     }
     val targetFocus = remember(selectedCat, restoreId) { FocusRequester() }
     val gridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState()
+    var visibleSeriesCount by remember(selectedCat, filtered.size) {
+        mutableIntStateOf(minOf(filtered.size, maxOf(BROWSE_PAGE_SIZE * 2, targetIdx + BROWSE_PAGE_SIZE)))
+    }
+    val visibleSeries = remember(filtered, visibleSeriesCount) { filtered.take(visibleSeriesCount) }
+    LaunchedEffect(gridState, filtered.size) {
+        androidx.compose.runtime.snapshotFlow { gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }
+            .collect { last ->
+                if (last >= visibleSeriesCount - 10 && visibleSeriesCount < filtered.size) {
+                    visibleSeriesCount = minOf(filtered.size, visibleSeriesCount + BROWSE_PAGE_SIZE)
+                }
+            }
+    }
 
     LaunchedEffect(selectedCat, filtered.size, restoreId) {
         if (BrowseFocusMemory.seriesCategory != selectedCat) {
@@ -2922,11 +3841,15 @@ fun SeriesPane(
         }
     }
 
-    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().onFocusChanged { paneHasFocus = it.hasFocus }.focusGroup()) {
+        TextButton(onClick = onLeftToRail, modifier = Modifier.tvFocus(RoundedCornerShape(10.dp))) {
+            Text("← CATEGORIES", color = Accent, fontWeight = FontWeight.Bold)
+        }
+
         Text(
-            "OK opens a series • Hold OK on an episode to add it to Downloads",
-            color = Muted,
-            fontSize = 10.sp,
+            "OK opens a series • Hold OK on an episode to download",
+            color = Ink,
+            fontSize = 11.sp,
             modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 5.dp, bottom = 2.dp)
         )
         LazyVerticalGrid(
@@ -2937,7 +3860,7 @@ fun SeriesPane(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             modifier = Modifier.weight(1f)
         ) {
-            gridItemsIndexed(filtered, key = { _, item -> item.id }) { index, item ->
+            gridItemsIndexed(visibleSeries, key = { index, item -> "${item.id}:$index" }) { index, item ->
                 val target = index == targetIdx
                 PosterGridCard(
                     name = item.name,
@@ -2961,11 +3884,221 @@ fun SeriesPane(
 }
 
 /* ----------------------------- settings pane ----------------------------- */
+
+// ZAKO_V426_NATIVE_UPDATER
+private const val ZAKO_RELEASE_CERT_SHA256 = "8EF5FE2873F7A9D40302E722822C05B37B471AB08DF23785FA0A1AEB19A2C165"
+
+private suspend fun downloadZakoUpdate(
+    context: android.content.Context,
+    url: String,
+    onProgress: suspend (Long, Long) -> Unit = { _, _ -> }
+): java.io.File = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+    val updateDir = java.io.File(context.cacheDir, "updates").apply { mkdirs() }
+    val target = java.io.File(updateDir, "RYZOD-update.apk")
+    val partial = java.io.File(updateDir, "RYZOD-update.apk.part")
+    partial.delete()
+
+    val connection = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
+        instanceFollowRedirects = true
+        connectTimeout = 15_000
+        readTimeout = 30_000
+        setRequestProperty("User-Agent", "RYZOD-Updater/${BuildConfig.VERSION_NAME}")
+    }
+    try {
+        connection.connect()
+        if (connection.responseCode !in 200..299) {
+            throw java.io.IOException("Update server returned ${connection.responseCode}")
+        }
+        connection.inputStream.use { input ->
+            java.io.FileOutputStream(partial).use { output ->
+                val expected = connection.contentLengthLong
+                val deadline = android.os.SystemClock.elapsedRealtime() + 180_000L
+                val buffer = ByteArray(64 * 1024)
+                var copied = 0L
+                var lastProgress = 0L
+                while (true) {
+                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                    if (android.os.SystemClock.elapsedRealtime() > deadline) error("Update download timed out")
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    output.write(buffer, 0, count)
+                    copied += count
+                    check(copied <= 128L * 1024 * 1024) { "Update download exceeded expected size" }
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    if (now - lastProgress >= 500) {
+                        lastProgress = now
+                        onProgress(copied, expected)
+                    }
+                }
+                check(expected <= 0 || copied == expected) { "Update download incomplete" }
+            }
+        }
+    } catch (e: Exception) {
+        partial.delete()
+        throw e
+    } finally {
+        connection.disconnect()
+    }
+
+    if (partial.length() < 1_000_000L) {
+        partial.delete()
+        throw java.io.IOException("Downloaded update was unexpectedly small")
+    }
+    if (target.exists()) target.delete()
+    if (!partial.renameTo(target)) {
+        partial.copyTo(target, overwrite = true)
+        partial.delete()
+    }
+    target
+}
+
+@Suppress("DEPRECATION")
+private fun validateZakoUpdateApk(context: android.content.Context, apk: java.io.File) {
+    val pm = context.packageManager
+    val flags = if (android.os.Build.VERSION.SDK_INT >= 28) {
+        android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES
+    } else {
+        android.content.pm.PackageManager.GET_SIGNATURES
+    }
+    val info = pm.getPackageArchiveInfo(apk.absolutePath, flags)
+        ?: throw java.io.IOException("Android could not read the update package")
+
+    if (info.packageName != context.packageName) {
+        throw java.lang.SecurityException("Update package identity did not match RYZOD")
+    }
+
+    val versionCode = if (android.os.Build.VERSION.SDK_INT >= 28) {
+        info.longVersionCode
+    } else {
+        info.versionCode.toLong()
+    }
+    if (versionCode <= BuildConfig.VERSION_CODE.toLong()) {
+        throw java.io.IOException("Downloaded package is not newer than this RYZOD version")
+    }
+
+    val signatures = if (android.os.Build.VERSION.SDK_INT >= 28) {
+        info.signingInfo?.apkContentsSigners ?: emptyArray()
+    } else {
+        info.signatures ?: emptyArray()
+    }
+    val md = java.security.MessageDigest.getInstance("SHA-256")
+    val trusted = signatures.any { signature ->
+        md.digest(signature.toByteArray()).joinToString("") { byte -> "%02X".format(byte) } ==
+            ZAKO_RELEASE_CERT_SHA256
+    }
+    if (!trusted) {
+        throw java.lang.SecurityException("Update signature did not match the permanent RYZOD key")
+    }
+}
+
+private fun canZakoRequestInstall(context: android.content.Context): Boolean =
+    android.os.Build.VERSION.SDK_INT < 26 || context.packageManager.canRequestPackageInstalls()
+
+private fun openZakoInstallPermission(context: android.content.Context) {
+    val packageUri = android.net.Uri.parse("package:${context.packageName}")
+    val specific = android.content.Intent(
+        android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+        packageUri
+    ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+    val fallback = android.content.Intent(
+        android.provider.Settings.ACTION_SECURITY_SETTINGS
+    ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+    runCatching {
+        if (specific.resolveActivity(context.packageManager) != null) {
+            context.startActivity(specific)
+        } else {
+            context.startActivity(fallback)
+        }
+    }.onFailure {
+        runCatching { context.startActivity(fallback) }
+    }
+}
+
+private fun launchZakoPackageInstaller(context: android.content.Context, apk: java.io.File) {
+    val uri = androidx.core.content.FileProvider.getUriForFile(
+        context,
+        "${context.packageName}.fileprovider",
+        apk
+    )
+    val flags = android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+        android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+
+    val install = android.content.Intent(android.content.Intent.ACTION_INSTALL_PACKAGE).apply {
+        data = uri
+        addFlags(flags)
+    }
+    runCatching {
+        context.startActivity(install)
+    }.onFailure {
+        val fallback = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            addFlags(flags)
+        }
+        context.startActivity(fallback)
+    }
+}
+
+// RYZOD 4.33
+
+/* ZAKO_V449_MANAGED_DVR_SCREEN
+ * Recordings screen integration: the existing Recordings view can call this
+ * lightweight pane above completed recordings. Manual date/time entry is
+ * intentionally independent of provider EPG horizon.
+ */
+@Composable
+fun ManagedDvrSchedulePane(
+    prefs: android.content.SharedPreferences,
+    channels: List<Playable>,
+    refreshToken: Int,
+    onRefresh: () -> Unit
+) {
+    val context = LocalContext.current
+    val rows = remember(refreshToken) { ManagedDvrUi.upcoming(prefs) }
+    Column(Modifier.fillMaxWidth().padding(12.dp)) {
+        Text(ManagedDvrUi.upcomingLabel, color = Ink, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+        if (rows.isEmpty()) Text("No future recordings scheduled.", color = Muted, fontSize = 11.sp)
+        rows.forEach { row ->
+            Row(Modifier.fillMaxWidth().padding(vertical = 5.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(Modifier.weight(1f)) {
+                    Text(row.title, color = Ink, fontWeight = FontWeight.Bold)
+                    Text(row.channel + " • " + row.date + " • " + row.start + " – " + row.end + " • " + row.status, color = Muted, fontSize = 10.sp)
+                }
+                Chip(ManagedDvrUi.editLabel, false) {
+                    val existing = ScheduleStore.load(prefs).firstOrNull { it.id == row.id }
+                    if (existing != null) {
+                        toast(context, ManagedDvrUi.edit(context, prefs, existing.id, existing.title, existing.channelName, existing.url, existing.startMs, existing.endMs))
+                        onRefresh()
+                    }
+                }
+                Chip(ManagedDvrUi.cancelLabel, false) {
+                    ManagedDvrUi.cancel(context, prefs, row.id)
+                    onRefresh()
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(ManagedDvrUi.manualLabel, color = Ink, fontWeight = FontWeight.Bold)
+        Text("Choose a channel and enter a future start/end time even when the provider guide does not reach that far.", color = Muted, fontSize = 10.sp)
+        if (channels.isNotEmpty()) {
+            Chip("Manual Recording", false) {
+                val ch = channels.first()
+                val start = System.currentTimeMillis() + 60L * 60L * 1000L
+                val end = start + 60L * 60L * 1000L
+                toast(context, ManagedDvrUi.manualRecording(context, prefs, "", ch.name, ch.url, start, end))
+                onRefresh()
+            }
+        }
+    }
+}
+
 @Composable
 fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
     var bufferSec by remember { mutableIntStateOf(prefs.getInt("buffer_sec", 30)) }
-    var autoLast by remember { mutableStateOf(prefs.getBoolean("autoplay_last", true)) }
+    var autoLast by remember { mutableStateOf(prefs.getBoolean("autoplay_last", false)) }
     val ctx = LocalContext.current
+    var updateStatus by remember { mutableStateOf("") }
+    var updateUrl by remember { mutableStateOf<String?>(null) }
+    val updateScope = rememberCoroutineScope()
     var usbPermissionRefresh by remember { mutableIntStateOf(0) }
     val usbPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -3051,7 +4184,7 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         Spacer(Modifier.height(4.dp))
         var providerStreams by remember { mutableIntStateOf(ProviderStreams.max(prefs)) }
         Text(
-            "Set this to the number of simultaneous connections INCLUDED with your IPTV service — not the number of Fire TV tuners. Zako defaults to 1. Recording the channel you are already watching in DVR Live shares that same stream; watching one channel while recording a different channel needs 2. A live stream + different-channel recording + download needs 3.",
+            "Set this to the number of simultaneous connections INCLUDED with your IPTV service — not the number of Fire TV tuners. RYZOD defaults to 1. Recording the channel you are already watching in DVR Live shares that same stream; watching one channel while recording a different channel needs 2. A live stream + different-channel recording + download needs 3.",
             fontSize = 12.sp, color = Muted
         )
         Spacer(Modifier.height(10.dp))
@@ -3067,7 +4200,7 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
             }
         }
         Text(
-            "If your service only includes 1 stream, Zako will warn/block combinations that need a second connection instead of letting the provider randomly kill one.",
+            "If your service only includes 1 stream, RYZOD will warn/block combinations that need a second connection instead of letting the provider randomly kill one.",
             fontSize = 10.sp, color = Muted, modifier = Modifier.padding(top = 4.dp)
         )
 
@@ -3082,7 +4215,7 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         val internalFree = remember(storageRefresh) { Storage.internalFreeBytes(ctx) }
         val driveFree = remember(storageRefresh) { Storage.driveFreeBytes(ctx) }
         Text(
-            "Fire TV internal: ${if (internalFree >= 0) Storage.gb(internalFree) + " GB free" else "—"}" +
+            "Device storage: ${if (internalFree >= 0) Storage.gb(internalFree) + " GB free" else "—"}" +
                 if (drivePresent) "\nExternal drive: ${if (driveFree >= 0) Storage.gb(driveFree) + " GB free" else "detected"}"
                 else "\nNo external drive detected.",
             fontSize = 12.sp, color = Muted
@@ -3093,15 +4226,15 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
                 drivePresent ->
                     "Save downloads, recordings, and the live pause buffer to your plugged-in drive so the Fire Stick's small storage never fills up."
                 driveRaw ->
-                    "A USB drive is plugged in, but Fire OS has not exposed a path Zako can prove writable. Use Recheck USB after granting the normal storage permission or reconnecting the drive. Zako will never claim USB is active until a real write test passes."
+                    "A USB drive is plugged in, but Fire OS has not exposed a path RYZOD can prove writable. Use Recheck USB after granting the normal storage permission or reconnecting the drive. RYZOD will never claim USB is active until a real write test passes."
                 else ->
-                    "Plug in a USB drive or SSD for saved downloads and recordings. Fire OS decides which portable volumes an app may write; Zako tests the drive before offering it and falls back safely if the OS blocks it."
+                    "Plug in a USB drive or SSD for saved downloads and recordings. Fire OS decides which portable volumes an app may write; RYZOD tests the drive before offering it and falls back safely if the OS blocks it."
             },
             fontSize = 12.sp, color = Muted
         )
         Spacer(Modifier.height(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Chip("Fire Stick", !extOn) {
+            Chip("Device", !extOn) {
                 extOn = false; Storage.setEnabled(prefs, false)
             }
             Chip("External drive", extOn && drivePresent) {
@@ -3126,11 +4259,11 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
             Chip("Recheck USB", false) {
                 storageRefresh++
                 val ok = Storage.drivePresent(ctx)
-                toast(ctx, if (ok) "USB write test passed." else "USB still isn't writable by Zako on this Fire OS setup.")
+                toast(ctx, if (ok) "USB write test passed." else "USB still isn't writable by RYZOD on this Fire OS setup.")
             }
         }
         Text(
-            "New downloads and recordings are written directly to the selected destination — they do not move later. Anything already saved stays where it is. DVR Live uses an append-only temporary buffer up to ~1 GB on Fire Stick storage or ~3.5 GB on a verified USB drive, then continues live directly if the cap is reached. Smooth Live writes no temporary DVR file.",
+            "New downloads and recordings are written directly to the selected destination — they do not move later. Anything already saved stays where it is. DVR Live keeps a rolling local history while you stay on the channel. RYZOD uses verified USB storage when available and safely falls back to internal storage.",
             fontSize = 10.sp, color = Muted, modifier = Modifier.padding(top = 4.dp)
         )
 
@@ -3157,20 +4290,6 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
             }
         }
 
-        Spacer(Modifier.height(20.dp))
-        Text("Start on last channel", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
-        Spacer(Modifier.height(4.dp))
-        Text(
-            "Like a cable box: opening the app tunes straight to whatever channel you were last watching.",
-            fontSize = 12.sp, color = Muted
-        )
-        Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Chip("On", autoLast) { autoLast = true; prefs.edit().putBoolean("autoplay_last", true).apply() }
-            Chip("Off", !autoLast) { autoLast = false; prefs.edit().putBoolean("autoplay_last", false).apply() }
-        }
-
-        Spacer(Modifier.height(20.dp))
         Text("Stream buffer", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
         Text(
@@ -3188,7 +4307,7 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         Text("Channel lock-in cushion", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
         Text(
-            "How much video Zako collects before showing a live channel. Bigger cushion = steadier picture on weak channels, but changing channels takes longer. If certain channels keep re-buffering, bump this up.",
+            "How much video RYZOD collects before showing a live channel. Bigger cushion = steadier picture on weak channels, but changing channels takes longer. If certain channels keep re-buffering, bump this up.",
             fontSize = 12.sp, color = Muted
         )
         Spacer(Modifier.height(10.dp))
@@ -3231,7 +4350,7 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         Text("Auto frame rate (AFR)", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
         Text(
-            "Matches the Fire TV display to 24/25/30/50/60 fps content when the TV supports it. Zako waits until playback is stable and restores normal display preference when you leave the player. The TV may briefly go black while HDMI changes rate.",
+            "Matches the Fire TV display to 24/25/30/50/60 fps content when the TV supports it. RYZOD waits until playback is stable and restores normal display preference when you leave the player. The TV may briefly go black while HDMI changes rate.",
             fontSize = 12.sp, color = Muted
         )
         Spacer(Modifier.height(10.dp))
@@ -3287,7 +4406,107 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         }
 
         Spacer(Modifier.height(24.dp))
-        Text("Zako 4.23 — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
+        Text("Updates", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "RYZOD checks only when you press the button — no background updater taking memory or waking the Fire Stick.",
+            fontSize = 12.sp, color = Muted
+        )
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            // ZAKO_V453_REMOTE_POLISH
+            // ZAKO_V452_CONSOLIDATED
+            // ZAKO_V447_FULL_REDESIGN
+            // ZAKO_V447_COMPACT_MINI_GUIDE
+            // ZAKO_V446_PERSISTENT_UPDATE_BUTTON
+            Chip("Check for updates", false) {
+                updateStatus = "Checking RYZOD update server…"
+                updateUrl = null
+                updateScope.launch {
+                    val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        runCatching {
+                            // ZAKO_V431_FRESH_UPDATE: never reuse stale release metadata.
+                            // RYZOD_V458_UPDATER_RELIABILITY
+val manifestUrl = "https://raw.githubusercontent.com/lukeypue/Easy-IPTV/main/latest.json?ts=" + System.currentTimeMillis()
+val conn = (java.net.URL(manifestUrl).openConnection() as java.net.HttpURLConnection).apply {
+    useCaches = false
+    connectTimeout = 15_000
+    readTimeout = 15_000
+    setRequestProperty("Cache-Control", "no-cache, no-store, max-age=0")
+    setRequestProperty("Pragma", "no-cache")
+    setRequestProperty("User-Agent", "RYZOD-Updater/" + BuildConfig.VERSION_NAME)
+}
+val raw = try {
+    conn.connect()
+    if (conn.responseCode !in 200..299) throw java.io.IOException("Update server returned " + conn.responseCode)
+    conn.inputStream.bufferedReader().use { it.readText() }
+} finally {
+    conn.disconnect()
+}
+val obj = org.json.JSONObject(raw)
+                            check(obj.optInt("versionCode", 0) > 0 && obj.optString("versionName").isNotBlank() &&
+                                obj.optString("downloadUrl").startsWith("https://github.com/lukeypue/Easy-IPTV/releases/download/")) {
+                                "Update server returned incomplete release information"
+                            }
+                            Triple(
+                                obj.optInt("versionCode", 0),
+                                obj.optString("versionName", "new version"),
+                                obj.optString("downloadUrl", "")
+                            )
+                        }
+                    }
+                    result.onSuccess { (code, name, url) ->
+                        if (code > BuildConfig.VERSION_CODE) {
+                            updateStatus = "RYZOD $name is available (build $code)."
+                            updateUrl = url.takeIf { it.startsWith("http") }
+                        } else if (code < BuildConfig.VERSION_CODE) {
+                            updateStatus = "Update server lists an older build ($name). Your installed RYZOD ${BuildConfig.VERSION_NAME} is newer."
+                        } else {
+                            updateStatus = "You're up to date — RYZOD ${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE})."
+                        }
+                    }.onFailure {
+                        updateStatus = "Update check failed: " + (it.message ?: "network error")
+                    }
+                }
+            }
+            if (updateUrl != null) {
+                Chip("Get update", false) {
+                    val url = updateUrl
+                    if (url != null) {
+                        if (!canZakoRequestInstall(ctx)) {
+                            updateStatus = "Allow RYZOD to install updates, then return and press Get update again."
+                            openZakoInstallPermission(ctx)
+                        } else {
+                            updateStatus = "Downloading update…"
+                            updateScope.launch {
+                                val result = runCatching {
+                                    val apk = downloadZakoUpdate(ctx, url) { bytes, total ->
+                                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                            updateStatus = if (total > 0) "Downloading update… ${(bytes * 100 / total).coerceIn(0, 100)}%"
+                                                else "Downloading update… ${bytes / (1024 * 1024)} MB"
+                                        }
+                                    }
+                                    validateZakoUpdateApk(ctx, apk)
+                                    apk
+                                }
+                                result.onSuccess { apk ->
+                                    updateStatus = "Download complete — confirm Install on the next screen."
+                                    launchZakoPackageInstaller(ctx, apk)
+                                }.onFailure {
+                                    updateStatus = "Couldn't download or verify the update. Check your connection and try again."
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (updateStatus.isNotBlank()) {
+            Text(updateStatus, color = Accent, fontSize = 10.sp, modifier = Modifier.padding(top = 5.dp))
+        }
+
+        Spacer(Modifier.height(20.dp))
+        Text("RYZOD ${BuildConfig.VERSION_NAME} — plays the playlists you provide. This app includes no channels or content of its own.", fontSize = 11.sp, color = Muted)
     }
 }
 
@@ -3312,8 +4531,106 @@ private fun addRecent(prefs: SharedPreferences, q: String) {
     prefs.edit().putString("recent_searches", arr.toString()).apply()
 }
 
+
+
+@Composable
+private fun SearchTvKeyboardField(value: String, onValueChange: (String) -> Unit, modifier: Modifier = Modifier) {
+    TvTextField(value, onValueChange, "Search", modifier,
+        placeholder = "SEARCH movies, shows, actors, directors & live TV", searchStyle = true)
+}
+
+@Composable
+private fun RyzodKeyboardDialog(
+    value: String, onValueChange: (String) -> Unit, label: String, password: Boolean,
+    onClose: () -> Unit
+) {
+    var page by remember { mutableIntStateOf(0) }
+    var upper by remember { mutableStateOf(false) }
+    var row by remember { mutableIntStateOf(1) }
+    var col by remember { mutableIntStateOf(0) }
+    val rows = remember(page, upper) { KeyboardLayout.rows(page, upper) }
+    val keyFocus = remember { FocusRequester() }
+    fun press(key: String) {
+        when (key) {
+            "ABC", "!?#", "+=<>" -> { page = listOf("ABC", "!?#", "+=<>").indexOf(key); row = 0; col = page }
+            "SHIFT" -> upper = !upper
+            "DONE" -> onClose()
+            else -> onValueChange(KeyboardLayout.edit(value, key))
+        }
+    }
+    androidx.compose.ui.window.Dialog(onDismissRequest = onClose,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)) {
+        LaunchedEffect(Unit) { androidx.compose.runtime.withFrameNanos { }; keyFocus.requestFocus() }
+        androidx.compose.foundation.layout.BoxWithConstraints(
+            Modifier.fillMaxSize().background(Color(0xB3000000)).padding(10.dp), contentAlignment = Alignment.Center
+        ) {
+            val keyHeight = ((maxHeight - 108.dp) / 6).coerceIn(22.dp, 38.dp)
+            Column(Modifier.widthIn(max = 620.dp).fillMaxWidth(.96f)
+                .background(Color(0xFF0A2038), RoundedCornerShape(14.dp))
+                .border(2.dp, ElectricCyan, RoundedCornerShape(14.dp))
+                .focusRequester(keyFocus)
+                .onPreviewKeyEvent { ev ->
+                    if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                    val delta = when (ev.key) {
+                        Key.DirectionLeft -> -1 to 0
+                        Key.DirectionRight -> 1 to 0
+                        Key.DirectionUp -> 0 to -1
+                        Key.DirectionDown -> 0 to 1
+                        else -> null
+                    }
+                    if (delta != null) {
+                        val next = KeyboardLayout.move(rows, row, col, delta.first, delta.second)
+                        row = next.first; col = next.second; true
+                    } else when (ev.key) {
+                        Key.DirectionCenter, Key.Enter -> { press(rows[row][col]); true }
+                        Key.Backspace -> { press("DELETE"); true }
+                        else -> {
+                            val native = ev.nativeKeyEvent
+                            val code = native.unicodeChar
+                            if (code >= 32 && !native.isCtrlPressed && !native.isAltPressed) {
+                                onValueChange(value + String(Character.toChars(code))); true
+                            } else false
+                        }
+                    }
+                }.focusable().padding(8.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(label, color = ElectricCyan, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Text(if (password) "•".repeat(value.length.coerceAtMost(30)) else value.ifEmpty { "Type here" },
+                    color = Ink, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.fillMaxWidth().border(2.dp, Accent, RoundedCornerShape(6.dp)).padding(6.dp))
+                rows.forEachIndexed { ri, keys ->
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                        keys.forEachIndexed { ci, key ->
+                            val selected = row == ri && col == ci
+                            val activePage = ri == 0 && ci == page
+                            Box(Modifier.weight(if (key == "SPACE") 1.7f else 1f).height(keyHeight)
+                                .background(if (selected) FocusPink.copy(alpha = .32f) else if (activePage) ElectricCyan.copy(alpha = .22f) else PanelGlow,
+                                    RoundedCornerShape(6.dp))
+                                .border(if (selected) 3.dp else 1.dp, if (selected) FocusPink else ElectricCyan.copy(alpha = .35f), RoundedCornerShape(6.dp))
+                                .focusProperties { canFocus = false }
+                                .clickable { row = ri; col = ci; press(key) }, contentAlignment = Alignment.Center) {
+                                Text(if (key == "SHIFT") if (upper) "abc" else "ABC ↑" else key,
+                                    color = if (key == "DONE") NeonGreen else Ink,
+                                    fontWeight = FontWeight.Bold, fontSize = if (key.length > 3) 10.sp else 14.sp, maxLines = 1)
+                            }
+                        }
+                    }
+                }
+                Text("Page ${page + 1}/3 • D-pad moves • OK types • Back closes", color = ElectricCyan, fontSize = 10.sp)
+            }
+        }
+    }
+}
+
+
+private data class SearchMatches(
+    val query: String,
+    val live: List<LiveChannel>, val movies: List<Movie>, val series: List<SeriesItem>,
+    val guide: List<EpgStore.GuideHit>
+)
+
 @Composable
 fun SearchTab(
+    source: Source?,
     prefs: SharedPreferences,
     data: AppData,
     query: String,
@@ -3323,7 +4640,21 @@ fun SearchTab(
     onSeries: (SeriesItem) -> Unit,
     onDemandWarning: String? = null
 ) {
+    // ZAKO_V440_SEARCH_MOVIE_DETAILS: Search movies use the same details dialog as Movies.
+    var searchInfoMovie by remember { mutableStateOf<Movie?>(null) }
+    searchInfoMovie?.let { movie ->
+        VodInfoDialog(
+            source = source, prefs = prefs, movie = movie, onPlay = onPlay,
+            onClose = { searchInfoMovie = null }
+        )
+    }
     var recents by remember { mutableStateOf(loadRecents(prefs)) }
+    // ZAKO_V428_SEARCH_DEBOUNCE: type instantly, filter after a short quiet beat.
+    var settledQuery by remember { mutableStateOf(query) }
+    LaunchedEffect(query) {
+        kotlinx.coroutines.delay(180L)
+        settledQuery = query
+    }
 
     fun saveRecent(q: String) {
         addRecent(prefs, q)
@@ -3365,10 +4696,8 @@ fun SearchTab(
             Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            TvTextField(
+            SearchTvKeyboardField(
                 value = query, onValueChange = onQuery,
-                label = "Search",
-                placeholder = "Search live, movies & series…",
                 modifier = Modifier.weight(1f)
             )
             if (voiceAvailable) {
@@ -3385,7 +4714,7 @@ fun SearchTab(
             }
         }
         Text(
-            "Matches any part of a name — \"wars\" finds Star Wars.",
+            "Search titles, actors, directors, genres and live TV — all from one box.",
             fontSize = 11.sp, color = Muted,
             modifier = Modifier.padding(horizontal = 16.dp)
         )
@@ -3397,7 +4726,7 @@ fun SearchTab(
             )
         }
 
-        val q = query.trim()
+        val q = settledQuery.trim()
         if (q.length < 2) {
             if (recents.isEmpty()) {
                 Column(
@@ -3446,10 +4775,30 @@ fun SearchTab(
             return
         }
 
-        val liveHits = data.live.filter { it.name.contains(q, ignoreCase = true) }.take(30)
-        val movieHits = data.movies.filter { it.name.contains(q, ignoreCase = true) }.take(30)
-        val seriesHits = data.series.filter { it.name.contains(q, ignoreCase = true) }.take(30)
-        val guideHits = if (EpgStore.loaded.value) EpgStore.search(q, 30) else emptyList()
+        // Rank off the UI thread so a large provider catalog cannot stall typing.
+        val guideLoaded = EpgStore.loaded.value
+        val matches by androidx.compose.runtime.produceState<SearchMatches?>(
+            initialValue = null, key1 = q, key2 = data, key3 = guideLoaded
+        ) {
+            value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                val queryMatcher = TitleQuery(q)
+                SearchMatches(q,
+                    queryMatcher.find(data.live, { it.name }),
+                    queryMatcher.find(data.movies, { it.name }, { it.searchMeta }),
+                    queryMatcher.find(data.series, { it.name }, { it.searchMeta }),
+                    if (guideLoaded) EpgStore.search(q, 30) else emptyList())
+            }
+        }
+        val currentMatches = matches
+        if (currentMatches == null || currentMatches.query != q) {
+            Text("Searching…", color = Muted, modifier = Modifier.padding(16.dp))
+            return
+        }
+        val liveHits = currentMatches.live
+        val movieHits = currentMatches.movies
+        val seriesHits = currentMatches.series
+        val guideHits = currentMatches.guide
+
 
         // Match guide channels back to playable channels (by guide id, then by name).
         val context = LocalContext.current
@@ -3460,7 +4809,7 @@ fun SearchTab(
         val guideFmt = remember { SimpleDateFormat("EEE h:mm a", Locale.getDefault()) }
 
         // Search used to launch a live hit as a one-item queue. That made the
-        // channel play, but Zako no longer knew its real lineup position:
+        // channel play, but RYZOD no longer knew its real lineup position:
         // channel up/down and the recent-channel mini guide broke (the 24/7
         // Star Wars test exposed it). Always re-enter Live with the complete
         // playlist queue and the searched channel's true index.
@@ -3487,25 +4836,29 @@ fun SearchTab(
         ) {
             if (liveHits.isNotEmpty()) {
                 item { SectionHeader("Live TV") }
-                items(liveHits) { ch ->
-                    MediaRow(ch.name, ch.icon, onClick = { saveRecent(q); playLiveHit(ch) })
+                item {
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                        items(liveHits, key = { it.id }) { ch ->
+                            SearchLiveCard(ch) { saveRecent(q); playLiveHit(ch) }
+                        }
+                    }
                 }
             }
             if (movieHits.isNotEmpty()) {
-                item { SectionHeader("Movies") }
+                item { SectionHeader("Movies • title / cast / director / genre") }
                 item {
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         items(movieHits) { m ->
                             PosterCard(m.name, m.icon) {
                                 saveRecent(q)
-                                onPlay(Playable(m.name, m.url, isLive = false, artwork = m.icon))
+                                searchInfoMovie = m
                             }
                         }
                     }
                 }
             }
             if (seriesHits.isNotEmpty()) {
-                item { SectionHeader("Series") }
+                item { SectionHeader("Series • title / cast / director / genre") }
                 item {
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         items(seriesHits) { s ->
@@ -3566,15 +4919,132 @@ fun SearchTab(
 }
 
 @Composable
+private fun SearchLiveCard(ch: LiveChannel, onClick: () -> Unit) {
+    val guideReady = EpgStore.loaded.value
+    val nowMs = System.currentTimeMillis()
+    val nowTitle = if (guideReady) {
+        EpgStore.guide(ch.epgId, ch.name)
+            .firstOrNull { nowMs in it.startMs until it.endMs }
+            ?.title
+    } else null
+
+    Column(
+        Modifier
+            .width(148.dp)
+            .tvFocus(RoundedCornerShape(12.dp))
+            .clickable { onClick() }
+            .padding(3.dp)
+    ) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(76.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(Surface2),
+            contentAlignment = Alignment.Center
+        ) {
+            if (!ch.icon.isNullOrBlank()) {
+                AsyncImage(
+                    model = ch.icon,
+                    contentDescription = ch.name,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize().padding(8.dp)
+                )
+            } else {
+                // Never turn a channel number into a giant fake poster ("2", "7", etc.).
+                Text("LIVE", color = Accent, fontSize = 16.sp, fontWeight = FontWeight.ExtraBold)
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(
+            ch.name, color = Ink, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+            maxLines = 1, overflow = TextOverflow.Ellipsis
+        )
+        if (!nowTitle.isNullOrBlank()) {
+            Text(
+                nowTitle, color = Accent, fontSize = 9.sp,
+                maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
 private fun SectionHeader(label: String) {
     Text(
         label,
-        fontWeight = FontWeight.ExtraBold, fontSize = 14.sp, color = Accent,
-        modifier = Modifier.padding(top = 10.dp, bottom = 2.dp)
+        fontWeight = FontWeight.Black, fontSize = 15.sp, color = ElectricCyan,
+        letterSpacing = 0.5.sp,
+        modifier = Modifier.padding(top = 12.dp, bottom = 4.dp)
     )
 }
 
 /* ----------------------------- series detail ----------------------------- */
+/* ZAKO_V433_EPISODE_DETAILS: readable episode information before playback. */
+@Composable
+private fun EpisodeInfoDialog(
+    seriesName: String,
+    season: Int,
+    episode: Episode,
+    prefs: SharedPreferences,
+    onPlay: () -> Unit,
+    onClose: () -> Unit
+) {
+    val context = LocalContext.current
+    val epName = "$seriesName S${season}E${episode.episodeNum}"
+    AlertDialog(
+        onDismissRequest = onClose,
+        containerColor = SurfaceCol,
+        title = {
+            Column {
+                Text(
+                    "S${season} • E${episode.episodeNum}",
+                    color = Accent,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    episode.title,
+                    color = Color(0xFFFFE45C),
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.ExtraBold
+                )
+            }
+        },
+        text = {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(androidx.compose.foundation.rememberScrollState())
+            ) {
+                Text(seriesName, color = ProgramCyan, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    episode.plot.ifBlank { "No episode description was supplied by this playlist/provider." },
+                    color = Ink,
+                    fontSize = 15.sp,
+                    lineHeight = 21.sp
+                )
+                Spacer(Modifier.height(14.dp))
+            }
+        },
+        confirmButton = {
+            Row(horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+                TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(18.dp)),onClick={onClose();onPlay()}) {
+                    Text("▶ PLAY",color=ProgramCyan,fontWeight=FontWeight.Bold,fontSize=14.sp)
+                }
+                TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(18.dp)),onClick={
+                    toast(context,DownloadStore.start(context,prefs,epName,episode.url))
+                }) { Text("⬇ DOWNLOAD",color=DownloadGreen,fontWeight=FontWeight.Bold,fontSize=14.sp) }
+                TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(18.dp)),onClick=onClose) {
+                    Text("CLOSE",color=Ink,fontWeight=FontWeight.Bold)
+                }
+            }
+        },
+        dismissButton = {}
+    )
+}
+
 @Composable
 fun SeriesDetailScreen(
     source: Source,
@@ -3587,7 +5057,8 @@ fun SeriesDetailScreen(
     var eps by remember { mutableStateOf<Map<Int, List<Episode>>?>(null) }
     var err by remember { mutableStateOf<String?>(null) }
     var watchTick by remember { mutableIntStateOf(0) }
-    BackHandler { onBack() }
+    var infoEpisode by remember { mutableStateOf<Pair<Int, Episode>?>(null) }
+    BackHandler { if (infoEpisode != null) infoEpisode = null else onBack() }
 
     LaunchedEffect(s.id, err) {
         if (err == null && eps == null) {
@@ -3606,6 +5077,17 @@ fun SeriesDetailScreen(
                 Playable("${s.name} S${season}E${ep.episodeNum}", ep.url, isLive = false)
             }
         } ?: emptyList()
+    }
+
+    infoEpisode?.let { (season, ep) ->
+        EpisodeInfoDialog(
+            seriesName = s.name, season = season, episode = ep, prefs = prefs,
+            onPlay = {
+                val idx = queue.indexOfFirst { it.url == ep.url }.coerceAtLeast(0)
+                onPlayQueue(queue, idx)
+            },
+            onClose = { infoEpisode = null }
+        )
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -3663,10 +5145,7 @@ fun SeriesDetailScreen(
                         MediaRow(
                             name = label,
                             icon = null,
-                            onClick = {
-                                val idx = queue.indexOfFirst { it.url == ep.url }.coerceAtLeast(0)
-                                onPlayQueue(queue, idx)
-                            },
+                            onClick = { infoEpisode = season to ep },
                             onLongAction = {
                                 toast(context, DownloadStore.start(context, prefs, epName, ep.url))
                             },
@@ -3677,7 +5156,7 @@ fun SeriesDetailScreen(
                                         DownloadStore.start(context, prefs, epName, ep.url)
                                     )
                                 }) {
-                                    Icon(Icons.Filled.Download, contentDescription = "Download for offline", tint = Muted)
+                                    Icon(Icons.Filled.Download, contentDescription = "Download for offline", tint = DownloadGreen)
                                 }
                             }
                         )
@@ -3687,6 +5166,73 @@ fun SeriesDetailScreen(
         }
     }
 }
+
+private data class SavedItemAction(
+    val label: String,
+    val enabled: Boolean = true,
+    val destructive: Boolean = false,
+    val onClick: () -> Unit
+)
+
+@Composable
+private fun SavedItemPopup(title: String, message: String, actions: List<SavedItemAction>, onClose: () -> Unit) {
+    val focus = remember(actions.size) { List(actions.size) { FocusRequester() } }
+    val enabled = actions.indices.filter { actions[it].enabled }
+    val first = enabled.firstOrNull()
+    AlertDialog(
+        onDismissRequest = onClose,
+        modifier = Modifier.widthIn(max = 680.dp).fillMaxWidth(.94f),
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
+        containerColor = SurfaceCol,
+        title = { Text(title, color = Ink, fontWeight = FontWeight.ExtraBold, maxLines = 3, overflow = TextOverflow.Ellipsis) },
+        text = { Text(message, color = Muted, fontSize = 13.sp) },
+        confirmButton = {
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                actions.forEachIndexed { index, action ->
+                    val position = enabled.indexOf(index)
+                    TextButton(
+                        enabled = action.enabled,
+                        modifier = Modifier.focusRequester(focus[index])
+                            .focusProperties {
+                                if (position >= 0) {
+                                    left = focus[enabled[(position + enabled.size - 1) % enabled.size]]
+                                    right = focus[enabled[(position + 1) % enabled.size]]
+                                }
+                            }.tvFocus(RoundedCornerShape(14.dp)),
+                        onClick = action.onClick
+                    ) {
+                        Text(action.label, fontWeight = FontWeight.Bold, fontSize = 12.sp, maxLines = 1,
+                            color = when {
+                                !action.enabled -> Muted.copy(alpha = .45f)
+                                action.destructive -> Live
+                                action.label == "CLOSE" || action.label == "CANCEL" -> Ink
+                                else -> Accent
+                            })
+                    }
+                }
+            }
+            LaunchedEffect(first) {
+                androidx.compose.runtime.withFrameNanos { }
+                first?.let { focus[it].requestFocus() }
+            }
+        },
+        dismissButton = {}
+    )
+}
+
+@Composable
+private fun ConfirmSavedItemDelete(title: String, kind: String, onCancel: () -> Unit, onDelete: () -> Unit) {
+    SavedItemPopup(
+        title = "Delete $kind?",
+        message = "Are you sure you want to delete this $kind?\n\n$title",
+        actions = listOf(
+            SavedItemAction("CANCEL", onClick = onCancel),
+            SavedItemAction("YES, DELETE", destructive = true, onClick = onDelete)
+        ),
+        onClose = onCancel
+    )
+}
+
 
 /* ----------------------------- downloads ----------------------------- */
 @Composable
@@ -3699,6 +5245,9 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
     var etaMap by remember { mutableStateOf<Map<Long, Long>>(emptyMap()) }
     val lastBytes = remember { HashMap<Long, Long>() }
     val lastRate = remember { HashMap<Long, Double>() }
+    var confirmDownload by remember { mutableStateOf<DownloadStore.Item?>(null) }
+    var selectedDownload by remember { mutableStateOf<DownloadStore.Item?>(null) }
+    var downloadStates by remember { mutableStateOf<Map<Long, Int>>(emptyMap()) }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -3710,6 +5259,7 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
             // otherwise the last in-flight row can sit visually stuck until the
             // user leaves and re-enters Downloads.
             items = DownloadStore.load(prefs)
+            downloadStates = items.associate { it.id to DownloadStore.state(context, it.id) }
             val inFlight = items.filter { d -> DownloadStore.isInFlight(context, d.id) }
             val m = HashMap<Long, Pair<Long, Long>>()
             val eta = HashMap<Long, Long>()
@@ -3743,7 +5293,7 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
         val onDrive = remember { Storage.usingDrive(context, prefs) }
         if (free >= 0) {
             Text(
-                (if (onDrive) "External drive: " else "Fire Stick storage: ") +
+                (if (onDrive) "External drive: " else "Device storage: ") +
                     "${String.format(java.util.Locale.US, "%.1f", free / 1_073_741_824.0)} GB free" +
                     if (free < 3_000_000_000L) "  •  Too low to start new downloads — free up 3 GB" else "",
                 fontSize = 12.sp,
@@ -3754,9 +5304,9 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
         }
         Text(
             if (DownloadStore.retentionDays(prefs) <= 0)
-                "Saved for offline watching. Add as many titles as you want — Zako downloads one at a time in a lightweight queue. Files stay until you delete them."
+                "Saved for offline watching. Add as many titles as you want — RYZOD downloads one at a time in a lightweight queue. Files stay until you delete them."
             else
-                "Saved for offline watching. Add as many titles as you want — Zako downloads one at a time in a lightweight queue. Files are kept for ${DownloadStore.retentionDays(prefs)} days.",
+                "Saved for offline watching. Add as many titles as you want — RYZOD downloads one at a time in a lightweight queue. Files are kept for ${DownloadStore.retentionDays(prefs)} days.",
             fontSize = 12.sp, color = Muted,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
         )
@@ -3775,20 +5325,18 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(items) { d ->
+                items(items, key = { it.id }) { d ->
                     val f = File(d.path)
                     val ready = DownloadStore.isReady(context, d)
                     val daysLeft = if (d.expires == Long.MAX_VALUE) Long.MAX_VALUE
                         else ((d.expires - System.currentTimeMillis()) / 86_400_000L).coerceAtLeast(0)
                     val prog = progressMap[d.id]
-                    val btnFocus = remember { FocusRequester() }
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .focusProperties { right = btnFocus }
                             .tvFocus()
                             .background(SurfaceCol, RoundedCornerShape(14.dp))
-                            .clickable(enabled = ready) { onPlay(Playable(d.title, d.path, isLive = false)) }
+                            .clickable { selectedDownload = d }
                             .padding(10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -3857,23 +5405,52 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
                                 }
                             }
                         }
-                        IconButton(
-                            modifier = Modifier.focusRequester(btnFocus).tvFocus(RoundedCornerShape(24.dp)),
-                            onClick = {
-                                DownloadStore.stopAndRemove(context, prefs, d)
-                                items = DownloadStore.load(prefs)
-                            }
-                        ) {
-                            Icon(
-                                if (ready) Icons.Filled.Delete else Icons.Filled.Stop,
-                                contentDescription = if (ready) "Delete" else "Stop download",
-                                tint = Muted
-                            )
-                        }
+                        Text("OPTIONS ›", color = Muted, fontSize = 11.sp)
+
                     }
                 }
             }
         }
+    }
+    confirmDownload?.let { d ->
+        ConfirmSavedItemDelete(d.title, "download", onCancel = { confirmDownload = null }) {
+            DownloadStore.stopAndRemove(context, prefs, d)
+            items = DownloadStore.load(prefs)
+            confirmDownload = null
+        }
+    }
+    selectedDownload?.let { d ->
+        val ready = DownloadStore.isReady(context, d)
+        val state = downloadStates[d.id] ?: DownloadStore.state(context, d.id)
+        val inFlight = state == DownloadStore.STATE_RUNNING || state == DownloadStore.STATE_PENDING
+        SavedItemPopup(
+            title = d.title,
+            message = if (ready) "Saved for offline watching." else "Finish downloading to play. Pause keeps your progress; Resume continues the download.",
+            actions = buildList {
+                add(SavedItemAction("PLAY", enabled = ready) {
+                    selectedDownload = null
+                    onPlay(Playable(d.title, d.path, isLive = false))
+                })
+                if (!ready) {
+                    add(SavedItemAction("RESUME", enabled = !inFlight) {
+                        toast(context, DownloadStore.resume(context, prefs, d))
+                        items = DownloadStore.load(prefs)
+                        selectedDownload = null
+                    })
+                    add(SavedItemAction("PAUSE DOWNLOAD", enabled = inFlight) {
+                        toast(context, DownloadStore.pause(context, prefs, d))
+                        items = DownloadStore.load(prefs)
+                        selectedDownload = null
+                    })
+                }
+                add(SavedItemAction("DELETE", destructive = true) {
+                    selectedDownload = null
+                    confirmDownload = d
+                })
+                add(SavedItemAction("CLOSE") { selectedDownload = null })
+            },
+            onClose = { selectedDownload = null }
+        )
     }
 }
 
@@ -3881,18 +5458,24 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
 @Composable
 fun RecordingsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
     val context = LocalContext.current
-    var files by remember {
-        mutableStateOf(
-            Recorder.recordingsDir(context).listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList()
-        )
+    val scope = rememberCoroutineScope()
+    var files by remember { mutableStateOf<List<File>>(emptyList()) }
+    suspend fun scanRecordings(): List<File> = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        Recorder.recordingsDir(context).listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList()
     }
     var scheds by remember { mutableStateOf(ScheduleStore.load(prefs)) }
     val schedFmt = remember { SimpleDateFormat("EEE, MMM d  h:mm a", Locale.getDefault()) }
     val activeRecording = Recorder.activeName.value
+    var confirmRecordingFile by remember { mutableStateOf<File?>(null) }
+    var selectedRecordingFile by remember { mutableStateOf<File?>(null) }
+    var confirmSchedule by remember { mutableStateOf<ScheduleStore.Sched?>(null) }
+    var confirmStopRecording by remember { mutableStateOf(false) }
     LaunchedEffect(activeRecording) {
+        // scanRecordings runs on IO; Compose receives only the tiny final file list.
+        files = scanRecordings()
         while (Recorder.activeName.value != null) {
-            kotlinx.coroutines.delay(2_000)
-            files = Recorder.recordingsDir(context).listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList()
+            kotlinx.coroutines.delay(5_000)
+            files = scanRecordings()
         }
     }
 
@@ -3901,7 +5484,7 @@ fun RecordingsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
             if (ProviderStreams.max(prefs) == 1)
                 "Provider streams: 1 • Recording the channel you are watching in DVR Live shares that stream. Recording a different channel takes over Live TV."
             else
-                "Provider streams: ${ProviderStreams.max(prefs)} • Zako may keep Live TV playing while a different channel records, up to your selected IPTV-plan limit.",
+                "Provider streams: ${ProviderStreams.max(prefs)} • RYZOD may keep Live TV playing while a different channel records, up to your selected IPTV-plan limit.",
             color = Muted, fontSize = 10.sp,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
         )
@@ -3917,7 +5500,7 @@ fun RecordingsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
         val onDrive = remember { Storage.usingDrive(context, prefs) }
         if (free >= 0) {
             Text(
-                (if (onDrive) "External drive: " else "Fire Stick storage: ") +
+                (if (onDrive) "External drive: " else "Device storage: ") +
                     "${String.format(java.util.Locale.US, "%.1f", free / 1_073_741_824.0)} GB free (shared by recordings & downloads)" +
                     if (free < 2_500_000_000L) "  •  Too low to record safely" else "",
                 fontSize = 12.sp,
@@ -3949,10 +5532,7 @@ fun RecordingsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
                             color = Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
                         )
                     }
-                    IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = {
-                        ScheduleStore.cancel(context, prefs, s.id)
-                        scheds = ScheduleStore.load(prefs)
-                    }) {
+                    IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = { confirmSchedule=s }) {
                         Icon(Icons.Filled.Delete, contentDescription = "Cancel", tint = Muted)
                     }
                 }
@@ -3977,8 +5557,7 @@ fun RecordingsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
                 Spacer(Modifier.width(8.dp))
                 Text("Recording: $active", color = Ink, fontSize = 14.sp, modifier = Modifier.weight(1f))
                 Button(onClick = {
-                    Recorder.stop(context)
-                    files = Recorder.recordingsDir(context).listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList()
+                    confirmStopRecording = true
                 }) {
                     Icon(Icons.Filled.Stop, contentDescription = null)
                     Spacer(Modifier.width(6.dp))
@@ -4001,20 +5580,18 @@ fun RecordingsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(files) { f ->
+                items(files, key = { it.absolutePath }) { f ->
                     val sizeLabel = when {
                         f.length() < 1024 * 1024 -> "${(f.length() / 1024).coerceAtLeast(0)} KB"
                         f.length() < 10L * 1024 * 1024 -> String.format(Locale.US, "%.1f MB", f.length() / 1_048_576.0)
                         else -> "${f.length() / (1024 * 1024)} MB"
                     }
-                    val trashFocus = remember { FocusRequester() }
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .focusProperties { right = trashFocus }
                             .tvFocus()
                             .background(SurfaceCol, RoundedCornerShape(14.dp))
-                            .clickable { onPlay(Playable(f.nameWithoutExtension, f.absolutePath, isLive = false)) }
+                            .clickable { selectedRecordingFile = f }
                             .padding(10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -4028,16 +5605,56 @@ fun RecordingsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
                             )
                             Text(sizeLabel, color = Muted, fontSize = 12.sp)
                         }
-                        IconButton(
-                            modifier = Modifier.focusRequester(trashFocus).tvFocus(RoundedCornerShape(24.dp)),
-                            onClick = {
-                                f.delete()
-                                files = Recorder.recordingsDir(context).listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList()
-                            }
-                        ) {
-                            Icon(Icons.Filled.Delete, contentDescription = "Delete", tint = Muted)
-                        }
+                        Text("OPTIONS ›", color = Muted, fontSize = 11.sp)
+
                     }
+                }
+            }
+        }
+        selectedRecordingFile?.let { f ->
+            SavedItemPopup(
+                title = f.nameWithoutExtension.removePrefix("REC_").replace('_', ' '),
+                message = "Choose an option for this recording.",
+                actions = listOf(
+                    SavedItemAction("PLAY") {
+                        selectedRecordingFile = null
+                        onPlay(Playable(f.nameWithoutExtension, f.absolutePath, isLive = false))
+                    },
+                    SavedItemAction("DELETE", destructive = true) {
+                        selectedRecordingFile = null
+                        confirmRecordingFile = f
+                    },
+                    SavedItemAction("CLOSE") { selectedRecordingFile = null }
+                ),
+                onClose = { selectedRecordingFile = null }
+            )
+        }
+        confirmStopRecording.takeIf{it}?.let {
+            AlertDialog(onDismissRequest={confirmStopRecording=false},containerColor=SurfaceCol,
+                title={Text("Are you sure?",color=Ink,fontWeight=FontWeight.ExtraBold)},
+                text={Text("Stop the recording now?",color=Muted)},
+                confirmButton={TextButton(onClick={Recorder.stop(context);confirmStopRecording=false}){Text("STOP RECORDING",color=Live,fontWeight=FontWeight.Bold)}},
+                dismissButton={TextButton(onClick={confirmStopRecording=false}){Text("CLOSE",color=Ink)}})
+        }
+        confirmSchedule?.let { s ->
+            AlertDialog(onDismissRequest={confirmSchedule=null},containerColor=SurfaceCol,
+                title={Text("Are you sure?",color=Ink,fontWeight=FontWeight.ExtraBold)},
+                text={Text("Delete this scheduled recording?",color=Muted)},
+                confirmButton={TextButton(onClick={ScheduleStore.cancel(context,prefs,s.id);scheds=ScheduleStore.load(prefs);confirmSchedule=null}){Text("DELETE",color=Live,fontWeight=FontWeight.Bold)}},
+                dismissButton={TextButton(onClick={confirmSchedule=null}){Text("CLOSE",color=Ink)}})
+        }
+        confirmRecordingFile?.let { f ->
+            ConfirmSavedItemDelete(
+                f.nameWithoutExtension.removePrefix("REC_").replace('_', ' '),
+                "recording", onCancel = { confirmRecordingFile = null }
+            ) {
+                confirmRecordingFile = null
+                scope.launch {
+                    val deleted = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        !f.exists() || f.delete()
+                    }
+                    files = scanRecordings()
+                    if (!deleted) toast(context, "Couldn't delete the recording. Check that the storage is connected.")
                 }
             }
         }
@@ -4142,50 +5759,30 @@ private fun Chip(label: String, active: Boolean, onClick: () -> Unit) {
  * OK on it. Press Back to leave edit mode. Used for every text input. */
 @Composable
 private fun TvTextField(
-    value: String,
-    onValueChange: (String) -> Unit,
-    label: String,
-    modifier: Modifier = Modifier,
-    placeholder: String = "",
-    password: Boolean = false,
-    keyboardType: KeyboardType = KeyboardType.Text
+    value: String, onValueChange: (String) -> Unit, label: String,
+    modifier: Modifier = Modifier, placeholder: String = "", password: Boolean = false,
+    keyboardType: KeyboardType = KeyboardType.Text, searchStyle: Boolean = false
 ) {
     var editing by remember { mutableStateOf(false) }
-    val fr = remember { FocusRequester() }
-    if (editing) {
-        LaunchedEffect(Unit) { runCatching { fr.requestFocus() } }
-        BackHandler(enabled = true) { editing = false }
-        OutlinedTextField(
-            value = value,
-            onValueChange = onValueChange,
-            label = { Text(label) },
-            placeholder = { if (placeholder.isNotEmpty()) Text(placeholder) },
-            singleLine = true,
-            visualTransformation = if (password) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
-            keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
-            modifier = modifier.focusRequester(fr)
-        )
-    } else {
-        Column(
-            modifier
-                .tvFocus(RoundedCornerShape(8.dp))
-                .background(Color(0x33202634), RoundedCornerShape(8.dp))
-                .clickable { editing = true }
-                .padding(horizontal = 14.dp, vertical = 12.dp)
-        ) {
-            Text(label, color = Muted, fontSize = 11.sp)
-            Text(
-                when {
-                    value.isEmpty() -> placeholder.ifEmpty { "Press OK to type" }
-                    password -> "\u2022".repeat(value.length.coerceAtMost(12))
-                    else -> value
-                },
-                color = if (value.isEmpty()) Muted else Ink,
-                fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
-            )
+    val fieldFocus = remember { FocusRequester() }
+    val borderColor = if (searchStyle) Accent else ElectricCyan
+    Column(modifier) {
+        Column(Modifier.fillMaxWidth().focusRequester(fieldFocus).tvFocus(RoundedCornerShape(12.dp))
+            .background(PanelGlow.copy(alpha = .72f), RoundedCornerShape(12.dp))
+            .border(2.dp, borderColor, RoundedCornerShape(12.dp))
+            .clickable { editing = true }.padding(horizontal = 14.dp, vertical = 10.dp)) {
+            Text(label, color = borderColor, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Text(when { value.isEmpty() -> placeholder.ifEmpty { "Press OK to type" }
+                password -> "•".repeat(value.length.coerceAtMost(24)); else -> value },
+                color = if (value.isEmpty()) Muted else Ink, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
+    if (editing) RyzodKeyboardDialog(value, onValueChange, label, password) {
+        editing = false
+        runCatching { fieldFocus.requestFocus() }
+    }
 }
+
 
 @Composable
 private fun ChannelIcon(name: String, icon: String?, size: androidx.compose.ui.unit.Dp = 46.dp) {
@@ -4212,6 +5809,7 @@ private fun PosterGridCard(
     icon: String?,
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
+    onInfo: (() -> Unit)? = null,
     onDownload: (() -> Unit)? = null
 ) {
     var longOkFired by remember { mutableStateOf(false) }
@@ -4219,8 +5817,17 @@ private fun PosterGridCard(
         modifier
             .fillMaxWidth()
             .onPreviewKeyEvent { ev ->
-                if (onDownload == null) return@onPreviewKeyEvent false
                 val ne = ev.nativeKeyEvent
+                // ZAKO_V425_REMOTE_INFO: keep poster Left/Right deterministic,
+                // but let TV remotes open the visible ⓘ using MENU/INFO.
+                val infoKey = ne.keyCode == android.view.KeyEvent.KEYCODE_MENU ||
+                    ne.keyCode == android.view.KeyEvent.KEYCODE_INFO
+                if (ne.action == android.view.KeyEvent.ACTION_DOWN &&
+                    ne.repeatCount == 0 && infoKey && onInfo != null) {
+                    onInfo()
+                    return@onPreviewKeyEvent true
+                }
+                if (onDownload == null) return@onPreviewKeyEvent false
                 val center = ne.keyCode == android.view.KeyEvent.KEYCODE_DPAD_CENTER ||
                     ne.keyCode == android.view.KeyEvent.KEYCODE_ENTER
                 if (!center) return@onPreviewKeyEvent false
@@ -4266,7 +5873,7 @@ private fun PosterGridCard(
                         .align(Alignment.BottomEnd)
                         .padding(5.dp)
                         .background(Color(0xDD101217), CircleShape)
-                        .tvFocus(CircleShape)
+                        .focusProperties { canFocus = false }
                         .clickable {
                             // Nested download button: consume this click rather
                             // than launching playback from the poster beneath it.
@@ -4277,21 +5884,34 @@ private fun PosterGridCard(
                     Icon(
                         Icons.Filled.Download,
                         contentDescription = "Download for offline",
-                        tint = Accent,
+                        tint = DownloadGreen,
                         modifier = Modifier.size(18.dp)
                     )
                 }
             }
         }
         Spacer(Modifier.height(5.dp))
-        Text(
-            name,
-            color = Ink,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis
-        )
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+            Text(
+                name,
+                color = Ink,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            if (onInfo != null) {
+                Text(
+                    "ⓘ",
+                    color = ProgramCyan, fontSize = 16.sp, fontWeight = FontWeight.ExtraBold,
+                    modifier = Modifier
+                        .focusProperties { canFocus = false }
+                        .clickable { onInfo() }
+                        .padding(start = 4.dp, end = 2.dp)
+                )
+            }
+        }
     }
 }
 
@@ -4411,9 +6031,11 @@ fun PlayerScreen(
     // Playback state lives in the shared one-stream engine.
     val currentIdx by Playback.currentIdxC
     val current = queue[currentIdx.coerceIn(0, queue.size - 1)]
-    var nowNext by remember { mutableStateOf<List<EpgEntry>>(emptyList()) }
+    val sbsPrefKey = remember(current.url) { "sbs_2d_${current.url.hashCode()}" }
+    var sbs2d by remember(current.url) { mutableStateOf(prefs.getBoolean(sbsPrefKey, false)) }
+    var nowNext by remember(current, source) { mutableStateOf<List<EpgEntry>>(emptyList()) }
     // VOD/recordings keep the legacy Media3 control overlay. Live TV has only
-    // the Zako mini guide; starting this true on live was the reason the old
+    // the RYZOD mini guide; starting this true on live was the reason the old
     // title/gear overlay could still appear underneath the mini guide.
     var overlayVisible by remember { mutableStateOf(queue.getOrNull(start)?.isLive != true) }
     var showRecordChoice by remember { mutableStateOf(false) }
@@ -4432,6 +6054,24 @@ fun PlayerScreen(
     val playState = Playback.playStateC
     val everReady = Playback.everReadyC
     var pvRef by remember { mutableStateOf<PlayerView?>(null) }
+    val remoteDvrSeek = remember { DvrSeekAccelerator() }
+    var dvrSeekHint by remember { mutableStateOf("") }
+
+    fun remoteDvrSeek(dir: Int, event: android.view.KeyEvent?) {
+        val step = remoteDvrSeek.next(dir, event?.repeatCount ?: 0)
+        dvrSeekHint = DvrSeekAccelerator.label(step.gear, dir)
+        if (step.applyNow && !Playback.seekDvrBy(step.deltaMs) && (event?.repeatCount ?: 0) == 0) {
+            toast(context, "DVR is still building — pause a moment, then try again.")
+        }
+    }
+
+    LaunchedEffect(dvrSeekHint) {
+        if (dvrSeekHint.isNotEmpty()) {
+            val seen = dvrSeekHint
+            kotlinx.coroutines.delay(950)
+            if (dvrSeekHint == seen) dvrSeekHint = ""
+        }
+    }
 
     // ---- X1-style mini guide ----
     // Press OK on a live channel → a slim strip along the bottom shows the
@@ -4439,6 +6079,19 @@ fun PlayerScreen(
     // keeps playing full-screen the whole time. Arrow to highlight, OK to tune,
     // OK again (or 4s idle) to tuck it away.
     var miniGuideOpen by remember { mutableStateOf(false) }
+    // ZAKO_V425_TOUCH_DVR: phones/tablets expose the SAME live DVR engine by touch.
+    val hasTouchDvr = remember {
+        context.resources.configuration.touchscreen != Configuration.TOUCHSCREEN_NOTOUCH
+    }
+    var touchDvrOpen by remember { mutableStateOf(false) }
+    var touchDvrTick by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(touchDvrOpen, touchDvrTick) {
+        if (touchDvrOpen) {
+            val seen = touchDvrTick
+            kotlinx.coroutines.delay(6_000)
+            if (touchDvrTick == seen) touchDvrOpen = false
+        }
+    }
     var ccEnabled by remember { mutableStateOf(prefs.getBoolean("cc_enabled", false)) }
     // Whenever the menus appear, park the remote on the show title —
     // OK there closes the menus, arrows reach the other buttons.
@@ -4546,7 +6199,7 @@ fun PlayerScreen(
                 )
             },
             confirmButton = {
-                TextButton(onClick = {
+                TextButton(modifier = Modifier.tvFocus(RoundedCornerShape(18.dp)), onClick = {
                     askDeleteRecording = false
                     runCatching { File(current.url).delete() }
                     toast(context, "Recording deleted.")
@@ -4554,7 +6207,7 @@ fun PlayerScreen(
                 }) { Text("Delete it", color = Accent) }
             },
             dismissButton = {
-                TextButton(onClick = {
+                TextButton(modifier = Modifier.tvFocus(RoundedCornerShape(18.dp)), onClick = {
                     askDeleteRecording = false
                     onBack(Playback.currentIdxC.intValue, 0L)
                 }) { Text("Keep it", color = Muted) }
@@ -4573,7 +6226,7 @@ fun PlayerScreen(
                 )
             },
             confirmButton = {
-                TextButton(onClick = {
+                TextButton(modifier = Modifier.tvFocus(RoundedCornerShape(18.dp)), onClick = {
                     askDeleteDownload = false
                     DownloadStore.load(prefs).firstOrNull { it.path == current.url }?.let {
                         DownloadStore.remove(prefs, it, context)
@@ -4583,7 +6236,7 @@ fun PlayerScreen(
                 }) { Text("Delete it", color = Accent) }
             },
             dismissButton = {
-                TextButton(onClick = {
+                TextButton(modifier = Modifier.tvFocus(RoundedCornerShape(18.dp)), onClick = {
                     askDeleteDownload = false
                     onBack(Playback.currentIdxC.intValue, 0L)
                 }) { Text("Keep it", color = Muted) }
@@ -4625,7 +6278,7 @@ fun PlayerScreen(
         queue.size > 1 && queue.getOrNull(Playback.currentIdxC.intValue)?.isLive == true
     fun zap(dir: Int) {
         if (Recorder.activeName.value != null && ProviderStreams.max(prefs) < 2) {
-            toast(context, "That would need a second provider stream while recording. Your Zako setting is 1 stream — stay on this channel or stop recording.")
+            toast(context, "That would need a second provider stream while recording. Your RYZOD setting is 1 stream — stay on this channel or stop recording.")
             return
         }
         Playback.zapTo(Playback.currentIdxC.intValue + dir)
@@ -4654,7 +6307,7 @@ fun PlayerScreen(
                 else -> false
             }
         }
-        PlayerKeys.handler = { key ->
+        PlayerKeys.handler = { key, event ->
             when (key) {
                 // Fire TV's Menu button is a natural cable-box CC shortcut.
                 // It only flips Media3 text-track selection; no extra decoder or
@@ -4664,23 +6317,23 @@ fun PlayerScreen(
                     true
                 }
                 android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
-                    if (Playback.simpleRaw && current.isLive) true   // no pause in Simple Mode
-                    else { exo.playWhenReady = !exo.playWhenReady; true }
+                    Playback.togglePlaying(); true
                 }
-                android.view.KeyEvent.KEYCODE_MEDIA_PLAY -> { exo.playWhenReady = true; true }
+                android.view.KeyEvent.KEYCODE_MEDIA_PLAY -> { remoteDvrSeek.reset(); Playback.setPlaying(true); true }
                 android.view.KeyEvent.KEYCODE_MEDIA_PAUSE -> {
-                    if (Playback.simpleRaw && current.isLive) true
-                    else { exo.playWhenReady = false; true }
+                    Playback.setPlaying(false); true
                 }
                 android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
-                    if (current.isLive) {
-                        if (!Playback.simpleRaw && !Playback.directLive) Playback.seekDvrBy(DVR_REMOTE_SKIP_MS)
+                    val liveNow = queue.getOrNull(Playback.currentIdxC.intValue)?.isLive == true
+                    if (liveNow) {
+                        if (!Playback.simpleRaw && !Playback.directLive) remoteDvrSeek(+1, event)
                     } else exo.seekForward()
                     true
                 }
                 android.view.KeyEvent.KEYCODE_MEDIA_REWIND -> {
-                    if (current.isLive) {
-                        if (!Playback.simpleRaw && !Playback.directLive) Playback.seekDvrBy(-DVR_REMOTE_SKIP_MS)
+                    val liveNow = queue.getOrNull(Playback.currentIdxC.intValue)?.isLive == true
+                    if (liveNow) {
+                        if (!Playback.simpleRaw && !Playback.directLive) remoteDvrSeek(-1, event)
                     } else exo.seekBack()
                     true
                 }
@@ -4702,11 +6355,18 @@ fun PlayerScreen(
                         else -> { pvRef?.showController(); true }
                     }
                 }
+                android.view.KeyEvent.KEYCODE_DPAD_LEFT -> {
+                    if (miniGuideOpen) false
+                    else if (current.isLive) {
+                        pvRef?.hideController()
+                        overlayVisible = false
+                        miniGuideOpen = true
+                        true
+                    } else { pvRef?.showController(); true }
+                }
                 android.view.KeyEvent.KEYCODE_DPAD_UP,
                 android.view.KeyEvent.KEYCODE_DPAD_DOWN,
-                android.view.KeyEvent.KEYCODE_DPAD_LEFT,
                 android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> {
-                    // Let the recent-channel LazyRow own D-pad focus.
                     if (miniGuideOpen) false else { pvRef?.showController(); true }
                 }
                 else -> false
@@ -4732,7 +6392,8 @@ fun PlayerScreen(
         }
     }
 
-    LaunchedEffect(current.epgId, EpgStore.loaded.value) {
+    LaunchedEffect(current, source, EpgStore.loaded.value) {
+        nowNext = emptyList()
         if (!current.isLive) return@LaunchedEffect
         val fromGuide = EpgStore.guide(current.guideKey, current.name)
         if (fromGuide.isNotEmpty()) {
@@ -4740,6 +6401,9 @@ fun PlayerScreen(
         } else {
             val id = current.epgId
             if (id != null && source != null && source.supportsEpg) {
+                // Local guide results stay immediate. A brief settle delay avoids
+                // provider guide requests for channels passed during rapid zapping.
+                kotlinx.coroutines.delay(250)
                 nowNext = source.epg(id, 2)
             }
         }
@@ -4747,6 +6411,16 @@ fun PlayerScreen(
 
     val recordingThis = Recorder.activeName.value.let { a ->
         a != null && (a == current.name || a.endsWith("(${current.name})"))
+    }
+
+    fun toggleSbs2d() {
+        sbs2d = !sbs2d
+        prefs.edit().putBoolean(sbsPrefKey, sbs2d).apply()
+        toast(
+            context,
+            if (sbs2d) "3D side-by-side correction on for this channel."
+            else "3D side-by-side correction off."
+        )
     }
 
     fun cyclePictureSize() {
@@ -4781,6 +6455,7 @@ fun PlayerScreen(
         Modifier
             .fillMaxSize()
             .background(Color.Black)
+            .clipToBounds()
             // Phones & tablets: swipe up = previous channel in the list,
             // swipe down = next. Taps still work normally for the controls.
             .pointerInput(queue.size) {
@@ -4803,7 +6478,7 @@ fun PlayerScreen(
             factory = { ctx ->
                 PlayerView(ctx).apply {
                     player = exo
-                    // Live TV has ONE controller: Zako's cable-box mini guide.
+                    // Live TV has ONE controller: RYZOD's cable-box mini guide.
                     // Media3's stock controller was competing for OK/focus and
                     // trapping the remote on its gear/title row. VOD/recordings
                     // still use Media3's normal controller.
@@ -4894,13 +6569,65 @@ fun PlayerScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .graphicsLayer(
-                    // FULL SCREEN mode: blow the picture up 34% past the edges —
-                    // wipes out black bars even when they're part of the channel's
-                    // own picture. Old-school edge-to-edge TV.
-                    scaleX = if (superStretch) 1.34f else 1f,
-                    scaleY = if (superStretch) 1.34f else 1f
+                    // SBS 3D providers send left/right eye images squeezed into
+                    // one frame. Double from the LEFT edge to show the left eye as
+                    // ordinary 2D. This is manual/per-channel because metadata
+                    // cannot reliably distinguish SBS from a normal split-screen.
+                    scaleX = when {
+                        sbs2d -> 2f
+                        superStretch -> 1.34f
+                        else -> 1f
+                    },
+                    scaleY = if (superStretch && !sbs2d) 1.34f else 1f,
+                    transformOrigin = if (sbs2d) TransformOrigin(0f, 0.5f) else TransformOrigin.Center
                 )
         )
+        if (current.isLive && hasTouchDvr && !miniGuideOpen) {
+            Box(
+                Modifier
+                    .matchParentSize()
+                    .pointerInput(current.url) {
+                        detectTapGestures {
+                            touchDvrOpen = !touchDvrOpen
+                            touchDvrTick = System.currentTimeMillis()
+                        }
+                    }
+            )
+        }
+        if (current.isLive && hasTouchDvr && touchDvrOpen && !miniGuideOpen) {
+            Row(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 18.dp)
+                    .background(Color(0xE6171922), RoundedCornerShape(16.dp))
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                MiniGuideControl("⏪ REW") {
+                    touchDvrTick = System.currentTimeMillis()
+                    if (!Playback.seekDvrBy(-30_000L)) toast(context, "Rewind needs DVR Live and a little recorded history.")
+                }
+                MiniGuideControl(if (exo.isPlaying) "❚❚ PAUSE" else "▶ PLAY") {
+                    touchDvrTick = System.currentTimeMillis()
+                    Playback.togglePlaying()
+                }
+                MiniGuideControl("FF ⏩") {
+                    touchDvrTick = System.currentTimeMillis()
+                    if (!Playback.seekDvrBy(30_000L)) toast(context, "Fast forward needs DVR Live.")
+                }
+                MiniGuideControl("LIVE", activeColor = ProgramCyan) {
+                    touchDvrTick = System.currentTimeMillis()
+                    if (!Playback.returnToLive()) toast(context, "Already live, or DVR Live is not active.")
+                }
+                MiniGuideControl("● REC", enabled = current.canRecord, activeColor = Live) {
+                    touchDvrTick = System.currentTimeMillis()
+                    if (!current.canRecord) toast(context, "Recording is not available for this channel.")
+                    else showRecordChoice = true
+                }
+            }
+        }
+
         // Cable-box clock (Settings › Clock while watching).
         // ---- X1-style mini guide overlay (live only) ----
         if (miniGuideOpen && current.isLive) {
@@ -4913,7 +6640,9 @@ fun PlayerScreen(
                     fmt = fmt,
                     prefs = prefs,
                     ccEnabled = ccEnabled,
+                    sbs2d = sbs2d,
                     onToggleCc = { setCcEnabled(!ccEnabled) },
+                    onToggleSbs = { toggleSbs2d() },
                     afrEnabled = matchFps,
                     recordingThis = recordingThis,
                     canRecord = current.canRecord,
@@ -4927,7 +6656,7 @@ fun PlayerScreen(
                             Recorder.stop(context)
                             toast(context, "Recording saved — find it in Recordings.")
                         } else if (Recorder.activeName.value != null) {
-                            toast(context, "Zako is already recording ${Recorder.activeName.value}. Stop that recording first.")
+                            toast(context, "RYZOD is already recording ${Recorder.activeName.value}. Stop that recording first.")
                         } else if (Playback.simpleRaw) {
                             toast(context, "Recording needs DVR Live. Switch to DVR Live, let the picture lock in, then press REC.")
                         } else {
@@ -4958,7 +6687,7 @@ fun PlayerScreen(
                     },
                 onTune = { ch ->
                     if (Recorder.activeName.value != null && ch.url != current.url && ProviderStreams.max(prefs) < 2) {
-                        toast(context, "Changing channels while recording needs 2 provider streams. Your Zako setting is 1.")
+                        toast(context, "Changing channels while recording needs 2 provider streams. Your RYZOD setting is 1.")
                     } else {
                         miniGuideOpen = false
                         if (ch.url != current.url) Playback.zapToChannel(ch)
@@ -4972,6 +6701,18 @@ fun PlayerScreen(
                     onClose = { miniGuideOpen = false }
                 )
             }
+        }
+        if (dvrSeekHint.isNotEmpty()) {
+            Text(
+                dvrSeekHint,
+                color = Ink, fontSize = 18.sp, fontWeight = FontWeight.ExtraBold,
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 26.dp)
+                    .background(Color(0xCC171922), RoundedCornerShape(10.dp))
+                    .border(2.dp, FocusPink, RoundedCornerShape(10.dp))
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
+            )
         }
         if (showClock && clockText.isNotEmpty()) {
             Text(
@@ -5104,7 +6845,7 @@ fun PlayerScreen(
                         tint = Color.White
                     )
                 }
-                if (current.canRecord && !Playback.simpleRaw) {
+                if (current.canRecord) {
                     // While recording, a red REC badge sits right next to the
                     // button (which becomes a Stop button) — one press stops it.
                     if (recordingThis) {
@@ -5268,6 +7009,55 @@ fun PlayerScreen(
  * after ~5 seconds of no input.
  * ------------------------------------------------------------------------- */
 @Composable
+private fun MiniGuideNowInfoDialog(
+    channelName: String,
+    nowShow: EpgEntry,
+    fmt: SimpleDateFormat,
+    onClose: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onClose,
+        containerColor = SurfaceCol,
+        title = {
+            Text(
+                nowShow.title,
+                color = Color(0xFFFFE45C),
+                fontSize = 20.sp,
+                fontWeight = FontWeight.ExtraBold
+            )
+        },
+        text = {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(androidx.compose.foundation.rememberScrollState())
+            ) {
+                Text(channelName, color = ProgramCyan, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(5.dp))
+                Text(
+                    "${fmt.format(Date(nowShow.startMs))}–${fmt.format(Date(nowShow.endMs))}",
+                    color = Ink,
+                    fontSize = 12.sp
+                )
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    nowShow.desc.ifBlank { "No description was supplied by the guide." },
+                    color = Ink,
+                    fontSize = 15.sp,
+                    lineHeight = 21.sp
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(modifier = Modifier.tvFocus(RoundedCornerShape(18.dp)), onClick = onClose) {
+                Text("CLOSE", color = ProgramCyan, fontWeight = FontWeight.Bold)
+            }
+        }
+    )
+}
+
+// ZAKO_V445_RESTORED_FULL_CHAIN
+@Composable
 private fun MiniGuide(
     queue: List<Playable>,
     currentIdx: Int,
@@ -5276,7 +7066,9 @@ private fun MiniGuide(
     fmt: SimpleDateFormat,
     prefs: SharedPreferences,
     ccEnabled: Boolean,
+    sbs2d: Boolean,
     onToggleCc: () -> Unit,
+    onToggleSbs: () -> Unit,
     afrEnabled: Boolean,
     recordingThis: Boolean,
     canRecord: Boolean,
@@ -5289,6 +7081,7 @@ private fun MiniGuide(
     onRetry: () -> Unit,
     onClose: () -> Unit
 ) {
+    // ZAKO_V432_MINI_ACCESSIBILITY: larger three-row guide for across-room reading.
     val context = LocalContext.current
     val player = Playback.player
     val current = queue.getOrNull(currentIdx)
@@ -5304,12 +7097,33 @@ private fun MiniGuide(
     }
 
     var showRecent by remember { mutableStateOf(false) }
+    var showNowInfo by remember { mutableStateOf(false) }
+    if (showNowInfo && nowShow != null) {
+        // ZAKO_V434_MINI_INFO: current-show information is readable without leaving Live TV.
+        MiniGuideNowInfoDialog(
+            channelName = current?.name.orEmpty(),
+            nowShow = nowShow,
+            fmt = fmt,
+            onClose = { showNowInfo = false }
+        )
+    }
     var playerBufferMs by remember { mutableLongStateOf(0L) }
     var playerPosMs by remember { mutableLongStateOf(0L) }
     var dvrWindowMs by remember { mutableLongStateOf(0L) }
     var dvrBytes by remember { mutableLongStateOf(0L) }
     var displayHz by remember { mutableFloatStateOf(0f) }
     var isPlaying by remember { mutableStateOf(player?.isPlaying == true) }
+    val timelineSeek = remember { DvrSeekAccelerator() }
+    val lineupFocus = remember { FocusRequester() }
+    val lineupState = androidx.compose.foundation.lazy.rememberLazyListState(
+        initialFirstVisibleItemIndex = (currentIdx - 1).coerceAtLeast(0)
+    )
+
+    LaunchedEffect(currentIdx, queue.size) {
+        if (queue.isNotEmpty()) {
+            lineupState.scrollToItem((currentIdx - 1).coerceIn(0, queue.lastIndex))
+        }
+    }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -5339,6 +7153,8 @@ private fun MiniGuide(
     val ccFocus = remember { FocusRequester() }
     val modeFocus = remember { FocusRequester() }
     val sizeFocus = remember { FocusRequester() }
+    val infoFocus = remember { FocusRequester() }
+    val sbsFocus = remember { FocusRequester() }
     val previousFocus = remember { FocusRequester() }
     val settingsFocus = remember { FocusRequester() }
     val timelineFocus = remember { FocusRequester() }
@@ -5359,24 +7175,33 @@ private fun MiniGuide(
         lastTouch = System.currentTimeMillis()
         runCatching { previousFocus.requestFocus() }
     }
+    BackHandler(enabled = showNowInfo) {
+        showNowInfo = false
+        lastTouch = System.currentTimeMillis()
+    }
 
     fun touch() { lastTouch = System.currentTimeMillis() }
 
-    fun seekDvr(deltaMs: Long) {
+    fun seekDvr(deltaMs: Long, quiet: Boolean = false) {
         touch()
         when {
-            Playback.simpleRaw -> toast(context, "Rewind needs DVR Live.")
-            Playback.directLive -> toast(context, "DVR is in Direct Rescue. Select DVR RETRY first.")
-            current?.isLive != true -> toast(context, "DVR controls are only for Live TV.")
-            !Playback.seekDvrBy(deltaMs) ->
+            Playback.simpleRaw -> if (!quiet) toast(context, "Rewind needs DVR Live.")
+            Playback.directLive -> if (!quiet) toast(context, "DVR is in Direct Rescue. Select DVR RETRY first.")
+            current?.isLive != true -> if (!quiet) toast(context, "DVR controls are only for Live TV.")
+            !Playback.seekDvrBy(deltaMs) -> if (!quiet)
                 toast(context, "DVR is still building — pause a moment, then try again.")
         }
+    }
+
+    fun acceleratedTimelineSeek(dir: Int, repeatCount: Int) {
+        val step = timelineSeek.next(dir, repeatCount)
+        if (step.applyNow) seekDvr(step.deltaMs, quiet = repeatCount > 0)
     }
 
     val sourceFps = Playback.videoFpsC.floatValue
     val dvrActive = current?.isLive == true &&
         !Playback.simpleRaw && !Playback.directLive &&
-        Timeshift.file != null && Timeshift.active
+        Timeshift.snapshot() != null && Timeshift.active
     val dvrProgress = if (dvrWindowMs > 0L)
         (playerPosMs.toFloat() / dvrWindowMs.toFloat()).coerceIn(0f, 1f)
     else 1f
@@ -5410,31 +7235,49 @@ private fun MiniGuide(
             )
             .padding(top = 8.dp, bottom = 9.dp, start = 14.dp, end = 14.dp)
     ) {
-        // Compact information header. No focus targets here.
+        // ZAKO_V434_MINI_HEADER: keep channel identity on the left and give the
+        // current program its own readable space on the right instead of stacking
+        // the title underneath the channel name.
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (current != null) {
                 ChannelIcon(current.name, current.artwork, 32.dp)
                 Spacer(Modifier.width(8.dp))
             }
-            Column(Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                modifier = Modifier.then(Modifier.width(210.dp)),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    current?.name ?: "",
+                    color = Ink, fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+                if (recordingThis) {
+                    Spacer(Modifier.width(7.dp))
+                    Text("● REC", color = Live, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+            Spacer(Modifier.width(14.dp))
+            if (nowShow != null) {
+                Column(Modifier.weight(1f)) {
                     Text(
-                        current?.name ?: "",
-                        color = Ink, fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                        nowShow.title,
+                        color = Color(0xFFFFE45C), // ZAKO_V434_MINI_NOW_YELLOW
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        "${fmt.format(Date(nowShow.startMs))}–${fmt.format(Date(nowShow.endMs))}" +
+                            (if (nextShow != null) "   •   Next ${fmt.format(Date(nextShow.startMs))}: ${nextShow.title}" else ""),
+                        color = Muted, fontSize = 9.sp, fontWeight = FontWeight.SemiBold,
                         maxLines = 1, overflow = TextOverflow.Ellipsis
                     )
-                    if (recordingThis) {
-                        Spacer(Modifier.width(8.dp))
-                        Text("● REC", color = Live, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                    }
                 }
-                if (nowShow != null) {
-                    Text(
-                        "${nowShow.title}  •  ${fmt.format(Date(nowShow.startMs))}–${fmt.format(Date(nowShow.endMs))}" +
-                            (if (nextShow != null) "   •   Next ${fmt.format(Date(nextShow.startMs))}: ${nextShow.title}" else ""),
-                        color = Muted, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
-                    )
-                }
+            } else {
+                Spacer(Modifier.weight(1f))
             }
             Text(
                 buildString {
@@ -5469,8 +7312,7 @@ private fun MiniGuide(
                 }
             ) {
                 touch()
-                if (Playback.simpleRaw) toast(context, "Pause needs DVR Live.")
-                else player?.let { it.playWhenReady = !it.playWhenReady }
+                Playback.togglePlaying()
             }
 
             MiniGuideControl(
@@ -5502,17 +7344,38 @@ private fun MiniGuide(
 
             MiniGuideControl(
                 "SIZE",
-                modifier = Modifier.weight(0.8f).focusRequester(sizeFocus).focusProperties {
-                    left = modeFocus; right = previousFocus; down = timelineFocus
+                modifier = Modifier.weight(0.72f).focusRequester(sizeFocus).focusProperties {
+                    left = modeFocus; right = infoFocus; down = timelineFocus
                 }
             ) { touch(); onResize() }
 
             MiniGuideControl(
+                "ⓘ INFO",
+                enabled = nowShow != null,
+                activeColor = Color(0xFFFFE45C),
+                modifier = Modifier.weight(0.82f).focusRequester(infoFocus).focusProperties {
+                    left = sizeFocus; right = sbsFocus; down = timelineFocus
+                }
+            ) {
+                touch()
+                if (nowShow != null) showNowInfo = true
+                else toast(context, "Program information is not available right now.")
+            }
+
+            MiniGuideControl(
+                if (sbs2d) "3D→2D" else "3D",
+                modifier = Modifier.weight(0.72f).focusRequester(sbsFocus).focusProperties {
+                    left = infoFocus; right = previousFocus; down = timelineFocus
+                },
+                activeColor = if (sbs2d) Accent else Ink
+            ) { touch(); onToggleSbs() }
+
+            MiniGuideControl(
                 "PREVIOUS",
                 modifier = Modifier
-                    .weight(1f)
+                    .weight(0.92f)
                     .focusRequester(previousFocus)
-                    .focusProperties { left = sizeFocus; right = settingsFocus; down = timelineFocus }
+                    .focusProperties { left = sbsFocus; right = settingsFocus; down = timelineFocus }
                     .onPreviewKeyEvent { ev ->
                         if (ev.type == KeyEventType.KeyDown && ev.key == Key.DirectionDown && entries.isNotEmpty()) {
                             showRecent = true; touch(); true
@@ -5535,30 +7398,22 @@ private fun MiniGuide(
         Spacer(Modifier.height(5.dp))
 
         // X1-inspired program/timeshift line. The line spans the whole scheduled
-        // program. Gold = show progress, cyan = the part Zako has actually stored,
+        // program. Gold = show progress, cyan = the part RYZOD has actually stored,
         // pink dot = current playhead. Left/right on THIS line seeks, while the
         // remote's physical FF/RW keys do the same from anywhere on screen.
-        val showStart = nowShow?.startMs ?: 0L
-        val showEnd = nowShow?.endMs ?: 0L
-        val showDuration = (showEnd - showStart).coerceAtLeast(0L)
-        val hasProgramWindow = showDuration > 1_000L
+        // RYZOD_V462_CHANNEL_CLOCK_DVR
+        // Temporary DVR belongs to the channel, never to an EPG program.
         val trueDvrStartWall = Timeshift.startedAtWallMs
-        val visibleDvrStartWall = if (trueDvrStartWall > 0L)
-            maxOf(trueDvrStartWall, nowMs - DVR_HISTORY_MS)
-        else 0L
-        val playWall = if (trueDvrStartWall > 0L) trueDvrStartWall + playerPosMs else nowMs
-        val programLiveFraction = if (hasProgramWindow)
-            ((nowMs - showStart).toFloat() / showDuration.toFloat()).coerceIn(0f, 1f)
-        else dvrProgress
-        val programPlayFraction = if (hasProgramWindow)
-            ((playWall - showStart).toFloat() / showDuration.toFloat()).coerceIn(0f, 1f)
-        else dvrProgress
-        val dvrStartFraction = if (hasProgramWindow && visibleDvrStartWall > 0L)
-            ((maxOf(visibleDvrStartWall, showStart) - showStart).toFloat() / showDuration.toFloat()).coerceIn(0f, 1f)
-        else 0f
-        val dvrEndFraction = if (hasProgramWindow && dvrActive)
-            ((minOf(nowMs, showEnd) - showStart).toFloat() / showDuration.toFloat()).coerceIn(0f, 1f)
-        else if (dvrActive) 1f else 0f
+        val availableMs = minOf(dvrWindowMs, 55L * 60L * 1000L).coerceAtLeast(0L)
+        val visibleDvrStartWall = if (trueDvrStartWall > 0L) (nowMs - availableMs).coerceAtLeast(trueDvrStartWall) else 0L
+        val showStart = visibleDvrStartWall
+        val playInVisibleMs = (playerPosMs - (dvrWindowMs - availableMs).coerceAtLeast(0L)).coerceIn(0L, availableMs.coerceAtLeast(1L))
+        val programLiveFraction = 1f
+        val programPlayFraction = if (availableMs > 0L) (playInVisibleMs.toFloat()/availableMs.toFloat()).coerceIn(0f,1f) else 1f
+        val dvrStartFraction = 0f
+        val dvrEndFraction = if (dvrActive) 1f else 0f
+        val hasProgramWindow = false
+        val showEnd = nowMs
 
         Box(
             Modifier
@@ -5568,17 +7423,22 @@ private fun MiniGuide(
                 .focusRequester(timelineFocus)
                 .focusProperties {
                     up = playFocus
-                    if (showRecent && entries.isNotEmpty()) down = recentFocus
+                    if (queue.size > 1) down = lineupFocus
+                    else if (showRecent && entries.isNotEmpty()) down = recentFocus
                 }
                 .focusable()
                 .onPreviewKeyEvent { ev ->
                     if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                     when (ev.key) {
-                        Key.DirectionLeft -> { seekDvr(-DVR_REMOTE_SKIP_MS); true }
-                        Key.DirectionRight -> { seekDvr(DVR_REMOTE_SKIP_MS); true }
-                        Key.DirectionDown -> {
-                            if (entries.isNotEmpty()) { showRecent = true; touch(); true } else false
+                        Key.DirectionLeft -> {
+                            acceleratedTimelineSeek(-1, ev.nativeKeyEvent.repeatCount)
+                            true
                         }
+                        Key.DirectionRight -> {
+                            acceleratedTimelineSeek(+1, ev.nativeKeyEvent.repeatCount)
+                            true
+                        }
+                        Key.DirectionDown -> false
                         else -> false
                     }
                 }
@@ -5589,10 +7449,10 @@ private fun MiniGuide(
                     Text(
                         if (hasProgramWindow) fmt.format(Date(showStart))
                         else if (visibleDvrStartWall > 0L) fmt.format(Date(visibleDvrStartWall)) else "START",
-                        color = Muted, fontSize = 8.sp
+                        color = Ink, fontSize = 9.sp
                     )
                     Spacer(Modifier.weight(1f))
-                    Text(if (hasProgramWindow) fmt.format(Date(showEnd)) else "LIVE", color = Muted, fontSize = 8.sp)
+                    Text(if (hasProgramWindow) fmt.format(Date(showEnd)) else "LIVE", color = Ink, fontSize = 9.sp)
                 }
                 Canvas(Modifier.fillMaxWidth().height(14.dp)) {
                     val y = size.height / 2f
@@ -5610,12 +7470,94 @@ private fun MiniGuide(
                     Playback.directLive -> "DVR unavailable — choose DVR RETRY above"
                     Playback.simpleRaw -> "Smooth Live • ${String.format(java.util.Locale.US, "%.1f", playerBufferMs / 1000.0)}s player buffer"
                     dvrActive -> {
-                        val available = minOf(dvrWindowMs, DVR_HISTORY_MS)
-                        "DVR ${shortTime(available)} available • ${shortTime(behindMs)} behind LIVE • FF/RW remote = 10 sec"
+                        val available = minOf(dvrWindowMs, Timeshift.windowMs())
+                        "DVR ${shortTime(available)} available • ${shortTime(behindMs)} behind LIVE • FF/RW repeat or hold = faster"
                     }
                     else -> "DVR building… ${String.format(java.util.Locale.US, "%.1f", playerBufferMs / 1000.0)}s"
                 }
                 Text(status, color = Muted, fontSize = 8.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+
+        if (queue.size > 1) {
+            Spacer(Modifier.height(4.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Channels", color = Accent, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.width(8.dp))
+                            }
+            Spacer(Modifier.height(2.dp))
+            LazyColumn(
+                state = lineupState,
+                modifier = Modifier.fillMaxWidth().height(120.dp),
+                verticalArrangement = Arrangement.spacedBy(1.dp)
+            ) {
+                itemsIndexed(queue, key = { _, ch -> ch.url }) { itemIndex, ch ->
+                    val selectedNow = itemIndex == currentIdx
+                    // ZAKO_V425_MINI_EPG: lookup only this composed row.
+                    // ZAKO_V431_MINI_TITLE: resolve from current guide data every composition.
+                    // Some providers key mini-player rows differently; fall back to epgId.
+                    val rowProgram = run {
+                        val t = System.currentTimeMillis()
+                        EpgStore.guide(ch.guideKey, ch.name).firstOrNull { t in it.startMs until it.endMs }
+                            ?: EpgStore.guide(ch.epgId, ch.name).firstOrNull { t in it.startMs until it.endMs }
+                    }
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .height(38.dp)
+                            .then(if (selectedNow) Modifier.focusRequester(lineupFocus) else Modifier)
+                            .onPreviewKeyEvent { ev ->
+                                if (ev.type == KeyEventType.KeyDown && ev.key == Key.DirectionLeft) {
+                                    runCatching { timelineFocus.requestFocus() }
+                                    true
+                                } else false
+                            }
+                            .tvFocus(RoundedCornerShape(6.dp))
+                            .background(
+                                if (selectedNow) ElectricCyan.copy(alpha = 0.22f) else Color(0xCC0A2642),
+                                RoundedCornerShape(6.dp)
+                            )
+                            .clickable { touch(); onTune(ch) }
+                            .padding(horizontal = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            if (selectedNow) "NOW" else "${itemIndex + 1}",
+                            color = if (selectedNow) Accent else Muted,
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.width(38.dp)
+                        )
+                        // ZAKO_V435_LINEUP_HORIZONTAL: the three visible mini-guide rows keep
+                        // the channel and current program side-by-side so the program title never
+                        // drops under the channel and gets vertically clipped by the 38dp row.
+                        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                ch.name,
+                                color = Ink, fontSize = 12.sp,
+                                fontWeight = if (selectedNow) FontWeight.ExtraBold else FontWeight.SemiBold,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(if (rowProgram != null) 0.42f else 1f)
+                            )
+                            if (rowProgram != null) {
+                                Spacer(Modifier.width(10.dp))
+                                Text(
+                                    rowProgram.title,
+                                    color = Color(0xFFFFE45C), fontSize = 11.sp, fontWeight = FontWeight.Bold, // ZAKO_V432_MINI_YELLOW
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(0.58f)
+                                )
+                            }
+                        }
+                        if (rowProgram != null) {
+                            Text(
+                                "${fmt.format(Date(rowProgram.startMs))}–${fmt.format(Date(rowProgram.endMs))}",
+                                color = LimeBubble, fontSize = 10.sp, fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(start = 8.dp)
+                            )
+                        }
+                    }
+                }
             }
         }
 
@@ -5627,7 +7569,7 @@ private fun MiniGuide(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("Previous", color = Accent, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.width(8.dp))
-                    Text("OK tunes • Back closes", color = Muted, fontSize = 8.sp)
+                    Text("OK tunes • Back closes", color = Ink, fontSize = 9.sp)
                 }
                 Spacer(Modifier.height(3.dp))
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
@@ -5651,7 +7593,7 @@ private fun MiniGuide(
                             Spacer(Modifier.width(7.dp))
                             Column(Modifier.weight(1f)) {
                                 Text(ch.name, color = Ink, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(recentNow ?: "Press OK to watch", color = if (recentNow != null) Muted else Accent, fontSize = 8.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(recentNow ?: "Press OK to watch", color = if (recentNow != null) ProgramCyan else Ink, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                         }
                     }

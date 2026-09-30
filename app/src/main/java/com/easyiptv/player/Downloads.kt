@@ -251,8 +251,10 @@ object DownloadStore {
                     // A RUNNING transfer with no service really was interrupted.
                     // PENDING items are legitimate v4.21 queue entries and must
                     // survive app navigation/restarts.
-                    runCatching { File(item.path + ".part").delete() }
-                    mark(context, item.id, STATE_FAILED, 0L, -1L, "Download was interrupted. Start it again.")
+                    val part = File(item.path + ".part")
+                    val partialBytes = if (part.exists()) part.length() else 0L
+                    mark(context, item.id, STATE_FAILED, partialBytes, progress(context, item.id)?.second ?: -1L,
+                        "Download was interrupted. Resume it from Downloads.")
                     keep.add(item)
                 }
                 isInFlight(context, item.id) -> keep.add(item)
@@ -291,6 +293,24 @@ object DownloadStore {
     fun stopAndRemove(context: Context, prefs: SharedPreferences, item: Item) {
         if (isInFlight(context, item.id)) DownloadService.cancel(context, item.id)
         remove(prefs, item, context)
+    }
+
+    fun pause(context: Context, prefs: SharedPreferences, item: Item): String {
+        if (isReady(context, item)) return "Already downloaded."
+        val part = File(item.path + ".part")
+        if (isInFlight(context, item.id)) DownloadService.pause(context, item.id)
+        mark(context, item.id, STATE_FAILED, part.length().coerceAtLeast(0L), -1L, "Paused")
+        return "Paused. The next queued download will start."
+    }
+
+    fun resume(context: Context, prefs: SharedPreferences, item: Item): String {
+        if (item.url.isBlank()) return "This older download cannot resume. Add the title again."
+        if (isReady(context, item)) return "Already downloaded."
+        if (isInFlight(context, item.id)) return "Already downloading or queued."
+        val part = File(item.path + ".part")
+        mark(context, item.id, STATE_PENDING, part.length().coerceAtLeast(0L), -1L, "")
+        val started = kickQueue(context, prefs)
+        return if (started) "Resuming download…" else "Queued to resume."
     }
 
     /** (bytes so far, total bytes or -1 if unknown). */
@@ -361,6 +381,14 @@ object DownloadStore {
                         return "\"$title\" is already downloading or queued — check Downloads."
                     isReady(context, existing) ->
                         return "\"$title\" is already downloaded — find it in Downloads."
+                    state(context, existing.id) == STATE_FAILED && existing.url.isNotBlank() -> {
+                        mark(context, existing.id, STATE_PENDING,
+                            File(existing.path + ".part").let { if (it.exists()) it.length() else 0L },
+                            progress(context, existing.id)?.second ?: -1L, "")
+                        val started = kickQueue(context, prefs)
+                        return if (started) "Resuming \"$title\" from where it stopped."
+                        else "Queued \"$title\" to resume."
+                    }
                     else -> remove(prefs, existing, context)
                 }
             }
@@ -448,7 +476,8 @@ object DownloadStore {
             // Reserve the queue head synchronously so rapid-fire selections do
             // not enqueue duplicate ACTION_START intents before the foreground
             // service has time to set its activeId.
-            mark(context, next.id, STATE_RUNNING, 0L, -1L, "")
+            val partial = File(next.path + ".part").length().coerceAtLeast(0L)
+            mark(context, next.id, STATE_RUNNING, partial, -1L, "")
             DownloadService.start(context, next.id, next.title, next.url, next.path)
             true
         } catch (t: Throwable) {
@@ -487,6 +516,10 @@ class DownloadService : Service() {
                 runCatching { activeCall?.cancel() }
                 context.stopService(Intent(context, DownloadService::class.java))
             }
+        }
+
+        fun pause(context: Context, id: Long) {
+            if (activeId == id) runCatching { activeCall?.cancel() }
         }
 
         fun isActive(id: Long): Boolean = id != 0L && activeId == id
@@ -573,23 +606,32 @@ class DownloadService : Service() {
             var total = -1L
             try {
                 finalFile.parentFile?.mkdirs()
-                runCatching { part.delete() }
+                val resumeFrom = if (part.exists()) part.length().coerceAtLeast(0L) else 0L
                 runCatching { finalFile.delete() }
-                DownloadStore.mark(this@DownloadService, id, DownloadStore.STATE_RUNNING, 0L, -1L)
+                done = resumeFrom
+                DownloadStore.mark(this@DownloadService, id, DownloadStore.STATE_RUNNING, done, -1L)
 
                 val client = Net.client.newBuilder()
                     .readTimeout(60, TimeUnit.SECONDS)
                     .build()
 
                 fun executeWithUa(ua: String): okhttp3.Response {
-                    val req = Request.Builder().url(url).header("User-Agent", ua).build()
+                    // ZAKO_V428_DOWNLOAD_HEADERS
+                    val req = Request.Builder()
+                        .url(url)
+                        .header("User-Agent", ua)
+                        .header("Accept", "video/*,application/octet-stream,*/*")
+                        .header("Accept-Encoding", "identity")
+                        .apply { if (resumeFrom > 0L) header("Range", "bytes=$resumeFrom-") else header("Range", "bytes=0-") }
+                        .header("Connection", "keep-alive")
+                        .build()
                     val call = client.newCall(req)
                     activeCall = call
                     return call.execute()
                 }
 
                 var resp = executeWithUa(Net.UA)
-                if (resp.code == 403 || resp.code == 406) {
+                if (resp.code == 401 || resp.code == 403 || resp.code == 406 || resp.code == 429 || resp.code >= 500) {
                     resp.close()
                     resp = executeWithUa(
                         "Mozilla/5.0 (Linux; Android 9; TV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
@@ -599,12 +641,15 @@ class DownloadService : Service() {
                 resp.use { r ->
                     if (!r.isSuccessful) throw IOException("HTTP ${r.code}")
                     val body = r.body ?: throw IOException("Empty response")
-                    total = body.contentLength()
-                    DownloadStore.mark(this@DownloadService, id, DownloadStore.STATE_RUNNING, 0L, total)
+                    val append = resumeFrom > 0L && r.code == 206
+                    if (resumeFrom > 0L && !append) done = 0L
+                    val responseBytes = body.contentLength()
+                    total = if (append && responseBytes >= 0L) resumeFrom + responseBytes else responseBytes
+                    DownloadStore.mark(this@DownloadService, id, DownloadStore.STATE_RUNNING, done, total)
 
                     body.byteStream().use { inp ->
-                        FileOutputStream(part, false).use { out ->
-                            val buf = ByteArray(128 * 1024)
+                        FileOutputStream(part, append).use { out ->
+                            val buf = ByteArray(64 * 1024)
                             var sinceState = 0L
                             var sinceSpace = 0L
                             var lastUi = System.currentTimeMillis()
@@ -658,14 +703,14 @@ class DownloadService : Service() {
                 )
             } catch (t: Throwable) {
                 if (!userCancelled) {
-                    runCatching { part.delete() }
+                    val partialDone = if (part.exists()) part.length() else done
                     DownloadStore.mark(
                         this@DownloadService,
                         id,
                         DownloadStore.STATE_FAILED,
-                        done,
+                        partialDone,
                         total,
-                        t.message ?: "Download failed"
+                        (t.message ?: "Download failed") + if (partialDone > 0L) " — Resume is available." else ""
                     )
                 }
             } finally {

@@ -133,7 +133,7 @@ class RecordingService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle("Recording: $name")
-            .setContentText("Zako is recording in the background.")
+            .setContentText("RYZOD is recording in the background.")
             .setOngoing(true)
             .setContentIntent(open)
             .addAction(android.R.drawable.ic_media_pause, "Stop recording", stop)
@@ -143,15 +143,6 @@ class RecordingService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                // Simple Mode = live TV only. Any recording that tries to start
-                // (including a scheduled one firing) is skipped while it's on.
-                val simple = getSharedPreferences("easyiptv", Context.MODE_PRIVATE)
-                    .getBoolean("simple_mode", true)
-                if (simple) {
-                    Recorder.lastStatus.value = "Recording is off in Smooth Live. Switch to DVR Live, then press Record again."
-                    stopSelf()
-                    return START_NOT_STICKY
-                }
                 val url = intent.getStringExtra("url") ?: return START_NOT_STICKY.also { stopSelf() }
                 val prefs = getSharedPreferences("easyiptv", Context.MODE_PRIVATE)
                 val name = intent.getStringExtra("name") ?: "channel"
@@ -161,7 +152,7 @@ class RecordingService : Service() {
                 // not explicitly know to request a tee.
                 val sameWatchedChannel = Playback.currentProviderUrl()?.let { it == url } == true
                 val tee = intent.getBooleanExtra("tee", false) ||
-                    (sameWatchedChannel && Playback.canTeeRecording())
+                    (sameWatchedChannel && (Playback.canTeeRecording() || Playback.prepareCurrentForRecording()))
 
                 // A tee costs zero extra provider streams. A direct recording
                 // costs one. Only cancel a download when the user's configured
@@ -190,42 +181,53 @@ class RecordingService : Service() {
      *  recording the watched channel WITHOUT a second provider connection.
      *  Returns true if it ended because the DVR feed changed/stopped (channel
      *  change) — the caller then finishes via a direct connection if needed. */
+    /**
+     * ZAKO_V440_RING_RECORDING: record the watched channel from the same rolling
+     * DVR ring the player already owns. Start at the current live edge; the
+     * RingReader transparently crosses physical segment boundaries and holds a
+     * reader lease so an in-use segment cannot be reclaimed underneath us.
+     * Returns true only when the live DVR session changed/stopped so the caller
+     * can decide whether a direct provider fallback is still appropriate.
+     */
     private fun teeFromTimeshift(out: FileOutputStream, stopAt: Long?, isActive: () -> Boolean): Boolean {
-        val src = Timeshift.file ?: return true
+        val sessionGen = Timeshift.generation()
+        if (!Timeshift.active) return true
+        val deadline = android.os.SystemClock.elapsedRealtime() + 12_000L
+        while (isActive() && Timeshift.active && Timeshift.generation() == sessionGen &&
+            Timeshift.newestVirtualByte() < 188L && android.os.SystemClock.elapsedRealtime() < deadline &&
+            (stopAt == null || System.currentTimeMillis() < stopAt)) {
+            Thread.sleep(25)
+        }
+        if (!isActive() || (stopAt != null && System.currentTimeMillis() >= stopAt)) return false
+        if (!Timeshift.active || Timeshift.generation() != sessionGen) return true
+        val liveEdge = Timeshift.newestVirtualByte()
+        val reader = Timeshift.openReader(liveEdge, sessionGen) ?: return true
         return try {
-            java.io.RandomAccessFile(src, "r").use { raf ->
-                // Start from "now" — the live edge of the DVR file.
-                var pos = Timeshift.bytesWritten
+            reader.use { rr ->
                 val buf = ByteArray(64 * 1024)
                 var sinceCheck = 0L
                 while (isActive() && (stopAt == null || System.currentTimeMillis() < stopAt)) {
-                    if (Timeshift.file !== src) return true   // channel changed
-                    val avail = minOf(Timeshift.bytesWritten, raf.length()) - pos
-                    if (avail > 0) {
-                        raf.seek(pos)
-                        val want = if (buf.size.toLong() < avail) buf.size else avail.toInt()
-                        val n = raf.read(buf, 0, want)
-                        if (n > 0) {
-                            out.write(buf, 0, n)
-                            pos += n
-                            sinceCheck += n
-                            if (sinceCheck > 32_000_000) {
-                                sinceCheck = 0
-                                val freeNow = runCatching {
-                                    android.os.StatFs(Recorder.recordingsDir(this).absolutePath).availableBytes
-                                }.getOrDefault(Long.MAX_VALUE)
-                                if (freeNow < 2_000_000_000L) return false
-                            }
+                    if (!Timeshift.active || Timeshift.generation() != sessionGen) return true
+                    val n = rr.read(buf)
+                    if (n > 0) {
+                        out.write(buf, 0, n)
+                        sinceCheck += n
+                        if (sinceCheck > 32_000_000L) {
+                            sinceCheck = 0L
+                            val freeNow = runCatching {
+                                android.os.StatFs(Recorder.recordingsDir(this).absolutePath).availableBytes
+                            }.getOrDefault(Long.MAX_VALUE)
+                            if (freeNow < 2_000_000_000L) return false
                         }
-                    } else if (!Timeshift.active) {
-                        return true   // DVR feed stopped
-                    } else {
+                    } else if (n == 0 && Timeshift.active && Timeshift.generation() == sessionGen) {
                         Thread.sleep(50)
+                    } else {
+                        return true
                     }
                 }
             }
             false
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             true
         }
     }
@@ -274,6 +276,8 @@ class RecordingService : Service() {
                         }
                     }
                     if (needNetwork) {
+                        if (!isActive || (stopAt != null && System.currentTimeMillis() >= stopAt)) return@launch
+                        Recorder.usesProviderConnection = true
                         val prefs = getSharedPreferences("easyiptv", Context.MODE_PRIVATE)
                         // Direct recording costs a provider slot. Respect the
                         // customer setting: with 1 stream, recording takes over;
@@ -284,42 +288,57 @@ class RecordingService : Service() {
                         }
                         if (ProviderStreams.playbackSlots() + 1 > ProviderStreams.max(prefs)) {
                             val latch = java.util.concurrent.CountDownLatch(1)
+                            val released = java.util.concurrent.atomic.AtomicBoolean(false)
                             android.os.Handler(android.os.Looper.getMainLooper()).post {
-                                Playback.releaseAll()
-                                latch.countDown()
+                                try {
+                                    // A cancelled or expired recording must not
+                                    // execute a stale takeover when main resumes.
+                                    if (isActive && (stopAt == null || System.currentTimeMillis() < stopAt)) {
+                                        released.set(runCatching { Playback.releaseAll() }.isSuccess)
+                                    }
+                                } finally {
+                                    latch.countDown()
+                                }
                             }
-                            runCatching { latch.await(1200, java.util.concurrent.TimeUnit.MILLISECONDS) }
+                            // Waiting is on recording IO, never the UI. A slow
+                            // main looper is not permission to open a second stream.
+                            while (!latch.await(50, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                                if (!isActive || (stopAt != null && System.currentTimeMillis() >= stopAt)) return@launch
+                            }
+                            if (!released.get()) return@launch
                         }
-                        Recorder.usesProviderConnection = true
+                        if (!isActive || (stopAt != null && System.currentTimeMillis() >= stopAt)) return@launch
                         // Direct connection (different-channel/scheduled recording,
                         // or a tee that genuinely lost its source).
-                        val req = Request.Builder().url(url).header("User-Agent", Net.UA).build()
-                        Net.streamClient.newCall(req).execute().use { resp ->
-                            if (!resp.isSuccessful) throw java.io.IOException("HTTP ${resp.code}")
-                            val body = resp.body
-                            if (body != null) {
-                                body.byteStream().use { inp ->
-                                    val buf = ByteArray(64 * 1024)
-                                    var sinceCheck = 0L
-                                    while (isActive && (stopAt == null || System.currentTimeMillis() < stopAt)) {
-                                        val n = inp.read(buf)
-                                        if (n < 0) break
-                                        out.write(buf, 0, n)
-                                        // Storage guard: Fire Sticks corrupt themselves when
-                                        // storage fills. Stop the recording gracefully while
-                                        // there's still 2 GB of breathing room.
-                                        sinceCheck += n
-                                        if (sinceCheck > 32_000_000) {
-                                            sinceCheck = 0
-                                            val free = runCatching {
-                                                android.os.StatFs(dir.absolutePath).availableBytes
-                                            }.getOrDefault(Long.MAX_VALUE)
-                                            if (free < 2_000_000_000L) break
+                        // ZAKO_V452_RECORD_RETRY
+                        var lastNetworkError: Exception? = null
+                        var connected = false
+                        for (attempt in 0 until 5) {
+                            if (!isActive || (stopAt != null && System.currentTimeMillis() >= stopAt)) break
+                            try {
+                                val req=Request.Builder().url(url).header("User-Agent",Net.UA).build()
+                                Net.streamClient.newCall(req).execute().use { resp ->
+                                    if(!resp.isSuccessful) throw java.io.IOException("HTTP ${resp.code}")
+                                    val body=resp.body ?: throw java.io.IOException("Empty stream")
+                                    connected=true
+                                    body.byteStream().use { inp ->
+                                        val buf=ByteArray(64*1024); var sinceCheck=0L
+                                        while(isActive && (stopAt==null || System.currentTimeMillis()<stopAt)) {
+                                            val n=inp.read(buf); if(n<0) break; out.write(buf,0,n); sinceCheck+=n
+                                            if(sinceCheck>32_000_000){sinceCheck=0
+                                                val free=runCatching{android.os.StatFs(dir.absolutePath).availableBytes}.getOrDefault(Long.MAX_VALUE)
+                                                if(free<2_000_000_000L) break
+                                            }
                                         }
                                     }
                                 }
+                                break
+                            } catch(e:Exception) {
+                                lastNetworkError=e
+                                if(attempt<4) Thread.sleep(1500L*(attempt+1))
                             }
                         }
+                        if(!connected) throw(lastNetworkError ?: java.io.IOException("Provider stream did not start"))
                     }
                 }
             } catch (e: Exception) {
@@ -436,13 +455,62 @@ object ScheduleStore {
         val show = PendingIntent.getActivity(
             context, 0, Intent(context, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
         )
-        // Alarm-clock alarms are exact and fire even in power saving.
-        am.setAlarmClock(
-            AlarmManager.AlarmClockInfo(startMs - 60 * 1000, show),   // wake 1 min early
-            pending(context, s)
+        // Future recording must never crash when Android exact-alarm access is off.
+        val result = RecordingScheduler.schedule(
+            context = context,
+            triggerAtMs = startMs - 60 * 1000,
+            operation = pending(context, s),
+            showIntent = show
         )
         val fmt = SimpleDateFormat("EEE h:mm a", Locale.getDefault())
-        return "Scheduled: \"$title\" on $channelName, ${fmt.format(Date(startMs))}. The device must be powered on at that time."
+        return when (result) {
+            ScheduleResult.Scheduled ->
+                "Scheduled: " + title + " on " + channelName + ", " + fmt.format(Date(startMs)) + ". The device must be powered on at that time."
+            ScheduleResult.PermissionRequired -> {
+                RecordingScheduler.requestExactAlarmAccess(context)
+                "Zako saved this recording. Allow Alarms & reminders, then return to Zako so it can schedule exactly."
+            }
+            is ScheduleResult.Failed ->
+                "Recording saved, but Android could not schedule it yet: ${result.message}"
+        }
+    }
+
+    fun upcoming(prefs: SharedPreferences): List<Sched> {
+        val now = System.currentTimeMillis()
+        return load(prefs).filter { it.endMs > now }.sortedBy { it.startMs }
+    }
+
+    fun validateManual(startMs: Long, endMs: Long, nowMs: Long = System.currentTimeMillis()): String? = when {
+        startMs <= nowMs -> "Start time must be in the future."
+        endMs <= startMs -> "End time must be after the start time."
+        else -> null
+    }
+
+    private fun arm(context: Context, s: Sched): ScheduleResult {
+        val show = PendingIntent.getActivity(context, 0, Intent(context, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+        return RecordingScheduler.schedule(context, s.startMs - 60 * 1000, pending(context, s), show)
+    }
+
+    fun rearmAll(context: Context, prefs: SharedPreferences) {
+        val now = System.currentTimeMillis()
+        load(prefs).filter { it.endMs > now }.forEach { arm(context, it) }
+    }
+
+    fun edit(context: Context, prefs: SharedPreferences, id: Long, title: String, channelName: String, url: String, startMs: Long, endMs: Long): String {
+        validateManual(startMs, endMs)?.let { return it }
+        val old = load(prefs).firstOrNull { it.id == id } ?: return "Recording schedule was not found."
+        val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        am.cancel(pending(context, old))
+        val replacement = old.copy(title = title.ifBlank { "Manual recording" }, channelName = channelName, url = url, startMs = startMs, endMs = endMs)
+        save(prefs, load(prefs).filterNot { it.id == id } + replacement)
+        return when (val result = arm(context, replacement)) {
+            ScheduleResult.Scheduled -> "Updated recording: TITLE".replace("TITLE", replacement.title)
+            ScheduleResult.PermissionRequired -> {
+                RecordingScheduler.requestExactAlarmAccess(context)
+                "Recording updated. Allow Alarms & reminders so Zako can start it exactly."
+            }
+            is ScheduleResult.Failed -> "Recording updated, but Android could not arm it yet: ERROR".replace("ERROR", result.message)
+        }
     }
 
     fun cancel(context: Context, prefs: SharedPreferences, id: Long) {
