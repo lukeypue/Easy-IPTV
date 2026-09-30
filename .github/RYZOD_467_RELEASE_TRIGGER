@@ -4,3 +4,4 @@ Verified runtime source: 4831002b1f5a5244b4484114cb70148d7cff273f
 
 Trigger registered workflow after split-stage update.
 Trigger after restoring registered path.
+Retry after exact icon patcher syntax fix.
