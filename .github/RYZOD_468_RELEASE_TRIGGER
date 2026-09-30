@@ -6,3 +6,4 @@ Stage-diagnostic retry.
 Valid YAML retry.
 Post-YAML-registration trigger.
 Registered workflow reuse trigger.
+Stability-only 4.68 trigger.
