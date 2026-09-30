@@ -68,7 +68,7 @@ jobs:
           sed -i 's/versionCode = 80/versionCode = 79/; s/versionName = "4.56"/versionName = "4.55"/' app/build.gradle.kts
           python3 tools/verify_v455.py
           cp /tmp/ryzod457.gradle app/build.gradle.kts
-      - name: Generate RYZOD 4.68 release source
+      - name: Generate RYZOD 4.69 release source
         run: |
           python3 tools/apply_v458.py
           python3 tools/apply_v459.py
@@ -85,8 +85,8 @@ jobs:
           python3 tools/apply_v467_review.py
           python3 tools/apply_v467_epg.py
           python3 tools/apply_v467_icons.py
-          sed -i 's/versionCode = 91/versionCode = 92/; s/versionName = "4.67"/versionName = "4.68"/' app/build.gradle.kts
-      - name: Compile generated 4.68 source
+          sed -i 's/versionCode = 91/versionCode = 93/; s/versionName = "4.67"/versionName = "4.69"/' app/build.gradle.kts
+      - name: Compile generated 4.69 source
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
@@ -98,25 +98,25 @@ jobs:
         run: |
           test -n "$KEYSTORE_B64"
           printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/zako-release.jks"
-      - name: Build signed 4.68 release
+      - name: Build signed 4.69 release
         env:
           ZAKO_KEYSTORE_PATH: ${{ runner.temp }}/zako-release.jks
           ZAKO_STORE_PASSWORD: ${{ secrets.ZAKO_STORE_PASSWORD }}
           ZAKO_KEY_ALIAS: ${{ secrets.ZAKO_KEY_ALIAS }}
           ZAKO_KEY_PASSWORD: ${{ secrets.ZAKO_KEY_PASSWORD }}
         run: gradle assembleRelease --stacktrace
-      - name: Publish 4.68 and updater
+      - name: Publish 4.69 and updater
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           APK="$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)"
-          cp "$APK" /tmp/RYZOD-v4.68.apk
-          gh release delete v4.68 --yes >/dev/null 2>&1 || true
-          gh release create v4.68 /tmp/RYZOD-v4.68.apk --title "RYZOD 4.68 Stability" --notes "30-minute bounded live DVR stability build." --latest
-          printf '%s\\n' '{' '  "versionCode": 92,' '  "versionName": "4.68",' '  "downloadUrl": "https://github.com/lukeypue/Easy-IPTV/releases/download/v4.68/RYZOD-v4.68.apk"' '}' > /tmp/latest.json
+          cp "$APK" /tmp/RYZOD-v4.69.apk
+          gh release delete v4.69 --yes >/dev/null 2>&1 || true
+          gh release create v4.69 /tmp/RYZOD-v4.69.apk --title "RYZOD 4.69 Stability" --notes "30-minute bounded live DVR stability build." --latest
+          printf '%s\\n' '{' '  "versionCode": 93,' '  "versionName": "4.69",' '  "downloadUrl": "https://github.com/lukeypue/Easy-IPTV/releases/download/v4.69/RYZOD-v4.69.apk"' '}' > /tmp/latest.json
           CONTENT="$(base64 -w0 /tmp/latest.json)"
-          SHA="$(gh api repos/lukeypue/Easy-IPTV/contents/latest.json?ref=main --jq .sha)"
-          gh api --method PUT repos/lukeypue/Easy-IPTV/contents/latest.json -f message='Point updater to RYZOD 4.68' -f content="$CONTENT" -f sha="$SHA" -f branch=main
+          SHA="$(gh api repos/lukeypue/Easy-IPTV/contents/latest-v2.json?ref=main --jq .sha)"
+          gh api --method PUT repos/lukeypue/Easy-IPTV/contents/latest-v2.json -f message='Point updater to RYZOD 4.69' -f content="$CONTENT" -f sha="$SHA" -f branch=main
       - name: Inspect UI anchors
         run: |
           grep -n -B 45 -A 90 'RECORD NOW' app/src/main/java/com/easyiptv/player/MainActivity.kt || true
