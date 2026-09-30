@@ -5,6 +5,7 @@ on:
     branches: [ryzod-v4.55-verified]
     paths:
       - '.github/RYZOD_467_RELEASE_TRIGGER'
+      - '.github/workflows/release467.yml'
 permissions:
   contents: write
 concurrency:
