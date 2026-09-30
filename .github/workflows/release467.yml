@@ -1,21 +1,21 @@
-name: Release RYZOD 4.67
+name: Release RYZOD 4.68
 on:
   workflow_dispatch:
   push:
     branches: [ryzod-v4.55-verified]
     paths:
-      - '.github/RYZOD_467_RELEASE_TRIGGER'
+      - '.github/RYZOD_468_RELEASE_TRIGGER'
 permissions:
   contents: write
 concurrency:
-  group: ryzod-release-467
+  group: ryzod-release-468
   cancel-in-progress: true
 jobs:
-  release467:
+  release468:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Generate locked baseline and reviewed 4.67 changes
+      - name: Generate locked baseline and reviewed 4.68 changes
         run: bash tools/generate_v467.sh
       - name: Verify existing recording and playback safeguards
         run: |
@@ -31,7 +31,7 @@ jobs:
       - name: Preserve exact compiled source
         uses: actions/upload-artifact@v4
         with:
-          name: RYZOD-v4.67-generated-source
+          name: RYZOD-v4.68-generated-source
           path: |
             app/src
             app/build.gradle.kts
@@ -69,34 +69,34 @@ jobs:
           APK="$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)"
           AAPT="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -n 1)"
           APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
-          "$AAPT" dump badging "$APK" | grep "package: name='com.easyiptv.player'" | grep "versionCode='91'" | grep "versionName='4.67'"
+          "$AAPT" dump badging "$APK" | grep "package: name='com.easyiptv.player'" | grep "versionCode='92'" | grep "versionName='4.68'"
           ACTUAL="$("$APKSIGNER" verify --print-certs "$APK" | sed -nE 's/^.*certificate SHA-256 digest: //p' | head -n 1 | tr '[:lower:]' '[:upper:]')"
           echo "APK signer SHA-256: $ACTUAL"
           test "$ACTUAL" = "8EF5FE2873F7A9D40302E722822C05B37B471AB08DF23785FA0A1AEB19A2C165"
-          "$AAPT" dump xmltree "$APK" AndroidManifest.xml > /tmp/manifest467.txt
-          "$AAPT" dump resources "$APK" > /tmp/resources467.txt
-          python3 tools/verify_v467_apk.py /tmp/manifest467.txt /tmp/resources467.txt
+          "$AAPT" dump xmltree "$APK" AndroidManifest.xml > /tmp/manifest468.txt
+          "$AAPT" dump resources "$APK" > /tmp/resources468.txt
+          python3 tools/verify_v468_apk.py /tmp/manifest468.txt /tmp/resources468.txt
           sha256sum "$APK"
-          cp "$APK" app/build/outputs/apk/release/RYZOD-v4.67.apk
-      - name: Publish RYZOD 4.67
+          cp "$APK" app/build/outputs/apk/release/RYZOD-v4.68.apk
+      - name: Publish RYZOD 4.68
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view v4.67 >/dev/null 2>&1; then
-            gh release upload v4.67 app/build/outputs/apk/release/RYZOD-v4.67.apk --clobber
-            gh release edit v4.67 --title "RYZOD 4.67 Fire TV Performance" --notes-file tools/v467/RELEASE_NOTES.md --latest
+          if gh release view v4.68 >/dev/null 2>&1; then
+            gh release upload v4.68 app/build/outputs/apk/release/RYZOD-v4.68.apk --clobber
+            gh release edit v4.68 --title "RYZOD 4.68 Fire TV Performance" --notes-file tools/v468/RELEASE_NOTES.md --latest
           else
-            gh release create v4.67 app/build/outputs/apk/release/RYZOD-v4.67.apk --target "$GITHUB_SHA" --title "RYZOD 4.67 Fire TV Performance" --notes-file tools/v467/RELEASE_NOTES.md --latest
+            gh release create v4.68 app/build/outputs/apk/release/RYZOD-v4.68.apk --target "$GITHUB_SHA" --title "RYZOD 4.68 Fire TV Performance" --notes-file tools/v468/RELEASE_NOTES.md --latest
           fi
-      - name: Point updater to 4.67
+      - name: Point updater to 4.68
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          printf '%s\n' '{' '  "versionCode": 91,' '  "versionName": "4.67",' '  "downloadUrl": "https://github.com/lukeypue/Easy-IPTV/releases/download/v4.67/RYZOD-v4.67.apk"' '}' > /tmp/latest.json
+          printf '%s\n' '{' '  "versionCode": 92,' '  "versionName": "4.68",' '  "downloadUrl": "https://github.com/lukeypue/Easy-IPTV/releases/download/v4.68/RYZOD-v4.68.apk"' '}' > /tmp/latest.json
           CONTENT="$(base64 -w0 /tmp/latest.json)"
           for attempt in 1 2 3 4 5; do
             SHA="$(gh api repos/lukeypue/Easy-IPTV/contents/latest.json?ref=main --jq .sha)"
-            if gh api --method PUT repos/lukeypue/Easy-IPTV/contents/latest.json -f message='Point updater to RYZOD 4.67' -f content="$CONTENT" -f sha="$SHA" -f branch=main; then exit 0; fi
+            if gh api --method PUT repos/lukeypue/Easy-IPTV/contents/latest.json -f message='Point updater to RYZOD 4.68' -f content="$CONTENT" -f sha="$SHA" -f branch=main; then exit 0; fi
             sleep $((attempt * 2))
           done
           exit 1
@@ -104,18 +104,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view v4.67 --json assets --jq '.assets[].name' | grep '^RYZOD-v4.67.apk$'
+          gh release view v4.68 --json assets --jq '.assets[].name' | grep '^RYZOD-v4.68.apk$'
           RAW="$(gh api repos/lukeypue/Easy-IPTV/contents/latest.json?ref=main --jq .content | tr -d '\n' | base64 -d)"
-          printf '%s' "$RAW" | grep '"versionCode": 91'
-          printf '%s' "$RAW" | grep '"versionName": "4.67"'
+          printf '%s' "$RAW" | grep '"versionCode": 92'
+          printf '%s' "$RAW" | grep '"versionName": "4.68"'
       - uses: actions/upload-artifact@v4
         with:
-          name: RYZOD-v4.67-release
-          path: app/build/outputs/apk/release/RYZOD-v4.67.apk
+          name: RYZOD-v4.68-release
+          path: app/build/outputs/apk/release/RYZOD-v4.68.apk
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: RYZOD-v4.67-test-results
+          name: RYZOD-v4.68-test-results
           path: app/build/test-results
           if-no-files-found: ignore
