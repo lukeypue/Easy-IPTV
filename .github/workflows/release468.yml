@@ -1,0 +1,77 @@
+name: Release RYZOD 4.68
+on:
+  workflow_dispatch:
+  push:
+    branches: [ryzod-v4.55-verified]
+    paths:
+      - '.github/RYZOD_468_RELEASE_TRIGGER'
+permissions:
+  contents: write
+concurrency:
+  group: ryzod-release-468
+  cancel-in-progress: true
+jobs:
+  release468:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Generate reviewed 4.68 source
+        run: bash tools/generate_v467.sh
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Run regression tests
+        run: gradle testDebugUnitTest --no-daemon --stacktrace
+      - name: Restore permanent signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ZAKO_RELEASE_KEYSTORE_B64 }}
+        run: |
+          test -n "$KEYSTORE_B64"
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/zako-release.jks"
+          chmod 600 "$RUNNER_TEMP/zako-release.jks"
+      - name: Build signed release
+        env:
+          ZAKO_KEYSTORE_PATH: ${{ runner.temp }}/zako-release.jks
+          ZAKO_STORE_PASSWORD: ${{ secrets.ZAKO_STORE_PASSWORD }}
+          ZAKO_KEY_ALIAS: ${{ secrets.ZAKO_KEY_ALIAS }}
+          ZAKO_KEY_PASSWORD: ${{ secrets.ZAKO_KEY_PASSWORD }}
+        run: gradle assembleRelease --no-daemon --stacktrace
+      - name: Verify APK
+        run: |
+          APK="$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)"
+          AAPT="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -n 1)"
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          "$AAPT" dump badging "$APK" | grep "package: name='com.easyiptv.player'" | grep "versionCode='92'" | grep "versionName='4.68'"
+          ACTUAL="$("$APKSIGNER" verify --print-certs "$APK" | sed -nE 's/^.*certificate SHA-256 digest: //p' | head -n 1 | tr '[:lower:]' '[:upper:]')"
+          test "$ACTUAL" = "8EF5FE2873F7A9D40302E722822C05B37B471AB08DF23785FA0A1AEB19A2C165"
+          cp "$APK" app/build/outputs/apk/release/RYZOD-v4.68.apk
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NOTES="RYZOD 4.68 stability test: 30-minute bounded live DVR retention, real-duration EPG guide blocks, and retained 4.67 Fire TV wide artwork path. 4.66 remains the rollback baseline."
+          gh release create v4.68 app/build/outputs/apk/release/RYZOD-v4.68.apk --target "$GITHUB_SHA" --title "RYZOD 4.68 Stability Guide" --notes "$NOTES" --latest
+      - name: Point updater to 4.68
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s\n' '{' '  "versionCode": 92,' '  "versionName": "4.68",' '  "downloadUrl": "https://github.com/lukeypue/Easy-IPTV/releases/download/v4.68/RYZOD-v4.68.apk"' '}' > /tmp/latest.json
+          CONTENT="$(base64 -w0 /tmp/latest.json)"
+          for attempt in 1 2 3 4 5; do
+            SHA="$(gh api repos/lukeypue/Easy-IPTV/contents/latest.json?ref=main --jq .sha)"
+            if gh api --method PUT repos/lukeypue/Easy-IPTV/contents/latest.json -f message='Point updater to RYZOD 4.68' -f content="$CONTENT" -f sha="$SHA" -f branch=main; then exit 0; fi
+            sleep $((attempt * 2))
+          done
+          exit 1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: RYZOD-v4.68-results
+          path: |
+            app/build/test-results
+            app/build/outputs/apk/release/RYZOD-v4.68.apk
+          if-no-files-found: ignore
