@@ -9,3 +9,4 @@ Registered workflow reuse trigger.
 Stability-only 4.68 trigger.
 Explicit generation diagnostic.
 Per-step diagnostic trigger.
+Split-stage diagnostic trigger.
