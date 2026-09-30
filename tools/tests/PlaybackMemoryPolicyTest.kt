@@ -80,7 +80,7 @@ class PlaybackMemoryPolicyTest {
     }
 
     @Test
-    fun startupRebufferDurationAndBackBufferSettingsRemainEffectiveBelowByteTarget() {
+    fun startupRebufferDurationSettingsRemainEffectiveBelowByteTarget() {
         // Hand-checked normal, steady, small-buffer-clamped and maximum UI settings.
         val durations = listOf(
             intArrayOf(30_000, 60_000, 4_000, 4_000),
@@ -100,11 +100,22 @@ class PlaybackMemoryPolicyTest {
                         assertTrue(f.continueLoading(maxMs * 1000L - 1))
                         assertFalse(f.continueLoading(maxMs * 1000L))
                         assertTrue(f.continueLoading(minMs * 1000L - 1))
-                        assertEquals(10_000_000L, f.control.getBackBufferDurationUs(f.playerId))
-                        assertFalse(f.control.retainBackBufferFromKeyframe(f.playerId))
                     }
                 }
             }
+        }
+    }
+
+    @Test
+    fun lowRamLeavesSampleBudgetForForwardBufferWhileHigherRamKeepsFastBackBuffer() {
+        withPlayer(PlaybackMemoryPolicy.create(true, 30_000, 60_000, 4_000, 4_000)) { f ->
+            assertEquals("Past samples must not crowd out the sample budget", 0L,
+                f.control.getBackBufferDurationUs(f.playerId))
+            assertFalse(f.control.retainBackBufferFromKeyframe(f.playerId))
+        }
+        withPlayer(PlaybackMemoryPolicy.create(false, 30_000, 60_000, 4_000, 4_000)) { f ->
+            assertEquals(10_000_000L, f.control.getBackBufferDurationUs(f.playerId))
+            assertFalse(f.control.retainBackBufferFromKeyframe(f.playerId))
         }
     }
 

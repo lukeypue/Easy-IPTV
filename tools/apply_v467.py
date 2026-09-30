@@ -113,6 +113,45 @@ new = '''        val deadline = android.os.SystemClock.elapsedRealtime() + 12_00
 assert text.count(old) == 1
 r.write_text(text.replace(old, new, 1))
 
+# Serialize bounded diagnostic writes off the UI/player callbacks. A separate
+# tiny crash marker remains synchronous because the process may exit immediately.
+log = base / 'StabilityCore.kt'
+text = log.read_text()
+old = '    @Volatile private var lastScreen = "startup"'
+new = '''    @Volatile private var lastScreen = "startup"
+    private val logWriter = java.util.concurrent.ThreadPoolExecutor(
+        1, 1, 30L, java.util.concurrent.TimeUnit.SECONDS,
+        java.util.concurrent.ArrayBlockingQueue<Runnable>(128),
+        java.util.concurrent.ThreadFactory { r -> Thread(r, "ryzod-diagnostics").apply { isDaemon = true } },
+        java.util.concurrent.ThreadPoolExecutor.DiscardOldestPolicy()
+    ).apply { allowCoreThreadTimeOut(true) }'''
+assert text.count(old) == 1
+text = text.replace(old, new, 1)
+old = '            note("FATAL thread=${thread.name} type=${error.javaClass.simpleName}")'
+new = '''            runCatching {
+                File(context.filesDir, "ryzod_last_crash.log").writeText(
+                    "FATAL thread=${thread.name} type=${error.javaClass.simpleName} screen=$lastScreen\\n" +
+                        error.stackTrace.take(16).joinToString("\\n")
+                )
+            }
+            note("FATAL thread=${thread.name} type=${error.javaClass.simpleName}")'''
+assert text.count(old) == 1
+text = text.replace(old, new, 1)
+old = '''    fun note(event: String) {
+        val context = appContext ?: return
+        runCatching {'''
+new = '''    fun note(event: String) {
+        val context = appContext ?: return
+        val screen = lastScreen
+        logWriter.execute { writeNote(context, event, screen) }
+    }
+
+    private fun writeNote(context: Context, event: String, screen: String) {
+        runCatching {'''
+assert text.count(old) == 1
+text = text.replace(old, new, 1).replace(' | screen=$lastScreen | java=', ' | screen=$screen | java=')
+log.write_text(text)
+
 g = Path('app/build.gradle.kts')
 text = g.read_text()
 assert 'versionCode = 90' in text and 'versionName = "4.66"' in text

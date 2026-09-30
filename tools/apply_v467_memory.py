@@ -68,6 +68,8 @@ def apply(root: Path = Path('.'), baseline: bool = False) -> None:
     if baseline:
         policy = once(policy, '.setPrioritizeTimeOverSizeThresholds(!lowRam)',
                       '.setPrioritizeTimeOverSizeThresholds(true)', 'baseline time priority')
+        policy = once(policy, '.setBackBuffer(if (lowRam) 0 else 10_000, false)',
+                      '.setBackBuffer(10_000, false)', 'baseline back buffer')
     (source_dir / 'PlaybackMemoryPolicy.kt').write_text(policy)
     activity.write_text(patched)
     print('Applied RYZOD 4.67 memory ' + ('baseline extraction' if baseline else 'policy and mini-player detach'))
