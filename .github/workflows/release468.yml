@@ -16,7 +16,18 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Generate reviewed 4.68 source
-        run: |\n          bash tools/generate_v463.sh\n          python3 tools/apply_v464.py\n          python3 tools/prepare_v465_tests.py\n          python3 tools/apply_v465.py\n          python3 tools/apply_v466.py\n          python3 tools/apply_v467.py\n          python3 tools/apply_v467_memory.py\n          python3 tools/apply_v467_review.py\n          python3 tools/apply_v467_epg.py\n          python3 tools/apply_v467_icons.py\n          python3 tools/apply_v468.py
+        run: |
+          bash tools/generate_v463.sh
+          python3 tools/apply_v464.py
+          python3 tools/prepare_v465_tests.py
+          python3 tools/apply_v465.py
+          python3 tools/apply_v466.py
+          python3 tools/apply_v467.py
+          python3 tools/apply_v467_memory.py
+          python3 tools/apply_v467_review.py
+          python3 tools/apply_v467_epg.py
+          python3 tools/apply_v467_icons.py
+          python3 tools/apply_v468.py
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -59,7 +70,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          printf '%s\n' '{' '  "versionCode": 92,' '  "versionName": "4.68",' '  "downloadUrl": "https://github.com/lukeypue/Easy-IPTV/releases/download/v4.68/RYZOD-v4.68.apk"' '}' > /tmp/latest.json
+          printf '%s
+' '{' '  "versionCode": 92,' '  "versionName": "4.68",' '  "downloadUrl": "https://github.com/lukeypue/Easy-IPTV/releases/download/v4.68/RYZOD-v4.68.apk"' '}' > /tmp/latest.json
           CONTENT="$(base64 -w0 /tmp/latest.json)"
           for attempt in 1 2 3 4 5; do
             SHA="$(gh api repos/lukeypue/Easy-IPTV/contents/latest.json?ref=main --jq .sha)"
