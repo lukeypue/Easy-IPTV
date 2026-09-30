@@ -1,0 +1,39 @@
+name: Verify RYZOD 4.67 performance
+on:
+  push:
+    branches: [ryzod-v4.67-performance]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ryzod-467-performance-checks
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Generate locked 4.66 baseline and candidate changes
+        run: |
+          bash tools/generate_v463.sh
+          python3 tools/apply_v464.py
+          python3 tools/prepare_v465_tests.py
+          python3 tools/apply_v465.py
+          python3 tools/apply_v466.py
+          if test -f tools/apply_v467.py; then python3 tools/apply_v467.py; fi
+          cp tools/tests/*Test.kt app/src/test/java/com/easyiptv/player/
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Run performance and existing feature tests
+        run: gradle testDebugUnitTest --no-daemon --stacktrace
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: RYZOD-467-tests
+          path: app/build/test-results
+          if-no-files-found: error
