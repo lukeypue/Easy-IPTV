@@ -15,19 +15,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Prepare verified 4.68 source
-        run: |
-          bash tools/generate_v463.sh
-          python3 tools/apply_v464.py
-          python3 tools/prepare_v465_tests.py
-          python3 tools/apply_v465.py
-          python3 tools/apply_v466.py
-          python3 tools/apply_v467.py
-          python3 tools/apply_v467_memory.py
-          python3 tools/apply_v467_review.py
-          python3 tools/apply_v467_epg.py
-          python3 tools/apply_v467_icons.py
-          sed -i 's/versionCode = 91/versionCode = 92/; s/versionName = "4.67"/versionName = "4.68"/' app/build.gradle.kts
+      - name: Generate 4.63 baseline
+        run: bash tools/generate_v463.sh
+      - name: Apply 4.64
+        run: python3 tools/apply_v464.py
+      - name: Prepare 4.65 tests
+        run: python3 tools/prepare_v465_tests.py
+      - name: Apply 4.65
+        run: python3 tools/apply_v465.py
+      - name: Apply 4.66
+        run: python3 tools/apply_v466.py
+      - name: Apply 4.67 core
+        run: python3 tools/apply_v467.py
+      - name: Apply 4.67 memory
+        run: python3 tools/apply_v467_memory.py
+      - name: Apply 4.67 review
+        run: python3 tools/apply_v467_review.py
+      - name: Apply 4.67 EPG
+        run: python3 tools/apply_v467_epg.py
+      - name: Apply 4.67 icons
+        run: python3 tools/apply_v467_icons.py
+      - name: Bump to 4.68
+        run: sed -i 's/versionCode = 91/versionCode = 92/; s/versionName = "4.67"/versionName = "4.68"/' app/build.gradle.kts
       - name: Verify existing recording and playback safeguards
         run: |
           python3 tools/verify_v449_schedule_core.py
