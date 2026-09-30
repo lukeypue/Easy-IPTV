@@ -32,4 +32,4 @@ manifest.write_text(s)
 # RYZOD 4.68: Fire TV/Amazon launchers are wide banners, not adaptive phone icons.
 # Use the 320x180 TV artwork for both the television-qualified launcher and banner.
 # The phone keeps the approved adaptive launcher through the unqualified folders.
-\nprint('Applied explicit launch activity/filter icons and 320x180 wide TV artwork; retained phone adaptive logo')
+print('Applied explicit launch activity/filter icons and 320x180 wide TV artwork; retained phone adaptive logo')
