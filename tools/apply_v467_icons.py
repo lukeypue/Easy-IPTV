@@ -28,4 +28,8 @@ s = s.replace('android:name=".MainActivity"', '''android:name=".MainActivity"
 s = s.replace('<intent-filter>', '<intent-filter android:icon="@mipmap/ryzod_launcher_467">', 1)
 manifest.write_text(s)
 
-print('Applied explicit launch activity/filter icons and plain wide TV bitmaps; retained phone adaptive logo')
+
+# RYZOD 4.68: Fire TV/Amazon launchers are wide banners, not adaptive phone icons.
+# Use the 320x180 TV artwork for both the television-qualified launcher and banner.
+# The phone keeps the approved adaptive launcher through the unqualified folders.
+\nprint('Applied explicit launch activity/filter icons and 320x180 wide TV artwork; retained phone adaptive logo')
