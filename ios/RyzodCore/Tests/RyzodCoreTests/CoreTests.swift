@@ -79,4 +79,25 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(items.map(\.id), ["11", "12"])
         XCTAssertTrue(items.last?.url.absoluteString.hasSuffix("/12.mkv") == true)
     }
+    func testFailedShortEPGFallsBackToFullTable() async throws {
+        let client = ProviderClient(credentials: credentials) { url in
+            let action = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "action" }?.value
+            if action == "get_short_epg" { throw ProviderError.http(503) }
+            guard action == "get_simple_data_table" else { throw ProviderError.invalidResponse }
+            return Data(#"{"epg_listings":[{"title":"Fallback show","start_timestamp":1700000000,"stop_timestamp":1700003600}]}"#.utf8)
+        }
+        let programs = try await client.epg(channelID: "5")
+        XCTAssertEqual(programs.first?.title, "Fallback show")
+    }
+    func testCancellationDoesNotRunGuideFallback() async {
+        let client = ProviderClient(credentials: credentials) { url in
+            let action = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "action" }?.value
+            if action == "get_short_epg" { throw CancellationError() }
+            return Data(#"{"epg_listings":[]}"#.utf8)
+        }
+        do { _ = try await client.epg(channelID: "5"); XCTFail("Cancelled request must not succeed") }
+        catch is CancellationError { }
+        catch { XCTFail("Cancellation must propagate") }
+    }
+
 }
