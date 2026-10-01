@@ -18,3 +18,46 @@ jobs:
       - name: Swift provider and guide tests
         working-directory: ios/RyzodCore
         run: swift test
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          cd ios
+          xcodegen generate
+      - name: Build unsigned iPhone and iPad app
+        run: |
+          cd ios
+          xcodebuild -project Ryzod.xcodeproj -scheme Ryzod -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO build > device-build.log 2>&1 || { tail -100 device-build.log; exit 1; }
+          tail -10 device-build.log
+      - name: Choose simulator
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          devices = json.loads(subprocess.check_output(['xcrun','simctl','list','devices','available','-j']))['devices']
+          iphones = [(runtime,d) for runtime,values in devices.items() for d in values if d['name'].startswith('iPhone') and 'iOS' in runtime]
+          runtime, device = sorted(iphones, key=lambda x: (x[0], 'SE' in x[1]['name']), reverse=True)[0]
+          with open(os.environ['GITHUB_ENV'],'a') as f: f.write('APPLE_SIMULATOR=' + device['udid'] + '\n')
+          print(device['name'], runtime)
+          PY
+      - name: Build simulator and run login tests
+        run: |
+          cd ios
+          xcodebuild -project Ryzod.xcodeproj -scheme Ryzod -configuration Debug -destination "platform=iOS Simulator,id=$APPLE_SIMULATOR" -derivedDataPath DerivedData -resultBundlePath LoginTests.xcresult CODE_SIGNING_ALLOWED=NO test > simulator-test.log 2>&1 || { tail -120 simulator-test.log; exit 1; }
+          tail -20 simulator-test.log
+      - name: Upload build logs and test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RYZOD-Apple-build-results
+          path: |
+            ios/*build.log
+            ios/*test.log
+            ios/*.xcresult
+          if-no-files-found: ignore
+      - name: Upload unsigned Apple app and simulator build
+        uses: actions/upload-artifact@v4
+        with:
+          name: RYZOD-Apple-0.1-unsigned-and-simulator
+          path: |
+            ios/DerivedData/Build/Products/Release-iphoneos/Ryzod.app
+            ios/DerivedData/Build/Products/Debug-iphonesimulator/Ryzod.app
+          if-no-files-found: error

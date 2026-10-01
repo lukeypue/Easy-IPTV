@@ -1,0 +1,8 @@
+Ryzod.xcodeproj/
+DerivedData/
+*.xcresult
+RyzodCore/.build/
+RyzodCore/.swiftpm/
+ExportOptions.local.plist
+*.p12
+*.mobileprovision
