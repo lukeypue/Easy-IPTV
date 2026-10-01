@@ -26,6 +26,16 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.ryzod.player
         INFOPLIST_FILE: Ryzod/Info.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  RyzodTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [RyzodTests]
+    dependencies:
+      - target: Ryzod
+      - package: RyzodCore
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
   RyzodUITests:
     type: bundle.ui-testing
     platform: iOS
@@ -40,6 +50,7 @@ schemes:
     build:
       targets:
         Ryzod: all
+        RyzodTests: [test]
         RyzodUITests: [test]
     test:
-      targets: [RyzodUITests]
+      targets: [RyzodTests, RyzodUITests]

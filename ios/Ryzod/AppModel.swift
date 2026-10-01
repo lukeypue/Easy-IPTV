@@ -22,8 +22,10 @@ import RyzodCore
     private var guideTask: Task<Void, Never>?
     private var guideURL: URL?
     private var favoriteStoreKey = ""
+    private let transport: ProviderClient.Transport
+    init(transport: @escaping ProviderClient.Transport = ProviderClient.fetch) { self.transport = transport }
     let uiTesting = ProcessInfo.processInfo.arguments.contains("--ui-testing")
-    var client: ProviderClient? { profile.flatMap { $0.kind == .xtream ? ProviderClient(credentials: $0.credentials) : nil } }
+    var client: ProviderClient? { profile.flatMap { $0.kind == .xtream ? ProviderClient(credentials: $0.credentials, transport: transport) : nil } }
     func restore() async {
         guard !uiTesting else { return }
         do { if let saved = try CredentialStore.load() { await connect(saved, persist: false) } }
@@ -38,13 +40,13 @@ import RyzodCore
             var media: [MediaItem]; var cats: [Category]; var playlist: PlaylistResult?
             if candidate.kind == .xtream {
                 _ = try candidate.credentials.api()
-                let provider = ProviderClient(credentials: candidate.credentials)
+                let provider = ProviderClient(credentials: candidate.credentials, transport: transport)
                 try await provider.authenticate()
                 media = try await provider.media(.live)
                 cats = (try? await provider.categories(.live)) ?? []
             } else {
                 let url = try ProviderURL.validated(candidate.playlistURL)
-                let data = try await ProviderClient.fetch(url)
+                let data = try await transport(url)
                 playlist = try await Task.detached { try M3UParser.parse(String(decoding: data, as: UTF8.self), baseURL: url) }.value
                 media = playlist!.items.filter { $0.kind == .live }; cats = playlist!.categories
             }
@@ -99,7 +101,7 @@ import RyzodCore
             defer { if ticket == epoch { guideLoading = false; guideTask = nil } }
             do {
                 if let url {
-                    let data = try await ProviderClient.fetch(url)
+                    let data = try await transport(url)
                     let now = Date()
                     let parsed = try await Task.detached { try XMLTVParser.parse(data, from: now.addingTimeInterval(-3600), until: now.addingTimeInterval(36 * 3600)) }.value
                     try Task.checkCancellation(); guard ticket == epoch else { return }

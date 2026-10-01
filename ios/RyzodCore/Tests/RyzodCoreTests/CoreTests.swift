@@ -100,4 +100,22 @@ final class CoreTests: XCTestCase {
         catch { XCTFail("Cancellation must propagate") }
     }
 
+    func testPlaylistFavoritesKeepIdentityAfterInsertAndReorder() throws {
+        let a = "#EXTINF:-1 tvg-id=\"news\",News\nhttps://media.test/news.m3u8\n"
+        let b = "#EXTINF:-1,Sports\nhttps://media.test/sport.m3u8\n"
+        let c = "#EXTINF:-1,New\nhttps://media.test/new.m3u8\n"
+        let base = URL(string: "https://media.test/list.m3u")!
+        let first = try M3UParser.parse("#EXTM3U\n" + a + b, baseURL: base)
+        let next = try M3UParser.parse("#EXTM3U\n" + c + b + a + a, baseURL: base)
+        for old in first.items {
+            XCTAssertEqual(next.items.first { $0.streamURL == old.streamURL }?.favoriteKey, old.favoriteKey)
+        }
+        XCTAssertEqual(next.items.count, 3, "Identical repeated streams must not duplicate favorite identity")
+    }
+    func testNonXMLTVResponseIsRejectedButEmptyTVIsValid() throws {
+        XCTAssertThrowsError(try XMLTVParser.parse(data("<html><body>Login required</body></html>")))
+        XCTAssertThrowsError(try XMLTVParser.parse(data("<response><tv/></response>")))
+        XCTAssertTrue(try XMLTVParser.parse(data("<tv/>" )).isEmpty)
+    }
+
 }
