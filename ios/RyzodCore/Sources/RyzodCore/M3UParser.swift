@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 public struct PlaylistResult { public let items: [MediaItem]; public let categories: [Category]; public let guideURL: URL? }
 public enum M3UParser {
     static func attributes(_ line: String) -> [String: String] {
@@ -18,6 +19,7 @@ public enum M3UParser {
         guard text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("#EXTM3U") else { throw ProviderError.invalidResponse }
         var out: [MediaItem] = []; var groups: [String] = []; var guideURL: URL?
         var pending: (String, [String: String])?
+        var seen: Set<String> = []
         for raw in text.split(whereSeparator: \.isNewline) {
             let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             if line.hasPrefix("#EXTM3U") {
@@ -33,7 +35,10 @@ public enum M3UParser {
                 let kind: MediaKind = ["mp4", "mkv", "avi", "mov", "m4v", "wmv", "flv"].contains(ext) ? .movie : .live
                 let group = attrs["group-title"].flatMap { $0.isEmpty ? nil : $0 } ?? "Other"
                 if !groups.contains(group) { groups.append(group) }
-                out.append(MediaItem(id: "m3u_\(out.count + 1)", name: name.isEmpty ? "Channel" : name, kind: kind, categoryID: group,
+                let identity = (attrs["tvg-id"] ?? "") + "\u{0}" + url.absoluteString
+                let id = "m3u_" + SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
+                guard seen.insert(id).inserted else { continue }
+                out.append(MediaItem(id: id, name: name.isEmpty ? "Channel" : name, kind: kind, categoryID: group,
                                      artwork: attrs["tvg-logo"].flatMap { try? ProviderURL.validated($0) }, streamURL: url, epgID: attrs["tvg-id"]))
             }
         }

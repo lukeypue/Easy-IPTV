@@ -40,7 +40,7 @@ import RyzodCore
     func retry() { guard let item = current else { return }; let full = fullScreen; stop(); play(item, fullScreen: full) }
     func stop() {
         observation = nil; player.pause(); player.replaceCurrentItem(with: nil)
-        current = nil; waiting = false; failure = nil; fullScreen = false
+        current = nil; previousLive = nil; waiting = false; failure = nil; fullScreen = false
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
     func leaveFullScreen() {

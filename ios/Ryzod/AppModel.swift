@@ -19,6 +19,8 @@ import RyzodCore
     private var epoch = UUID()
     private var catalogTasks: [MediaKind: Task<Void, Never>] = [:]
     private var epgTasks: [String: Task<Void, Never>] = [:]
+    private var epgQueue: [MediaItem] = []
+    private var guideEpoch = UUID()
     private var guideTask: Task<Void, Never>?
     private var guideURL: URL?
     private var favoriteStoreKey = ""
@@ -78,53 +80,88 @@ import RyzodCore
         }
     }
     func loadGuide(for item: MediaItem, force: Bool = false) {
-        guard connected, item.kind == .live, let provider = client, epgTasks[item.id] == nil, force || guide[item.id] == nil else { return }
-        let ticket = epoch
-        epgTasks[item.id] = Task {
-            defer { if ticket == epoch { epgTasks[item.id] = nil } }
-            do {
-                let programs = try await provider.epg(channelID: item.id)
-                try Task.checkCancellation(); guard ticket == epoch else { return }
-                guide[item.id] = programs
-            } catch is CancellationError { }
-            catch { if ticket == epoch { guideStatus = "Some guide information could not load. Your previous guide is kept. Tap Update Guide to retry." } }
+        guard connected, item.kind == .live, client != nil, epgTasks[item.id] == nil,
+              !epgQueue.contains(where: { $0.id == item.id }), force || guide[item.id] == nil else { return }
+        epgQueue.append(item)
+        drainGuideQueue()
+    }
+    private func drainGuideQueue() {
+        guard connected, !guideLoading, let provider = client else { return }
+        while epgTasks.count < 3, !epgQueue.isEmpty {
+            let item = epgQueue.removeFirst()
+            let ticket = epoch; let guideTicket = guideEpoch
+            epgTasks[item.id] = Task {
+                defer {
+                    if ticket == epoch && guideTicket == guideEpoch {
+                        epgTasks[item.id] = nil
+                        drainGuideQueue()
+                    }
+                }
+                do {
+                    let programs = try await provider.epg(channelID: item.id)
+                    try Task.checkCancellation()
+                    guard ticket == epoch, guideTicket == guideEpoch else { return }
+                    guide[item.id] = programs
+                } catch is CancellationError { }
+                catch {
+                    if ticket == epoch && guideTicket == guideEpoch {
+                        guideStatus = "Some guide information could not load. Your previous guide is kept. Tap Update Guide to retry."
+                    }
+                }
+            }
         }
     }
     func refreshGuide() {
         guard connected, !guideLoading else { return }
+        // Include cached, selected and requested rows even when they are outside the first category.
+        var requested = Set(guide.keys).union(epgTasks.keys).union(epgQueue.map(\.id))
+        if let selectedLiveID { requested.insert(selectedLiveID) }
+        requested.formUnion((items[.live] ?? []).prefix(20).map(\.id))
+        let channels = (items[.live] ?? []).filter { requested.contains($0.id) }
+        epgTasks.values.forEach { $0.cancel() }; epgTasks = [:]; epgQueue = []
+        guideEpoch = UUID(); let guideTicket = guideEpoch
         guideLoading = true; guideStatus = "Updating from your provider. This may take 1–2 minutes or longer."
-        let ticket = epoch
-        let url = guideURL
-        let provider = client
-        let visible = Array((items[.live] ?? []).prefix(20))
+        let ticket = epoch; let url = guideURL; let provider = client
         guideTask = Task {
-            defer { if ticket == epoch { guideLoading = false; guideTask = nil } }
+            defer {
+                if ticket == epoch && guideTicket == guideEpoch {
+                    guideLoading = false; guideTask = nil; drainGuideQueue()
+                }
+            }
             do {
+                var failedChannels = 0
                 if let url {
                     let data = try await transport(url)
                     let now = Date()
                     let parsed = try await Task.detached { try XMLTVParser.parse(data, from: now.addingTimeInterval(-3600), until: now.addingTimeInterval(36 * 3600)) }.value
-                    try Task.checkCancellation(); guard ticket == epoch else { return }
+                    try Task.checkCancellation()
+                    guard ticket == epoch, guideTicket == guideEpoch else { return }
                     var mapped: [String: [Program]] = [:]
                     for item in items[.live] ?? [] { mapped[item.id] = parsed[item.epgID ?? ""] ?? parsed[item.name] ?? [] }
                     guide = mapped
                 } else if let provider {
                     var refreshed: [String: [Program]] = [:]
-                    var succeeded = false
-                    for item in visible {
+                    for item in channels {
                         try Task.checkCancellation()
-                        do { refreshed[item.id] = try await provider.epg(channelID: item.id); succeeded = true }
+                        do { refreshed[item.id] = try await provider.epg(channelID: item.id) }
                         catch is CancellationError { throw CancellationError() }
-                        catch { /* Keep that channel's old guide. */ }
+                        catch let error as URLError where error.code == .cancelled { throw CancellationError() }
+                        catch { failedChannels += 1 } // Retain old programs on a failed channel.
                     }
-                    try Task.checkCancellation(); guard ticket == epoch else { return }
-                    guard succeeded || visible.isEmpty else { throw ProviderError.invalidResponse }
+                    try Task.checkCancellation()
+                    guard ticket == epoch, guideTicket == guideEpoch else { return }
+                    guard !refreshed.isEmpty || channels.isEmpty else { throw ProviderError.invalidResponse }
                     guide.merge(refreshed) { _, new in new }
-                    // Other rows load as they become visible; bounded concurrency avoids provider overload.
                 } else { guideStatus = "This playlist does not include a guide link."; return }
-                guideStatus = "Guide updated from your provider at \(Date().formatted(date: .omitted, time: .shortened))."
+                guideStatus = failedChannels == 0
+                    ? "Guide updated from your provider at \(Date().formatted(date: .omitted, time: .shortened))."
+                    : "Guide updated. Some channels could not refresh; their previous guide is kept. Tap Update Guide to retry."
             } catch is CancellationError { }
-            catch { if ticket == epoch { guideStatus = "Guide refresh failed. Your previous guide is kept. Please try again." } }
+            catch {
+                if ticket == epoch && guideTicket == guideEpoch {
+                    guideStatus = "Guide refresh failed. Your previous guide is kept. Please try again."
+                }
+            }
         }
     }
     func toggleFavorite(_ item: MediaItem) {
@@ -140,7 +177,7 @@ import RyzodCore
     }
     private func cancelRequests() {
         catalogTasks.values.forEach { $0.cancel() }; epgTasks.values.forEach { $0.cancel() }; guideTask?.cancel()
-        catalogTasks = [:]; epgTasks = [:]; guideTask = nil; loading = []; guideLoading = false
+        catalogTasks = [:]; epgTasks = [:]; epgQueue = []; guideTask = nil; guideEpoch = UUID(); loading = []; guideLoading = false
     }
     func safeMessage(_ error: Error) -> String {
         if error is ProviderError || error is CredentialStore.StoreError { return error.localizedDescription }

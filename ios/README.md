@@ -21,10 +21,12 @@ xcodebuild -project Ryzod.xcodeproj -scheme Ryzod -sdk iphoneos -destination 'ge
 
 Open the generated Ryzod.xcodeproj in Xcode for personal-device signing. Set the application's Signing & Capabilities team to the owner's team; the declared identifier com.ryzod.player is provisional until registered in that account. Do not commit secrets.
 
-Branch-specific CI builds on a Mac and runs parser/guide tests and native login UI tests. Its unsigned .app artifact is a compile result, not an installable IPA or TestFlight distribution.
+Branch-specific CI builds on a Mac and runs parser/guide tests application session/ATS regression tests and native login UI tests. Its unsigned .app artifact is a compile result, not an installable IPA or TestFlight distribution.
 
 Credentials are stored in Keychain with WhenUnlockedThisDeviceOnly access. Favorites store only provider-scoped item identifiers. Provider API requests use ephemeral sessions and a 64 MiB response cap. Network errors shown to users omit request URLs and passwords. HTTP is allowed for providers that require it; prefer HTTPS whenever the provider offers it.
 
-The app owns one AVPlayer. Leaving live full-screen restores preview; leaving movie/episode full-screen stops playback. Stop releases the current player item. There is no automatic disk buffer.
+The app owns one AVPlayer. Leaving live full-screen restores preview; leaving movie/episode full-screen stops playback. Stop releases the current player item and clears previous-channel history. Guide rows use at most three concurrent API requests; refresh covers cached, selected and requested channels and retains old programs if a request fails. Playlist favorite identities survive entry reordering. There is no automatic disk buffer.
 
 See INSTALL_ON_IPHONE.md for the user's installation steps and PORT_PLAN.md for the remaining port milestones.
+
+Provider date strings without an explicit offset currently use the device timezone. Timestamp fields and offset-bearing XMLTV dates are covered by fixtures; text-only server-timezone behavior needs real-provider validation. The HTTP app-host test detects ATS rejection; a passing check is not a live-provider connectivity test.

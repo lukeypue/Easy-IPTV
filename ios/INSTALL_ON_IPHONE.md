@@ -19,7 +19,17 @@ You do not need to buy a Mac or pay for a personal developer membership just to 
 
 ## Alternative if you have access to a Mac
 
-A free Apple Account can run a development build through Xcode on your personal iPhone. This route requires Mac access, a compatible Xcode version, connecting the iPhone, selecting your Apple Account as the signing team, and enabling Developer Mode if Xcode requests it. Free provisioning expires after seven days and needs another installation from Xcode.
+You can use your free Apple Account for personal Xcode testing:
+
+1. Install a compatible Xcode from the Mac App Store and open it once to complete setup.
+2. Open Xcode > Settings > Accounts and sign in with your Apple Account.
+3. Download or clone this repository's `feature/ryzod-apple` branch. In Terminal, run the Mac build setup from README.md to generate `ios/Ryzod.xcodeproj`.
+4. Open that project. Select the **Ryzod** app target > **Signing & Capabilities**. Keep automatic signing enabled and choose your **Personal Team**. If the provisional bundle identifier is unavailable, replace it with a unique identifier for your own development build.
+5. Connect the iPhone to the Mac with a data-capable Lightning cable. Unlock it and accept **Trust This Computer** if asked.
+6. Select the iPhone as Xcode's run destination. If asked, enable **Settings > Privacy & Security > Developer Mode**, restart, and confirm it. The setting may appear only after you connect for development.
+7. Click Xcode's Run triangle. If iOS asks you to trust your developer identity, follow the prompt in **Settings > General > VPN & Device Management**. Xcode will install and open RYZOD.
+
+Free provisioning expires after seven days; reconnect and run it from Xcode again to reinstall. You do not need a paid developer membership for this route, but you do need Mac access. A charging-only cable will not work for connecting to Xcode.
 
 ## What the publishing setup needs
 

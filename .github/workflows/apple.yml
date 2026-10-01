@@ -16,7 +16,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Swift provider and guide tests
-        continue-on-error: true # Temporary review RED run; removed when regressions are fixed.
         working-directory: ios/RyzodCore
         run: swift test
       - name: Generate Xcode project
@@ -35,15 +34,33 @@ jobs:
           import json, os, subprocess
           devices = json.loads(subprocess.check_output(['xcrun','simctl','list','devices','available','-j']))['devices']
           iphones = [(runtime,d) for runtime,values in devices.items() for d in values if d['name'].startswith('iPhone') and 'iOS' in runtime]
-          runtime, device = sorted(iphones, key=lambda x: (x[0], 'SE' in x[1]['name']), reverse=True)[0]
+          runtime, device = sorted(iphones, key=lambda x: ('SE' in x[1]['name'], x[0]), reverse=True)[0]
           with open(os.environ['GITHUB_ENV'],'a') as f: f.write('APPLE_SIMULATOR=' + device['udid'] + '\n')
           print(device['name'], runtime)
+          ipads = [(runtime,d) for runtime,values in devices.items() for d in values if d['name'].startswith('iPad') and 'iOS' in runtime]
+          pad_runtime, pad = sorted(ipads, key=lambda x: (x[0], 'mini' in x[1]['name']), reverse=True)[0]
+          with open(os.environ['GITHUB_ENV'],'a') as f: f.write('APPLE_IPAD_SIMULATOR=' + pad['udid'] + '\n')
+          print(pad['name'], pad_runtime)
           PY
-      - name: Build simulator and run login tests
+      - name: Build simulator and run session and iPhone login tests
         run: |
           cd ios
           xcodebuild -project Ryzod.xcodeproj -scheme Ryzod -configuration Debug -destination "platform=iOS Simulator,id=$APPLE_SIMULATOR" -derivedDataPath DerivedData -resultBundlePath LoginTests.xcresult CODE_SIGNING_ALLOWED=NO test > simulator-test.log 2>&1 || { tail -120 simulator-test.log; exit 1; }
           tail -20 simulator-test.log
+      - name: Check iPad login layout
+        run: |
+          cd ios
+          xcodebuild -project Ryzod.xcodeproj -scheme Ryzod -configuration Debug -destination "platform=iOS Simulator,id=$APPLE_IPAD_SIMULATOR" -derivedDataPath DerivedData -resultBundlePath iPadLoginTests.xcresult -only-testing:RyzodUITests CODE_SIGNING_ALLOWED=NO test > ipad-test.log 2>&1 || { tail -100 ipad-test.log; exit 1; }
+          tail -15 ipad-test.log
+      - name: Export login screenshots
+        if: always()
+        run: |
+          cd ios
+          for result in LoginTests iPadLoginTests; do
+            if [ -d "$result.xcresult" ]; then
+              xcrun xcresulttool export attachments --path "$result.xcresult" --output-path "Screenshots/$result" || true
+            fi
+          done
       - name: Upload build logs and test results
         if: always()
         uses: actions/upload-artifact@v4
@@ -53,6 +70,7 @@ jobs:
             ios/*build.log
             ios/*test.log
             ios/*.xcresult
+            ios/Screenshots
           if-no-files-found: ignore
       - name: Upload unsigned Apple app and simulator build
         uses: actions/upload-artifact@v4

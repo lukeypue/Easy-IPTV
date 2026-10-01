@@ -6,12 +6,14 @@ public enum XMLTVParser {
     public static func parse(_ data: Data, from: Date? = nil, until: Date? = nil) throws -> [String: [Program]] {
         let delegate = GuideXMLDelegate(from: from, until: until)
         let parser = XMLParser(data: data); parser.shouldResolveExternalEntities = false; parser.delegate = delegate
-        guard parser.parse() else { throw ProviderError.invalidResponse }
+        guard parser.parse(), delegate.hasTVRoot else { throw ProviderError.invalidResponse }
         return delegate.results.mapValues { $0.sorted { $0.start < $1.start } }
     }
 }
 private final class GuideXMLDelegate: NSObject, XMLParserDelegate {
     var results: [String: [Program]] = [:]
+    var hasTVRoot = false
+    private var depth = 0
     let from: Date?; let until: Date?
     var channel = ""; var start: Date?; var end: Date?; var title = ""; var detail = ""; var current = ""
     let formatter: DateFormatter = {
@@ -25,7 +27,9 @@ private final class GuideXMLDelegate: NSObject, XMLParserDelegate {
         return f.date(from: value)
     }
     func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes: [String: String]) {
-        if elementName == "programme" {
+        if depth == 0 { hasTVRoot = elementName == "tv" }
+        depth += 1
+        if elementName == "programme", depth == 2, hasTVRoot {
             channel = attributes["channel"] ?? ""; start = date(attributes["start"]); end = date(attributes["stop"]); title = ""; detail = ""
         }
         current = elementName
@@ -35,10 +39,11 @@ private final class GuideXMLDelegate: NSObject, XMLParserDelegate {
         if current == "desc" { detail += string }
     }
     func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
-        if elementName == "programme", !channel.isEmpty, let start, let end, end > start,
+        if elementName == "programme", depth == 2, hasTVRoot, !channel.isEmpty, let start, let end, end > start,
            from.map({ end > $0 }) ?? true, until.map({ start < $0 }) ?? true {
             results[channel, default: []].append(Program(title: title.trimmingCharacters(in: .whitespacesAndNewlines), detail: detail.trimmingCharacters(in: .whitespacesAndNewlines), start: start, end: end))
         }
         current = ""
+        depth -= 1
     }
 }

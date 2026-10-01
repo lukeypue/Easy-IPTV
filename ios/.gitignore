@@ -6,3 +6,7 @@ RyzodCore/.swiftpm/
 ExportOptions.local.plist
 *.p12
 *.mobileprovision
+
+*.log
+*.xcresult/
+Screenshots/

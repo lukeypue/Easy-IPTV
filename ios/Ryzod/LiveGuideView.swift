@@ -62,7 +62,8 @@ struct LiveGuideView: View {
                     .onChange(of: playback.fullScreen) { full in if !full, let id = model.selectedLiveID { proxy.scrollTo(id, anchor: .center) } }
             }
             if channels.isEmpty { Text(favoritesOnly ? "Favorite a channel to see it here." : "No channels match this selection.").foregroundStyle(.secondary).padding() }
-        }.background(Theme.background).navigationBarHidden(true).searchable(text: $query, prompt: "Search channels")
+        }.background(Theme.background).navigationTitle("Live").navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search channels")
             .confirmationDialog(selectedProgram?.title.isEmpty == false ? selectedProgram!.title : selected?.name ?? "Channel", isPresented: $options, titleVisibility: .visible) {
                 if let selected {
                     Button("Watch") { model.selectedLiveID = selected.id; playback.play(selected) }

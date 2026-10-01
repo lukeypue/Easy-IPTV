@@ -59,14 +59,56 @@ import RyzodCore
         XCTAssertEqual(model.guide, old)
         XCTAssertTrue(model.guideStatus.contains("failed"))
     }
+    func testLateOldAccountGuideCannotRepopulateNewAccount() async throws {
+        let stub = FixtureProvider()
+        let model = AppModel(transport: { try await stub.request($0) })
+        await model.connect(ProviderProfile(server: "https://example.test", username: "A", password: "p"), persist: false)
+        await stub.holdGuides()
+        model.loadGuide(for: try XCTUnwrap(model.items[.live]?.last))
+        for _ in 0..<300 {
+            if await stub.pendingCount() > 0 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let count = await stub.pendingCount(); XCTAssertEqual(count, 1)
+        model.signOut()
+        await model.connect(ProviderProfile(server: "https://example.test", username: "B", password: "p"), persist: false)
+        await stub.releaseGuides()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(model.profile?.username, "B")
+        XCTAssertTrue(model.guide.isEmpty)
+    }
+    func testVisibleGuideRequestsAreLimitedToThree() async throws {
+        let stub = FixtureProvider()
+        let model = AppModel(transport: { try await stub.request($0) })
+        await model.connect(ProviderProfile(server: "https://example.test", username: "u", password: "p"), persist: false)
+        await stub.holdGuides()
+        for item in model.items[.live] ?? [] { model.loadGuide(for: item) }
+        for _ in 0..<300 {
+            if await stub.pendingCount() >= 3 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let count = await stub.pendingCount(); XCTAssertEqual(count, 3)
+        await stub.releaseGuides()
+        try await waitUntil { model.guide.count == 30 }
+    }
 }
 
 private actor FixtureProvider {
     private var version = 1
     private var badXML = false
+    private var holding = false
+    private var pending: [(CheckedContinuation<Data, Error>, Data)] = []
     func setVersion(_ value: Int) { version = value }
     func setBadXML() { badXML = true }
-    func request(_ url: URL) throws -> Data {
+    func holdGuides() { holding = true }
+    func pendingCount() -> Int { pending.count }
+    func releaseGuides() {
+        holding = false
+        let saved = pending; pending = []
+        for (continuation, data) in saved { continuation.resume(returning: data) }
+    }
+    func request(_ url: URL) async throws -> Data {
         let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
         let action = query.first { $0.name == "action" }?.value
         if url.path.hasSuffix("list.m3u") {
@@ -83,7 +125,9 @@ private actor FixtureProvider {
         }
         if action == "get_live_categories" { return Data(#"[{"category_id":1,"category_name":"First"},{"category_id":2,"category_name":"Other"}]"#.utf8) }
         if action == "get_short_epg" || action == "get_simple_data_table" {
-            return try JSONSerialization.data(withJSONObject: ["epg_listings": [["title": "Guide \(version)", "start_timestamp": Date().timeIntervalSince1970, "stop_timestamp": Date().addingTimeInterval(3600).timeIntervalSince1970]]])
+            let data = try JSONSerialization.data(withJSONObject: ["epg_listings": [["title": "Guide \(version)", "start_timestamp": Date().timeIntervalSince1970, "stop_timestamp": Date().addingTimeInterval(3600).timeIntervalSince1970]]])
+            if holding { return try await withCheckedThrowingContinuation { pending.append(($0, data)) } }
+            return data
         }
         throw ProviderError.invalidResponse
     }

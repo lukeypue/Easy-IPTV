@@ -45,8 +45,12 @@ public struct ProviderClient: Sendable {
         return try ProviderParser.media(await request(action), kind: kind, credentials: credentials)
     }
     public func epg(channelID: String) async throws -> [Program] {
-        let first = try ProviderParser.epg(await request("get_short_epg", parameters: ["stream_id": channelID, "limit": "48"]))
-        if !first.isEmpty { return first }
+        do {
+            let first = try ProviderParser.epg(await request("get_short_epg", parameters: ["stream_id": channelID, "limit": "48"]))
+            if !first.isEmpty { return first }
+        } catch is CancellationError { throw CancellationError() }
+        catch let error as URLError where error.code == .cancelled { throw error }
+        catch { /* Some providers expose only the full-table endpoint. */ }
         try Task.checkCancellation()
         return try ProviderParser.epg(await request("get_simple_data_table", parameters: ["stream_id": channelID]))
     }
