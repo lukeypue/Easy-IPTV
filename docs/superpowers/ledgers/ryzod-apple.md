@@ -14,3 +14,7 @@
 - Deferred: physical playback/codecs, provider text dates without offsets, long playback/battery testing, signing and TestFlight distribution.
 
 - Native RED run 36820878092 on iPhone SE 3 simulator / iOS 26.2: unsigned device build succeeded; all four new session regression tests failed for their intended reasons (ATS -1022, stale channel 25, old previous channel, XMLTV error replacing guide). Two login UI tests passed. The final code removes temporary continue-on-error, fixes those behaviors and adds cancellation/concurrency tests.
+
+- Final GREEN: commit 8f07745c17edb56dd26747caaec04af937036eae, workflow 36821766630 / job 110238674352. Device and simulator builds succeeded. 18 core + 6 app session + 2 iPhone UI + 2 iPad UI executions passed, zero failures. Temporary continue-on-error was removed. Artifacts contain unsigned apps and complete test results; downloaded logs confirm all six session cases passed. Four exported screenshots were visually inspected.
+- User clarified: owns Windows, ordered the advised iPhone SE, willing to buy a Mac/iPad if necessary. No extra hardware is needed for TestFlight testing; installation guide now recommends the hosted-Mac signing path with owner's Apple Developer membership.
+- Delivery: preserve isolated Apple branch; no merge or Android release changes. Final docs-only commit records verified code SHA and the missing signing/account prerequisite.

@@ -2,6 +2,14 @@
 
 Your iPhone SE (3rd generation, 2022) can use Wi-Fi without a SIM card or cellular plan.
 
+## Your Windows setup
+
+Your ordered iPhone SE and Windows PC are sufficient for testing with TestFlight. Do not buy a Mac or another iPad for that purpose. RYZOD's unsigned app has compiled and passed simulator checks; it still needs signing before it can be installed on your phone.
+
+The next prerequisite is an Apple Developer Program publishing account for RYZOD. You can start enrollment from your Windows browser at https://developer.apple.com/programs/enroll/ using your own Apple Account. Apple currently lists $99 per year in the US. Enrollment and any identity checks are completed by the account owner.
+
+Once membership is active, configure the app identifier, distribution signing and App Store Connect record. A hosted Mac build can then sign and upload the beta; you can use Windows for account and TestFlight administration. There is no need to own a Mac for this route. We have not configured signing credentials or uploaded a beta yet.
+
 ## Recommended: TestFlight
 
 When RYZOD has a signed beta uploaded to Apple's TestFlight:
@@ -15,7 +23,7 @@ When RYZOD has a signed beta uploaded to Apple's TestFlight:
 
 You do not need to buy a Mac or pay for a personal developer membership just to be a tester. The RYZOD publishing account does need Apple Developer Program membership and a correctly signed uploaded build. External testing may require Apple's beta review.
 
-**Current status:** there is no signed RYZOD TestFlight build or invitation yet. A GitHub unsigned .app or an Android .apk cannot be installed on your iPhone by tapping a download link.
+**Current status:** the Apple preview compiled and passed 28 test executions (18 core, 6 session, 2 iPhone UI and 2 iPad UI). There is no signed RYZOD TestFlight build or invitation yet. A GitHub unsigned .app or an Android .apk cannot be installed on your iPhone by tapping a download link.
 
 ## Alternative if you have access to a Mac
 
