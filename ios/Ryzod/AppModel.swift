@@ -7,7 +7,7 @@ import RyzodCore
     @Published var connecting = false
     @Published var loginError: String?
     @Published var items: [MediaKind: [MediaItem]] = [:]
-    @Published var categories: [MediaKind: [Category]] = [:]
+    @Published var categories: [MediaKind: [RyzodCore.Category]] = [:]
     @Published var loading: Set<MediaKind> = []
     @Published var catalogErrors: [MediaKind: String] = [:]
     @Published var guide: [String: [Program]] = [:]
@@ -37,7 +37,7 @@ import RyzodCore
         connecting = true; loginError = nil
         defer { if ticket == epoch { connecting = false } }
         do {
-            var media: [MediaItem]; var cats: [Category]; var playlist: PlaylistResult?
+            var media: [MediaItem]; var cats: [RyzodCore.Category]; var playlist: PlaylistResult?
             if candidate.kind == .xtream {
                 _ = try candidate.credentials.api()
                 let provider = ProviderClient(credentials: candidate.credentials, transport: transport)

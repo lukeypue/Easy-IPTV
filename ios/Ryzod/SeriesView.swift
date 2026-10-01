@@ -34,7 +34,7 @@ struct SeriesView: View {
             let loaded = try await provider.episodes(seriesID: series.id)
             try Task.checkCancellation(); episodes = loaded
         } catch is CancellationError { }
-        catch { error = model.safeMessage(error) }
+        catch { self.error = model.safeMessage(error) }
         loading = false
     }
 }
