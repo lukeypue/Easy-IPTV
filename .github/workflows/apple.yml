@@ -1,0 +1,20 @@
+name: RYZOD Apple
+on:
+  push:
+    branches: [feature/ryzod-apple]
+    paths: ['ios/**', '.github/workflows/apple.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: apple-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  apple:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift provider and guide tests
+        working-directory: ios/RyzodCore
+        run: swift test
