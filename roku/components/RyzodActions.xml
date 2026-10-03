@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<component name="RyzodActions" extends="Group">
+ <interface>
+  <field id="title" type="string" />
+  <field id="description" type="string" />
+  <field id="actions" type="array" />
+  <field id="opened" type="boolean" alwaysNotify="true" onChange="openActions" />
+  <field id="selected" type="string" alwaysNotify="true" />
+ </interface>
+ <script type="text/brightscript" uri="pkg:/source/core/Provider.brs" />
+ <script type="text/brightscript" uri="pkg:/source/core/State.brs" />
+ <script type="text/brightscript" uri="pkg:/source/UI.brs" />
+ <script type="text/brightscript" uri="pkg:/components/RyzodActions.brs" />
+ <children><Group id="body" /></children>
+</component>

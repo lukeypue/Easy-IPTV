@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<component name="RequestTask" extends="Task">
+  <interface>
+    <field id="request" type="assocarray" />
+    <field id="response" type="assocarray" alwaysNotify="true" />
+  </interface>
+  <script type="text/brightscript" uri="pkg:/source/core/Provider.brs" />
+  <script type="text/brightscript" uri="pkg:/source/core/Guide.brs" />
+  <script type="text/brightscript" uri="pkg:/components/RequestTask.brs" />
+</component>

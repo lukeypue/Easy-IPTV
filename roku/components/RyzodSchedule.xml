@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<component name="RyzodSchedule" extends="Group">
+ <interface>
+  <field id="channelName" type="string" />
+  <field id="opened" type="boolean" alwaysNotify="true" onChange="openSchedule" />
+  <field id="selected" type="assocarray" alwaysNotify="true" />
+  <field id="cancelled" type="boolean" alwaysNotify="true" />
+ </interface>
+ <script type="text/brightscript" uri="pkg:/source/core/Provider.brs" />
+ <script type="text/brightscript" uri="pkg:/source/core/Guide.brs" />
+ <script type="text/brightscript" uri="pkg:/source/core/State.brs" />
+ <script type="text/brightscript" uri="pkg:/source/UI.brs" />
+ <script type="text/brightscript" uri="pkg:/components/RyzodSchedule.brs" />
+ <children><Group id="body" /></children>
+</component>

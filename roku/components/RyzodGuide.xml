@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<component name="RyzodGuide" extends="Group">
+ <interface>
+  <field id="channels" type="array" onChange="setChannels" />
+  <field id="epg" type="assocarray" onChange="drawGuide" />
+  <field id="windowStart" type="integer" onChange="drawGuide" />
+  <field id="selectedIndex" type="integer" value="0" onChange="restoreSelection" />
+  <field id="selected" type="assocarray" alwaysNotify="true" />
+  <field id="selectionChanged" type="integer" alwaysNotify="true" />
+  <field id="command" type="string" alwaysNotify="true" />
+  <function name="visibleChannels" />
+  <function name="drawGuide" />
+ </interface>
+ <script type="text/brightscript" uri="pkg:/source/core/Provider.brs" />
+ <script type="text/brightscript" uri="pkg:/source/core/Guide.brs" />
+ <script type="text/brightscript" uri="pkg:/source/core/State.brs" />
+ <script type="text/brightscript" uri="pkg:/source/UI.brs" />
+ <script type="text/brightscript" uri="pkg:/components/RyzodGuide.brs" />
+ <children><Group id="body" /></children>
+</component>

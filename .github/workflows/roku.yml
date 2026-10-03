@@ -1,0 +1,38 @@
+name: Roku validation and packages
+on:
+  push:
+    branches: [feature/ryzod-roku]
+    paths: ['roku/**', '.github/workflows/roku.yml']
+  pull_request:
+    paths: ['roku/**', '.github/workflows/roku.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: roku
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: roku/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: npm ci
+      - run: npm run verify
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RYZOD-Roku-0.1.0
+          path: |
+            roku/out/RYZOD-Roku-0.1.0.zip
+            roku/out/RYZOD-Companion-0.1.0.zip
+            roku/out/SHA256SUMS.txt
+            roku/README.md
+            roku/TEST_REPORT.md

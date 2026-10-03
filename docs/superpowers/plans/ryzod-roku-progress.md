@@ -1,0 +1,11 @@
+# SDD ledger — plan: docs/superpowers/plans/2026-10-03-ryzod-roku.md
+User instruction: go until the port is delivered; test and retest during construction. Explicit continuation takes precedence over staged approval prompts. Native implementation in a dedicated clone/feature branch; no changes to existing platform source.
+Pre-flight: Task 1 normalized media and guide models consumed by Task 2; Task 2 task envelope used by Task 3; shared interfaces fixed in design/plan. No conflicts.
+Ruling: Roku storage cannot reproduce Android persistent local USB DVR. Supply optional LAN companion with matching job controls; otherwise explain setup in those screens. Cost if wrong: requires additional always-on hardware, not standalone Roku DVR.
+Task 1: complete — 16 production BrightScript behavior checks pass, including DST and extensionless M3U fixes. Legacy interpreter lacked byte arrays; moved to @rokucommunity/brs and reran production functions.
+Task 2: UI complete — native SceneGraph compiles; 6 simulator UI tests and 3 package contracts pass. Runtime simulation caught array concatenation and empty-registry errors, fixed and retested. Full provider Task integration is under investigation.
+Task 3: complete — 13 HTTP/queue/persistence/media tests pass, including real ffmpeg recording with ffprobe audio+video verification. Companion is optional and requires a computer/NAS.
+
+Final review: eight important findings reproduced/fixed. Added companion playback reservations with renewal/expiry, release session revocation and restart grace. Additional fixes cover native fonts, caption IDs, focus, footer spacing, narrow guide cells and late lease replies.
+Final verification: 35 Roku tests (18 core, 13 native UI, 1 threaded Task integration, 3 contracts), 16 companion tests including real FFmpeg/ffprobe, full compilation and package validation. Repeated complete suite; deterministic archives checked. Physical Roku playback/soak and Store approval remain unverified, detailed in roku/TEST_REPORT.md.
+Delivery: separate feature branch only; installation ZIP, companion ZIP, instructions and test report. No Android/Apple/updater changes. Roku cannot provide standalone writable-USB DVR or a guaranteed thirty-minute buffer; optional LAN companion and native buffer are the explicit adaptations.

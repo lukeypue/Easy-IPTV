@@ -1,0 +1,8 @@
+node_modules/
+out/
+companion/__pycache__/
+companion/ryzod-data/
+companion/data/
+*.log
+__pycache__/
+*.pyc
