@@ -5,6 +5,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.test.*
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.InputMode
+import androidx.compose.ui.platform.LocalInputModeManager
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.*
 import org.junit.Rule
@@ -16,8 +19,30 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28], qualifiers = "w960dp-h540dp-land")
 @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+@OptIn(ExperimentalTestApi::class, androidx.compose.ui.ExperimentalComposeUiApi::class)
 class SearchKeyboardTest {
     @get:Rule val ui = createComposeRule()
+    @Test fun remoteDoneClosesKeyboardAndMovesToResults() {
+        val ctx=ApplicationProvider.getApplicationContext<Context>()
+        val prefs=ctx.getSharedPreferences("easyiptv",Context.MODE_PRIVATE)
+        prefs.edit().clear().commit()
+        val data=AppData(emptyList(),listOf(LiveChannel("1","Alpha TV",null,null,"https://example.invalid/live.ts")),emptyList(),emptyList(),emptyList(),emptyList())
+        ui.setContent {
+            val input=LocalInputModeManager.current
+            SideEffect {input.requestInputMode(InputMode.Keyboard)}
+            var q by remember {mutableStateOf("a")}
+            SearchTab(null,prefs,data,q,{q=it},{},{_,_->},{})
+        }
+        ui.onNodeWithText("Search").performClick()
+        ui.waitUntil(10_000) {ui.onAllNodesWithText("Alpha TV").fetchSemanticsNodes().isNotEmpty()}
+        ui.onRoot().performKeyInput {
+            repeat(4) {pressKey(Key.DirectionDown)}
+            repeat(2) {pressKey(Key.DirectionRight)}
+            pressKey(Key.DirectionCenter)
+        }
+        ui.onNodeWithText("DONE").assertDoesNotExist()
+        ui.onNodeWithText("Alpha TV").assertIsFocused()
+    }
     @Test fun firstLetterFindsResultsWhileKeyboardRemainsOpen() {
         val ctx = ApplicationProvider.getApplicationContext<Context>()
         val prefs = ctx.getSharedPreferences("easyiptv", Context.MODE_PRIVATE)

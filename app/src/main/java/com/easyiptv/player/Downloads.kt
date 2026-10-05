@@ -19,6 +19,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.cancel
 import okhttp3.Call
 import okhttp3.Request
 import org.json.JSONArray
@@ -290,17 +291,21 @@ object DownloadStore {
         load(prefs).firstOrNull { it.id == id }?.let { remove(prefs, it, context) }
     }
 
-    fun stopAndRemove(context: Context, prefs: SharedPreferences, item: Item) {
+    fun stopAndRemove(context: Context, prefs: SharedPreferences, item: Item): Unit = synchronized(DownloadService.dispatchLock) {
         if (isInFlight(context, item.id)) DownloadService.cancel(context, item.id)
         remove(prefs, item, context)
+        // A dispatched head has no writer completion callback to advance it.
+        kickQueue(context, prefs)
+        Unit
     }
 
-    fun pause(context: Context, prefs: SharedPreferences, item: Item): String {
-        if (isReady(context, item)) return "Already downloaded."
+    fun pause(context: Context, prefs: SharedPreferences, item: Item): String = synchronized(DownloadService.dispatchLock) {
+        if (isReady(context, item)) return@synchronized "Already downloaded."
         val part = File(item.path + ".part")
         if (isInFlight(context, item.id)) DownloadService.pause(context, item.id)
         mark(context, item.id, STATE_FAILED, part.length().coerceAtLeast(0L), -1L, "Paused")
-        return "Paused. The next queued download will start."
+        kickQueue(context, prefs)
+        "Paused. The next queued download will start."
     }
 
     fun resume(context: Context, prefs: SharedPreferences, item: Item): String {
@@ -462,17 +467,17 @@ object DownloadStore {
 
     /** Start the oldest queued item when no download socket is active.
      * Returns true when a transfer was launched. */
-    fun kickQueue(context: Context, prefs: SharedPreferences): Boolean {
-        if (DownloadService.hasActive()) return false
+    fun kickQueue(context: Context, prefs: SharedPreferences): Boolean = synchronized(DownloadService.dispatchLock) {
+        if (DownloadService.hasActive()) return@synchronized false
         val next = load(prefs).firstOrNull {
             state(context, it.id) == STATE_PENDING && it.url.isNotBlank()
-        } ?: return false
+        } ?: return@synchronized false
 
         // Queue entries cost zero provider connections until this point.
         val usedWithoutDownload = ProviderStreams.playbackSlots() + ProviderStreams.recordingSlots()
-        if (usedWithoutDownload + 1 > ProviderStreams.max(prefs)) return false
+        if (usedWithoutDownload + 1 > ProviderStreams.max(prefs)) return@synchronized false
 
-        return try {
+        try {
             // Reserve the queue head synchronously so rapid-fire selections do
             // not enqueue duplicate ACTION_START intents before the foreground
             // service has time to set its activeId.
@@ -498,28 +503,61 @@ class DownloadService : Service() {
 
         @Volatile private var activeId: Long = 0L
         @Volatile private var activeCall: Call? = null
+        internal val dispatchLock = Any()
+        private var dispatchGeneration = 0L
+        @Volatile private var activeOwner: Transfer? = null
 
-        fun start(context: Context, id: Long, title: String, url: String, path: String) {
+        private class Transfer(val id: Long, val generation: Long) {
+            @Volatile var call: Call? = null
+            @Volatile var cancelledByUser = false
+            var job: Job? = null
+            var wakeLock: PowerManager.WakeLock? = null
+        }
+
+        fun start(context: Context, id: Long, title: String, url: String, path: String): Unit = synchronized(dispatchLock) {
+            check(activeId == 0L) { "Another download already owns the provider slot" }
+            activeId = id
+            val generation = ++dispatchGeneration
             val i = Intent(context, DownloadService::class.java).apply {
                 action = ACTION_START
                 putExtra("id", id)
                 putExtra("title", title)
                 putExtra("url", url)
                 putExtra("path", path)
+                putExtra("dispatchGeneration", generation)
             }
-            ContextCompat.startForegroundService(context, i)
+            try { ContextCompat.startForegroundService(context, i) }
+            catch (t: Throwable) {
+                if (activeId == id && dispatchGeneration == generation && activeOwner == null) activeId = 0L
+                throw t
+            }
+            Unit
         }
 
-        fun cancel(context: Context, id: Long) {
+        fun cancel(context: Context, id: Long) = synchronized(dispatchLock) {
             // Removing a QUEUED item must never stop the currently active movie.
             if (activeId == id) {
-                runCatching { activeCall?.cancel() }
-                context.stopService(Intent(context, DownloadService::class.java))
+                val owner = activeOwner
+                if (owner == null) activeId = 0L
+                else {
+                    owner.cancelledByUser = true
+                    runCatching { owner.call?.cancel() }
+                    owner.job?.cancel()
+                    context.stopService(Intent(context, DownloadService::class.java))
+                }
             }
         }
 
-        fun pause(context: Context, id: Long) {
-            if (activeId == id) runCatching { activeCall?.cancel() }
+        fun pause(context: Context, id: Long) = synchronized(dispatchLock) {
+            if (activeId == id) {
+                val owner = activeOwner
+                if (owner == null) activeId = 0L
+                else {
+                    owner.cancelledByUser = true
+                    runCatching { owner.call?.cancel() }
+                    owner.job?.cancel()
+                }
+            }
         }
 
         fun isActive(id: Long): Boolean = id != 0L && activeId == id
@@ -527,9 +565,9 @@ class DownloadService : Service() {
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var job: Job? = null
-    private var wakeLock: PowerManager.WakeLock? = null
-    @Volatile private var userCancelled = false
+    @Volatile private var job: Job? = null
+    @Volatile private var transfer: Transfer? = null
+    private var latestStartId = 0
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -567,36 +605,70 @@ class DownloadService : Service() {
         return b.build()
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = synchronized(dispatchLock) {
+        latestStartId = startId
         when (intent?.action) {
             ACTION_START -> {
-                if (job?.isActive == true) return START_NOT_STICKY
+                // Cancellation is asynchronous; its writer still owns cleanup.
+                if (job != null && job?.isCompleted != true) return@synchronized START_NOT_STICKY
                 val id = intent.getLongExtra("id", 0L)
                 val title = intent.getStringExtra("title") ?: "video"
-                val url = intent.getStringExtra("url") ?: return START_NOT_STICKY.also { stopSelf() }
-                val path = intent.getStringExtra("path") ?: return START_NOT_STICKY.also { stopSelf() }
-                activeId = id
-                userCancelled = false
-                startForeground(NOTIF_ID, notification(title, 0L, -1L))
-                begin(id, title, url, File(path))
+                val url = intent.getStringExtra("url")
+                val path = intent.getStringExtra("path")
+                val generation = intent.getLongExtra("dispatchGeneration", -1L)
+                val prefs = getSharedPreferences("easyiptv", Context.MODE_PRIVATE)
+                val item = DownloadStore.load(prefs).firstOrNull { it.id == id }
+                if (id == 0L || activeId != id || generation != dispatchGeneration || activeOwner != null ||
+                    item == null || item.url != url || item.path != path || DownloadStore.state(this, id) != DownloadStore.STATE_RUNNING) {
+                    // A paused, removed, or superseded start intent owns nothing.
+                    if (activeId == id && generation == dispatchGeneration && activeOwner == null) {
+                        activeId = 0L
+                        if (item != null && DownloadStore.state(this, id) == DownloadStore.STATE_RUNNING) {
+                            DownloadStore.mark(this, id, DownloadStore.STATE_FAILED,
+                                File(item.path + ".part").length(), error = "Download start was interrupted. Resume it from Downloads.")
+                        }
+                    }
+                    if (activeOwner == null) DownloadStore.kickQueue(applicationContext, prefs)
+                    if (transfer == null && !hasActive()) stopSelf(startId)
+                    return@synchronized START_NOT_STICKY
+                }
+                val owner = Transfer(id, generation)
+                activeOwner = owner
+                transfer = owner
+                try {
+                    startForeground(NOTIF_ID, notification(title, 0L, -1L))
+                    begin(owner, title, url!!, File(path!!))
+                } catch (t: Throwable) {
+                    activeOwner = null; activeId = 0L; transfer = null
+                    runCatching { owner.wakeLock?.let { if (it.isHeld) it.release() } }
+                    DownloadStore.mark(this, id, DownloadStore.STATE_FAILED, error = t.message ?: "Couldn't start download")
+                    stopSelf(startId)
+                }
             }
             ACTION_STOP -> {
                 val requested = intent.getLongExtra("id", activeId)
                 if (requested == 0L || requested == activeId) {
-                    userCancelled = true
-                    runCatching { activeCall?.cancel() }
-                    job?.cancel()
                     val prefs = getSharedPreferences("easyiptv", Context.MODE_PRIVATE)
-                    if (activeId != 0L) DownloadStore.removeById(this, prefs, activeId)
-                    stopSelf()
+                    val owner = transfer
+                    if (owner != null && activeOwner === owner) {
+                        owner.cancelledByUser = true
+                        runCatching { owner.call?.cancel() }
+                        owner.job?.cancel()
+                        DownloadStore.removeById(this, prefs, owner.id)
+                    } else if (activeOwner == null && activeId != 0L) {
+                        DownloadStore.removeById(this, prefs, activeId)
+                        activeId = 0L
+                    }
+                    if (owner == null) stopSelf(startId)
                 }
             }
         }
-        return START_NOT_STICKY
+        START_NOT_STICKY
     }
 
-    private fun begin(id: Long, title: String, url: String, finalFile: File) {
-        wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager)
+    private fun begin(owner: Transfer, title: String, url: String, finalFile: File) {
+        val id = owner.id
+        owner.wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "EasyIPTV:download")
             .apply { acquire(6L * 60 * 60 * 1000) }
 
@@ -609,7 +681,10 @@ class DownloadService : Service() {
                 val resumeFrom = if (part.exists()) part.length().coerceAtLeast(0L) else 0L
                 runCatching { finalFile.delete() }
                 done = resumeFrom
-                DownloadStore.mark(this@DownloadService, id, DownloadStore.STATE_RUNNING, done, -1L)
+                synchronized(dispatchLock) {
+                    if (activeOwner !== owner || owner.cancelledByUser || !isActive) throw IOException("Cancelled")
+                    DownloadStore.mark(this@DownloadService, id, DownloadStore.STATE_RUNNING, done, -1L)
+                }
 
                 val client = Net.client.newBuilder()
                     .readTimeout(60, TimeUnit.SECONDS)
@@ -626,7 +701,11 @@ class DownloadService : Service() {
                         .header("Connection", "keep-alive")
                         .build()
                     val call = client.newCall(req)
-                    activeCall = call
+                    owner.call = call
+                    synchronized(dispatchLock) {
+                        if (activeOwner !== owner || owner.cancelledByUser || !isActive) throw IOException("Cancelled")
+                        activeCall = call
+                    }
                     return call.execute()
                 }
 
@@ -644,8 +723,28 @@ class DownloadService : Service() {
                     val append = resumeFrom > 0L && r.code == 206
                     if (resumeFrom > 0L && !append) done = 0L
                     val responseBytes = body.contentLength()
-                    total = if (append && responseBytes >= 0L) resumeFrom + responseBytes else responseBytes
-                    DownloadStore.mark(this@DownloadService, id, DownloadStore.STATE_RUNNING, done, total)
+                    val range = if (r.code == 206) {
+                        Regex("bytes (\\d+)-(\\d+)/(\\d+|\\*)", RegexOption.IGNORE_CASE)
+                            .matchEntire(r.header("Content-Range").orEmpty().trim())
+                            ?: throw IOException("Provider returned an invalid download range")
+                    } else null
+                    val rangeTotal = if (range != null) {
+                        val start = range.groupValues[1].toLongOrNull()
+                        val end = range.groupValues[2].toLongOrNull()
+                        val length = range.groupValues[3].takeIf { it != "*" }?.toLongOrNull()
+                        if (start != resumeFrom || end == null || end < resumeFrom ||
+                            (length != null && end >= length) ||
+                            (range.groupValues[3] != "*" && length == null) ||
+                            (responseBytes >= 0L && responseBytes != end - resumeFrom + 1L)) {
+                            throw IOException("Provider returned a different download range; saved partial file was kept")
+                        }
+                        length
+                    } else null
+                    total = rangeTotal ?: if (append && responseBytes >= 0L) resumeFrom + responseBytes else responseBytes
+                    synchronized(dispatchLock) {
+                        if (owner.cancelledByUser || !isActive) throw IOException("Cancelled")
+                        DownloadStore.mark(this@DownloadService, id, DownloadStore.STATE_RUNNING, done, total)
+                    }
 
                     body.byteStream().use { inp ->
                         FileOutputStream(part, append).use { out ->
@@ -665,7 +764,10 @@ class DownloadService : Service() {
                                 if (sinceState >= 4L * 1024 * 1024 || now - lastUi >= 1_500L) {
                                     sinceState = 0L
                                     lastUi = now
-                                    DownloadStore.mark(this@DownloadService, id, DownloadStore.STATE_RUNNING, done, total)
+                                    synchronized(dispatchLock) {
+                                        if (owner.cancelledByUser || !isActive) throw IOException("Cancelled")
+                                        DownloadStore.mark(this@DownloadService, id, DownloadStore.STATE_RUNNING, done, total)
+                                    }
                                     (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
                                         .notify(NOTIF_ID, notification(title, done, total))
                                 }
@@ -681,7 +783,7 @@ class DownloadService : Service() {
                     }
                 }
 
-                if (!isActive || userCancelled) throw IOException("Cancelled")
+                if (!isActive || owner.cancelledByUser) throw IOException("Cancelled")
                 if (total > 0L && done < total) throw IOException("Download ended early ($done of $total bytes)")
                 if (!part.renameTo(finalFile)) throw IOException("Couldn't finish the file on this storage device")
 
@@ -702,7 +804,7 @@ class DownloadService : Service() {
                         .build()
                 )
             } catch (t: Throwable) {
-                if (!userCancelled) {
+                if (!owner.cancelledByUser && activeOwner === owner) {
                     val partialDone = if (part.exists()) part.length() else done
                     DownloadStore.mark(
                         this@DownloadService,
@@ -713,30 +815,30 @@ class DownloadService : Service() {
                         (t.message ?: "Download failed") + if (partialDone > 0L) " — Resume is available." else ""
                     )
                 }
-            } finally {
-                activeCall = null
-                activeId = 0L
-                runCatching { wakeLock?.let { if (it.isHeld) it.release() } }
-                wakeLock = null
-                // Clear the job reference before launching the next queued item,
-                // otherwise onStartCommand would think the old transfer is still
-                // active and discard the next ACTION_START.
-                job = null
-                stopForeground(STOP_FOREGROUND_DETACH)
-                val prefs = getSharedPreferences("easyiptv", Context.MODE_PRIVATE)
-                val startedNext = DownloadStore.kickQueue(this@DownloadService, prefs)
-                if (!startedNext) stopSelf()
+            }
+        }
+        owner.job = job
+        // Completion also runs when cancellation happens before the worker starts.
+        job?.invokeOnCompletion {
+            runCatching { owner.wakeLock?.let { if (it.isHeld) it.release() } }
+            owner.wakeLock = null
+            synchronized(dispatchLock) {
+                if (activeOwner === owner && activeId == id && dispatchGeneration == owner.generation) {
+                    stopForeground(STOP_FOREGROUND_DETACH)
+                    activeCall = null; activeId = 0L; activeOwner = null
+                    if (transfer === owner) { transfer = null; job = null }
+                    val prefs = getSharedPreferences("easyiptv", Context.MODE_PRIVATE)
+                    val startedNext = DownloadStore.kickQueue(applicationContext, prefs)
+                    if (!startedNext) stopSelf(latestStartId)
+                }
             }
         }
     }
 
     override fun onDestroy() {
-        runCatching { activeCall?.cancel() }
-        job?.cancel()
-        job = null
-        activeCall = null
-        activeId = 0L
-        runCatching { wakeLock?.let { if (it.isHeld) it.release() } }
+        // The writer releases shared ownership only after its output is closed.
+        transfer?.let { runCatching { it.call?.cancel() }; it.job?.cancel() }
+        scope.cancel()
         super.onDestroy()
     }
 }

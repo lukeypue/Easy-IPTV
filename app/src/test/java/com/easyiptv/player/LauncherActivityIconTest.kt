@@ -17,6 +17,26 @@ class LauncherActivityIconTest {
     private val context get() = ApplicationProvider.getApplicationContext<Context>()
 
     @Test
+    @Config(sdk = [28, 30], qualifiers = "w960dp-h540dp-land-xhdpi")
+    fun alternateRoundLauncherPathKeepsTheFullWideWordmark() {
+        val parser=context.assets.openXmlResourceParser("AndroidManifest.xml")
+        var roundId=0
+        parser.use {
+            while(it.next()!=org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
+                if(it.eventType==org.xmlpull.v1.XmlPullParser.START_TAG && it.name=="application") {
+                    roundId=it.getAttributeResourceValue("http://schemas.android.com/apk/res/android","roundIcon",0)
+                    break
+                }
+            }
+        }
+        assertTrue("An alternate launcher must receive the same complete brand artwork",roundId!=0)
+        val round=context.getDrawable(roundId)
+        assertTrue("Round-icon consumers must not get the obsolete cropped adaptive emblem",round is BitmapDrawable)
+        val expected=(context.getDrawable(R.drawable.ryzod_tv_artwork_466) as BitmapDrawable).bitmap
+        assertTrue("Alternate icon keeps the wordmark",(round as BitmapDrawable).bitmap.sameAs(expected))
+    }
+
+    @Test
     @Config(sdk = [26, 28, 30], qualifiers = "w960dp-h540dp-land-television-xhdpi")
     fun televisionLaunchActivityExposesLegacyBitmapIconAndLogo() {
         val pm = context.packageManager

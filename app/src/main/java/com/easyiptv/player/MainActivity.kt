@@ -341,6 +341,7 @@ private fun wireStockPlayerDpad(root: PlayerView) {
 
 
 /** One inexpensive CC switch for embedded/subtitle tracks Media3 already exposes. */
+@OptIn(UnstableApi::class)
 private fun applyCaptionPreference(player: Player?, enabled: Boolean) {
     player ?: return
     runCatching {
@@ -459,6 +460,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // This is the public Activity input entry point. ComponentActivity inherits
+    // an AndroidX-internal annotation on its implementation; dispatch must still
+    // delegate to super so Compose and the platform receive unhandled keys.
+    @android.annotation.SuppressLint("RestrictedApi")
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
         // A cached playlist may be visible before the fresh provider refresh is
         // finished. During that short window, swallow remote input so nobody can
@@ -546,6 +551,7 @@ fun App() {
     var catalogLoading by remember(activeIdx, reload) { mutableStateOf(false) }
     var catalogError by remember(activeIdx, reload) { mutableStateOf<String?>(null) }
     var catalogRetry by remember(activeIdx, reload) { mutableIntStateOf(0) }
+    var catalogSection by remember(activeIdx, reload) { mutableStateOf(CatalogRefresh.Section.ALL) }
 
     LaunchedEffect(railSection) {
         StabilityCore.noteScreen(railSection)
@@ -757,40 +763,32 @@ fun App() {
     // True lazy loading: Xtream movie/series catalogs are often huge. They load
     // only when the viewer opens an on-demand/search screen, never on a timer
     // behind live TV. This applies in normal AND Simple Mode.
-    LaunchedEffect(railSection, source, activeIdx, data, catalogLoadedThisSession, catalogRetry) {
-        val catalogJob = kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]
-        if (catalogJob != null) BackgroundWorkSupervisor.replace("catalog", catalogJob)
+    LaunchedEffect(railSection, source, activeIdx, startupSettled, nav, catalogRetry) {
         val s = source ?: return@LaunchedEffect
         val needsCatalog = railSection == "movies" || railSection == "series" || railSection == "search"
         val liveBase = data ?: return@LaunchedEffect
-        if (!needsCatalog || !s.supportsSeries || catalogLoadedThisSession) return@LaunchedEffect
-        catalogLoading = true
-        catalogError = null
+        if (!startupSettled || nav is Nav.Play || !needsCatalog || catalogLoadedThisSession ||
+            (!s.supportsSeries && catalogRetry==0)) return@LaunchedEffect
+        val job=kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]
+        if(job!=null) BackgroundWorkSupervisor.replace("catalog",job)
+        catalogLoading=true
+        catalogError=null
         try {
-            val catalog = s.loadOnDemandOnly()
-            val merged = AppData(
-                liveCats = liveBase.liveCats, live = liveBase.live,
-                vodCats = catalog.vodCats, movies = catalog.movies,
-                seriesCats = catalog.seriesCats, series = catalog.series
-            )
-            data = merged
-            catalogLoadedThisSession = true
-            if (catalog.movies.isEmpty() && catalog.series.isEmpty()) {
-                catalogError = "Your provider returned no Movies or Series on this request. Press Retry; if it repeats, the next test should capture the provider response/error."
+            val result=CatalogRefresh.load(s,liveBase,catalogSection)
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            // Finish persistence before publishing UI state; changing data must
+            // not cancel its own save or trigger another catalog request.
+            if(cacheKey!=null) kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                DataCache.save(context,cacheKey,result.data)
             }
-            // ZAKO_V436_SQLITE_CATALOG_SAVE: the JSON part is now slim; VOD rows go to SQLite.
-            if (cacheKey != null) kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                DataCache.save(context, cacheKey, merged)
-            }
-
-        } catch (e: Exception) {
-            // Stop automatic retry loops on a weak Fire Stick. The viewer gets
-            // one explicit Retry button instead, with the actual failure text.
-            catalogError = e.message ?: "On-demand catalog request failed"
-            catalogLoadedThisSession = true
-        } finally {
-            catalogLoading = false
-        }
+            data=result.data
+            catalogError=result.warning
+            catalogLoadedThisSession=true
+        } catch(cancelled:kotlinx.coroutines.CancellationException) {throw cancelled
+        } catch(_:Exception) {
+            catalogError="Catalog update failed. Saved titles are still available; try Update again."
+            catalogLoadedThisSession=true
+        } finally {catalogLoading=false}
     }
 
     // Restore the recent-channel surf strip across app restarts. This is done
@@ -861,8 +859,19 @@ fun App() {
             catalogLoading = catalogLoading,
             catalogError = catalogError,
             onRetryCatalog = {
+                catalogSection=CatalogRefresh.Section.ALL
                 catalogError = null
                 catalogLoadedThisSession = false
+                catalogRetry++
+            },
+            onRefreshMovies = {
+                catalogSection=CatalogRefresh.Section.MOVIES
+                catalogLoadedThisSession=false
+                catalogRetry++
+            },
+            onRefreshSeries = {
+                catalogSection=CatalogRefresh.Section.SERIES
+                catalogLoadedThisSession=false
                 catalogRetry++
             },
             activeIdx = activeIdx,
@@ -1100,6 +1109,7 @@ private fun BigOption(title: String, subtitle: String, onClick: () -> Unit) {
 }
 
 /* ----------------------------- home: left-menu navigation ----------------------------- */
+@OptIn(UnstableApi::class)
 @Composable
 fun HomeScreen(
     prefs: SharedPreferences,
@@ -1110,6 +1120,8 @@ fun HomeScreen(
     catalogLoading: Boolean,
     catalogError: String?,
     onRetryCatalog: () -> Unit,
+    onRefreshMovies: () -> Unit,
+    onRefreshSeries: () -> Unit,
     activeIdx: Int,
     section: String,
     depth: Int,
@@ -1280,8 +1292,8 @@ fun HomeScreen(
                             onLeftToRail = { railReturnRequest++ }, onRefreshGuide = {
                                 guideRefreshScope.launch { EpgStore.load(source?.xmltvUrl(), force = true) }
                             })
-                        depth == 1 && section == "movies" -> MoviesPane(source, prefs, safeData, movieCat, onPlay, onLeftToRail = { railReturnRequest++ })
-                        depth == 1 && section == "series" -> SeriesPane(source, safeData, seriesCat, onSeries, onLeftToRail = { railReturnRequest++ })
+                        depth == 1 && section == "movies" -> MoviesPane(source, prefs, safeData, movieCat, onPlay, onLeftToRail = { railReturnRequest++ }, onRefresh=onRefreshMovies, refreshing=catalogLoading, refreshWarning=catalogError)
+                        depth == 1 && section == "series" -> SeriesPane(source, safeData, seriesCat, onSeries, onLeftToRail = { railReturnRequest++ }, onRefresh=onRefreshSeries, refreshing=catalogLoading, refreshWarning=catalogError)
                         section == "search" -> SearchTab(
                             source, prefs, safeData, searchQuery, onSearchQuery, onPlay, onPlayLive, onSeries,
                             onDemandWarning = if (!catalogLoading) catalogError else null
@@ -1333,12 +1345,13 @@ fun HomeScreen(
                                                 isFocusable = false
                                                 isFocusableInTouchMode = false
                                                 resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                                                Playback.attachVideoView(this)
                                             }
                                         },
                                         update = { it.player = Playback.player },
                                         // The shared player outlives this corner view. Remove
                                         // its listeners when returning to full-screen playback.
-                                        onRelease = { it.player = null },
+                                        onRelease = { Playback.detachVideoView(it); it.player = null },
                                         modifier = Modifier.fillMaxSize()
                                     )
                                     // Phones: the video view eats touches, so this
@@ -1923,15 +1936,22 @@ private fun LiveGridGuide(
     val channelCells = remember(channels) { channels.map { FocusRequester() } }
     var pendingFocus by remember { mutableStateOf<Pair<Int,Boolean>?>(null) }
     var focusRequest by remember { mutableIntStateOf(0) }
+    fun rowFullyVisible(row: Int): Boolean {
+        val layout=guideListState.layoutInfo
+        val item=layout.visibleItemsInfo.firstOrNull {it.index==row} ?: return false
+        return item.offset>=layout.viewportStartOffset && item.offset+item.size<=layout.viewportEndOffset
+    }
     fun moveTo(row: Int, last: Boolean=false, afterPageChange:Boolean=false) {
-        if(!afterPageChange && guideListState.layoutInfo.visibleItemsInfo.any { it.index==row }) {
+        if(!afterPageChange && rowFullyVisible(row)) {
             if(runCatching { (if(last) lastCells[row] else firstCells[row]).requestFocus() }.isSuccess) return
         }
         pendingFocus=row to last;focusRequest++
     }
     LaunchedEffect(focusRequest) {
         val target=pendingFocus ?: return@LaunchedEffect
-        if(guideListState.layoutInfo.visibleItemsInfo.none { it.index==target.first }) guideListState.scrollToItem(target.first)
+        // A composed row can still be clipped. Reveal it before focus so the
+        // default animated bring-into-view does not fight the guide's D-pad move.
+        if(!rowFullyVisible(target.first)) guideListState.scrollToItem(target.first)
         androidx.compose.runtime.withFrameNanos { }
         androidx.compose.runtime.withFrameNanos { }
         runCatching { (if(target.second) lastCells[target.first] else firstCells[target.first]).requestFocus() }
@@ -2709,6 +2729,115 @@ object Playback {
     private var pausePreparing = false
     private var pauseResumeRequested = false
 
+    // One coarse check for a video-only stall, including direct/Simple live.
+    // Decoder counters track rendered output, not screenshots or screen pixels.
+    private val videoHealth = VideoHealthMonitor()
+    private val videoHealthHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var videoHealthRunning = false
+    private var videoHealthSession = 0L
+    private var observedVideoCounters: androidx.media3.exoplayer.DecoderCounters? = null
+    private var observedVideoView: PlayerView? = null
+    private val videoViews = ArrayList<java.lang.ref.WeakReference<PlayerView>>()
+
+    /** Views share the existing player; registration never prepares a source. */
+    fun attachVideoView(view: PlayerView) {
+        videoViews.removeAll { it.get() == null }
+        if (videoViews.none { it.get() === view }) videoViews.add(java.lang.ref.WeakReference(view))
+        if (view.player === player && player?.isPlaying == true) startVideoHealthWatchdog()
+    }
+
+    fun detachVideoView(view: PlayerView) {
+        videoViews.removeAll { it.get() == null || it.get() === view }
+        if (observedVideoView === view) resetVideoObservation()
+        if (videoViews.isEmpty()) {
+            stopVideoHealthWatchdog()
+            // Audio-only live playback has no rendering surface to supervise.
+            if (player?.let { it.isPlaying && isAudioOnly(it) } == true) startVideoHealthWatchdog()
+        }
+    }
+
+    private fun isAudioOnly(p: ExoPlayer): Boolean =
+        p.currentTracks.isTypeSelected(C.TRACK_TYPE_AUDIO) &&
+            !p.currentTracks.isTypeSelected(C.TRACK_TYPE_VIDEO)
+
+    private fun visibleVideoView(p: ExoPlayer): PlayerView? {
+        videoViews.removeAll { it.get() == null }
+        return videoViews.asReversed().firstNotNullOfOrNull { ref ->
+            ref.get()?.takeIf { view ->
+                val surface = view.videoSurfaceView as? android.view.SurfaceView
+                view.player === p && view.isAttachedToWindow && view.isShown &&
+                    view.width > 0 && view.height > 0 && surface?.holder?.surface?.isValid == true
+            }
+        }
+    }
+
+    private fun resetVideoObservation() {
+        observedVideoCounters = null
+        observedVideoView = null
+        videoHealth.sample(android.os.SystemClock.elapsedRealtime(), videoHealthSession, false, 0L, 0L)
+        noteAudioPlaybackProgress(android.os.SystemClock.elapsedRealtime(), false, 0L)
+    }
+
+    private fun noteAudioPlaybackProgress(nowMs: Long, eligible: Boolean, positionMs: Long) {
+        if (videoHealth.sampleAudioProgress(nowMs, videoHealthSession, eligible, positionMs)) retriesP = 0
+    }
+
+    private val videoHealthTick = object : Runnable {
+        override fun run() {
+            val p = player
+            if (!videoHealthRunning || p == null || !liveMode || backgroundSuspended) {
+                stopVideoHealthWatchdog()
+                return
+            }
+            val now = android.os.SystemClock.elapsedRealtime()
+            val view = visibleVideoView(p)
+            val counters = p.videoDecoderCounters
+            if (view !== observedVideoView || counters !== observedVideoCounters) {
+                resetVideoObservation()
+                observedVideoView = view
+                observedVideoCounters = counters
+            }
+            counters?.ensureUpdated()
+            val playingReady = p.isPlaying && p.playbackState == Player.STATE_READY && !pausePreparing
+            val eligible = view != null && counters != null && playingReady &&
+                p.currentTracks.isTypeSelected(C.TRACK_TYPE_VIDEO)
+            val recover = videoHealth.sample(now, videoHealthSession, eligible,
+                p.currentPosition, counters?.renderedOutputBufferCount?.toLong() ?: 0L)
+            if (videoHealth.stableProgressMs >= 15_000L) retriesP = 0
+            // An invisible selected-video surface cannot use advancing audio to
+            // erase failures. Genuinely audio-only streams earn a fresh budget
+            // after sustained READY position progress without needing a surface.
+            noteAudioPlaybackProgress(now, playingReady && isAudioOnly(p), p.currentPosition)
+            if (recover) {
+                val myGen = playbackGen
+                StabilityCore.note("video_stall_recover direct=$directLive temporary=${Timeshift.active} mime=${p.videoFormat?.sampleMimeType}")
+                // Disable the decoder before rebuilding the same source. Do not
+                // recreate the shared player or steal a recording's provider slot.
+                if (myGen == playbackGen && player === p && !backgroundSuspended && p.isPlaying) {
+                    val wasPlaying = p.playWhenReady
+                    p.stop()
+                    if (!recoverTemporaryLive()) {
+                        zapTo(currentIdxC.intValue, preserveDirect = true)
+                    } else p.playWhenReady = wasPlaying && !backgroundSuspended
+                }
+            }
+            if (videoHealthRunning) videoHealthHandler.postDelayed(this, 5_000L)
+        }
+    }
+
+    private fun startVideoHealthWatchdog() {
+        if (videoHealthRunning || backgroundSuspended || !liveMode) return
+        if (videoViews.isEmpty() && player?.let { isAudioOnly(it) } != true) return
+        videoHealthRunning = true
+        videoHealthHandler.postDelayed(videoHealthTick, 5_000L)
+    }
+
+    private fun stopVideoHealthWatchdog() {
+        videoHealthRunning = false
+        videoHealthHandler.removeCallbacks(videoHealthTick)
+        resetVideoObservation()
+    }
+
     /** Starts temporary storage only for an explicit Pause or recording request.
      * Stops direct playback before opening the writer: still one provider stream. */
     private fun beginTemporaryLive(keepPlaying: Boolean): Boolean {
@@ -2718,6 +2847,7 @@ object Playback {
         if (!liveMode || !ch.isLive) return false
         if (Timeshift.active) return true
         playbackGen++
+        videoHealthSession++
         val myGen = playbackGen
         pausePreparing = true
         pauseResumeRequested = keepPlaying
@@ -2775,6 +2905,8 @@ object Playback {
         val ch = queue.getOrNull(currentIdxC.intValue) ?: return false
         val pos = dvrAbsolutePositionMs()
         val offset = (pos * dvrBytesPerMs()).toLong().coerceIn(Timeshift.oldestVirtualByte(), Timeshift.newestVirtualByte())
+        // Pending retries belong to the old localhost source, not this reopen.
+        playbackGen++
         setGrowingDvrSource(p, ch, offset, pos, p.playWhenReady)
         return true
     }
@@ -2936,7 +3068,9 @@ object Playback {
                 playStateC.intValue = playbackState
                 if (playbackState == Player.STATE_BUFFERING) noteBufferingStarted()
                 if (playbackState == Player.STATE_READY) {
-                    retriesP = 0
+                    // READY can describe an advancing audio clock with a stuck
+                    // picture. Live retries reset only after actual video progress.
+                    if (!liveMode) retriesP = 0
                     streamDeadC.value = false
                     everReadyC.value = true
                     noteReadyForStall()
@@ -2948,19 +3082,31 @@ object Playback {
                     val myGen = playbackGen
                     android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                         if (myGen == playbackGen && liveMode && player === p && !backgroundSuspended) {
-                            if (!recoverTemporaryLive()) zapTo(currentIdxC.intValue, preserveDirect = directLive)
+                            if (!recoverTemporaryLive()) zapTo(currentIdxC.intValue, preserveDirect = true)
                         }
                     }, 700)
                 }
             }
 
             override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                resetVideoObservation()
                 val fps = p.videoFormat?.frameRate ?: 0f
                 if (fps > 0f) videoFpsC.floatValue = fps
             }
 
+            override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo,
+                                                 newPosition: Player.PositionInfo, reason: Int) {
+                resetVideoObservation()
+            }
+
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (isPlaying && liveMode && !backgroundSuspended) startVideoHealthWatchdog()
+                else stopVideoHealthWatchdog()
+            }
+
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                 if (backgroundSuspended) return
+                StabilityCore.note("playback_error code=${error.errorCode} live=$liveMode type=${error.cause?.javaClass?.simpleName}")
                 // ZAKO_V437_LIVE_EDGE_RECOVERY: Media3 documents this as the
                 // correct recovery when an HLS/live player falls behind the live window.
                 if (liveMode && error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) {
@@ -3016,7 +3162,7 @@ object Playback {
                             // provider playback so video ALWAYS works.
                             if (!recoverTemporaryLive()) {
                                 noteLiveFail()
-                                zapTo(currentIdxC.intValue, preserveDirect = directLive)
+                                zapTo(currentIdxC.intValue, preserveDirect = true)
                             }
                         } else {
                             p.prepare()
@@ -3114,7 +3260,7 @@ object Playback {
                                 stallRestarts <= 1 -> {
                                     stallRestarts = 2
                                     bufferingSince = 0L; lastBufMs = -1L
-                                    if (!recoverTemporaryLive()) zapTo(currentIdxC.intValue, preserveDirect = directLive)
+                                    if (!recoverTemporaryLive()) zapTo(currentIdxC.intValue, preserveDirect = true)
                                 }
                                 else -> streamDeadC.value = true
                             }
@@ -3378,6 +3524,8 @@ object Playback {
             // A new viewer-selected channel gets a clean DVR attempt. Failure
             // strikes from the previous channel must never carry over.
             liveFails = 0
+            retriesP = 0
+            videoHealthSession++
         }
         playbackGen++
         val p = player ?: return
@@ -3391,7 +3539,6 @@ object Playback {
         everReadyC.value = false
         videoFpsC.floatValue = 0f
         streamDeadC.value = false
-        retriesP = 0
         bufferingSince = 0L
         lastBufMs = -1L
         lastBytesSeen = -1L
@@ -3409,7 +3556,9 @@ object Playback {
         p.stop()
         p.clearMediaItems()
         val item = MediaItem.Builder()
-            .setUri(Uri.parse(tsUrl(ch.url)))
+            // Direct playback honors the supplied transport. A playlist URL is
+            // not proof that an equivalent raw .ts endpoint exists.
+            .setUri(Uri.parse(ch.url))
             .setMediaMetadata(MediaMetadata.Builder().setTitle(ch.name).build())
             .build()
         p.setMediaItem(item)
@@ -3453,6 +3602,7 @@ object Playback {
             // Movies / episodes / downloads / recordings: no periodic live-TV
             // supervision at all. Keep the Fire Stick focused on decode/render.
             liveMode = false
+            stopVideoHealthWatchdog()
             liveProviderReserved = false
             vodUaFallbackUsed = false
             stopGovernor()
@@ -3499,6 +3649,7 @@ object Playback {
         backgroundSuspended = true
         pauseResumeRequested = false
         stopGovernor()
+        stopVideoHealthWatchdog()
         val p = player ?: return
         p.pause()
         if (Recorder.activeName.value != null) {
@@ -3608,8 +3759,11 @@ object Playback {
     fun releaseAll() {
         liveProviderReserved = false
         playbackGen++
+        videoHealthSession++
         pausePreparing = false
         stopGovernor()
+        stopVideoHealthWatchdog()
+        videoViews.clear()
         Timeshift.stop()
         TimeshiftServer.stop()
         runCatching { player?.release() }
@@ -3708,13 +3862,23 @@ private fun VodInfoDialog(
 }
 
 @Composable
+private fun CatalogRefreshButton(section:String,refreshing:Boolean,onRefresh:()->Unit) {
+    TextButton(onClick=onRefresh,enabled=!refreshing,modifier=Modifier.tvFocus(RoundedCornerShape(10.dp))) {
+        Text(if(refreshing) "UPDATING…" else "UPDATE $section",color=Ink,fontWeight=FontWeight.Bold,fontSize=12.sp)
+    }
+}
+
+@Composable
 fun MoviesPane(
     source: Source?,
     prefs: SharedPreferences,
     data: AppData,
     selectedCat: String,
     onPlay: (Playable) -> Unit,
-    onLeftToRail: () -> Unit = {}
+    onLeftToRail: () -> Unit = {},
+    onRefresh: () -> Unit = {},
+    refreshing: Boolean = false,
+    refreshWarning: String? = null
 ) {
     var paneHasFocus by remember { mutableStateOf(false) }
     BackHandler(enabled = paneHasFocus) { onLeftToRail() }
@@ -3734,6 +3898,8 @@ fun MoviesPane(
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            CatalogRefreshButton("MOVIES",refreshing,onRefresh)
+            refreshWarning?.let {Text(it,color=Muted,fontSize=11.sp)}
             Text("No movies in this playlist", fontWeight = FontWeight.Bold, fontSize = 17.sp, color = Ink)
             Spacer(Modifier.height(8.dp))
             Text("Your provider hasn't included any movies on this login.", fontSize = 13.sp, color = Muted)
@@ -3779,9 +3945,13 @@ fun MoviesPane(
     }
 
     Column(Modifier.fillMaxSize().onFocusChanged { paneHasFocus = it.hasFocus }.focusGroup()) {
-        TextButton(onClick = onLeftToRail, modifier = Modifier.tvFocus(RoundedCornerShape(10.dp))) {
-            Text("← CATEGORIES", color = Accent, fontWeight = FontWeight.Bold)
+        Row(verticalAlignment=Alignment.CenterVertically) {
+            TextButton(onClick=onLeftToRail,modifier=Modifier.tvFocus(RoundedCornerShape(10.dp))) {
+                Text("← CATEGORIES",color=Accent,fontWeight=FontWeight.Bold)
+            }
+            CatalogRefreshButton("MOVIES",refreshing,onRefresh)
         }
+        refreshWarning?.let {Text(it,color=Muted,fontSize=11.sp,modifier=Modifier.padding(horizontal=14.dp))}
 
         Text(
             "OK opens details • choose PLAY or DOWNLOAD",
@@ -3834,7 +4004,10 @@ fun SeriesPane(
     data: AppData,
     selectedCat: String,
     onSeries: (SeriesItem) -> Unit,
-    onLeftToRail: () -> Unit = {}
+    onLeftToRail: () -> Unit = {},
+    onRefresh: () -> Unit = {},
+    refreshing: Boolean = false,
+    refreshWarning: String? = null
 ) {
     var paneHasFocus by remember { mutableStateOf(false) }
     BackHandler(enabled = paneHasFocus) { onLeftToRail() }
@@ -3845,6 +4018,8 @@ fun SeriesPane(
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            CatalogRefreshButton("SERIES",refreshing,onRefresh)
+            refreshWarning?.let {Text(it,color=Muted,fontSize=11.sp)}
             Text("No series here", fontWeight = FontWeight.Bold, fontSize = 17.sp, color = Ink)
             Spacer(Modifier.height(8.dp))
             Text(
@@ -3896,9 +4071,13 @@ fun SeriesPane(
     }
 
     Column(Modifier.fillMaxSize().onFocusChanged { paneHasFocus = it.hasFocus }.focusGroup()) {
-        TextButton(onClick = onLeftToRail, modifier = Modifier.tvFocus(RoundedCornerShape(10.dp))) {
-            Text("← CATEGORIES", color = Accent, fontWeight = FontWeight.Bold)
+        Row(verticalAlignment=Alignment.CenterVertically) {
+            TextButton(onClick=onLeftToRail,modifier=Modifier.tvFocus(RoundedCornerShape(10.dp))) {
+                Text("← CATEGORIES",color=Accent,fontWeight=FontWeight.Bold)
+            }
+            CatalogRefreshButton("SERIES",refreshing,onRefresh)
         }
+        refreshWarning?.let {Text(it,color=Muted,fontSize=11.sp,modifier=Modifier.padding(horizontal=14.dp))}
 
         Text(
             "OK opens a series • Hold OK on an episode to download",
@@ -4586,9 +4765,9 @@ private fun addRecent(prefs: SharedPreferences, q: String) {
 
 
 @Composable
-private fun SearchTvKeyboardField(value: String, onValueChange: (String) -> Unit, modifier: Modifier = Modifier) {
+private fun SearchTvKeyboardField(value: String, onValueChange: (String) -> Unit, modifier: Modifier = Modifier, onSubmitted:()->Unit={}) {
     TvTextField(value, onValueChange, "Search", modifier,
-        placeholder = "SEARCH movies, shows, actors, directors & live TV", searchStyle = true)
+        placeholder = "SEARCH movies, shows, actors, directors & live TV", searchStyle = true, onSubmitted=onSubmitted)
 }
 
 private val KeyboardOrange = Color(0xFFD66B14)
@@ -4605,6 +4784,7 @@ private fun RyzodKeyboardPanel(
     var col by remember { mutableIntStateOf(0) }
     val rows = remember(page, upper) { KeyboardLayout.rows(page, upper) }
     val keyFocus = remember { FocusRequester() }
+    var confirmPressed by remember {mutableStateOf(false)}
     fun press(key: String) {
         when (key) {
             "abc", "#$%", "áçé" -> {
@@ -4625,6 +4805,14 @@ private fun RyzodKeyboardPanel(
         .border(1.dp, Color(0xFFFFBA65), RoundedCornerShape(12.dp))
         .focusRequester(keyFocus)
         .onPreviewKeyEvent { ev ->
+            if(ev.key==Key.DirectionCenter || ev.key==Key.Enter) {
+                if(ev.type==KeyEventType.KeyDown) confirmPressed=true
+                else if(ev.type==KeyEventType.KeyUp && confirmPressed) {
+                    confirmPressed=false
+                    press(rows[row][col])
+                }
+                return@onPreviewKeyEvent true
+            }
             if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
             val delta = when (ev.key) {
                 Key.DirectionLeft -> -1 to 0; Key.DirectionRight -> 1 to 0
@@ -4689,6 +4877,10 @@ private data class SearchMatches(
     val guide: List<EpgStore.GuideHit>
 )
 
+// Each producer below assigns value after cancellable background work. The
+// bundled Compose lint detector does not resolve these K2 property assignments;
+// first-character, changed-query and remote-Done tests verify their emissions.
+@android.annotation.SuppressLint("ProduceStateDoesNotAssignValue")
 @Composable
 fun SearchTab(
     source: Source?,
@@ -4710,6 +4902,8 @@ fun SearchTab(
         )
     }
     var recents by remember { mutableStateOf(loadRecents(prefs)) }
+    val resultsFocus=remember {FocusRequester()}
+    var resultsFocusRequest by remember {mutableIntStateOf(0)}
     val indexes by androidx.compose.runtime.produceState<Triple<SearchIndex<LiveChannel>, SearchIndex<Movie>, SearchIndex<SeriesItem>>?>(null,data) {
         value=kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
             val task=kotlinx.coroutines.currentCoroutineContext()
@@ -4762,7 +4956,7 @@ fun SearchTab(
         ) {
             SearchTvKeyboardField(
                 value = query, onValueChange = onQuery,
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.weight(1f), onSubmitted={resultsFocusRequest++}
             )
             if (voiceAvailable) {
                 Spacer(Modifier.width(8.dp))
@@ -4906,7 +5100,15 @@ fun SearchTab(
             return
         }
 
+        LaunchedEffect(resultsFocusRequest) {
+            if(resultsFocusRequest>0) {
+                androidx.compose.runtime.withFrameNanos { }
+                androidx.compose.runtime.withFrameNanos { }
+                runCatching {resultsFocus.requestFocus()}
+            }
+        }
         LazyColumn(
+            modifier=Modifier.focusRequester(resultsFocus).focusGroup(),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
@@ -5837,7 +6039,7 @@ private fun Chip(label: String, active: Boolean, onClick: () -> Unit) {
 private fun TvTextField(
     value: String, onValueChange: (String) -> Unit, label: String,
     modifier: Modifier = Modifier, placeholder: String = "", password: Boolean = false,
-    keyboardType: KeyboardType = KeyboardType.Text, searchStyle: Boolean = false
+    keyboardType: KeyboardType = KeyboardType.Text, searchStyle: Boolean = false, onSubmitted:()->Unit={}
 ) {
     var editing by remember { mutableStateOf(false) }
     val fieldFocus = remember { FocusRequester() }
@@ -5854,8 +6056,8 @@ private fun TvTextField(
         }
         if(editing && searchStyle) RyzodKeyboardPanel(value,onValueChange,label,password,compact=true,
             onPrevious={editing=false;runCatching { fieldFocus.requestFocus() }},
-            onNext={editing=false;runCatching { fieldFocus.requestFocus() }},
-            onClose={editing=false;runCatching { fieldFocus.requestFocus() }})
+            onNext={editing=false;runCatching { fieldFocus.requestFocus() };onSubmitted()},
+            onClose={editing=false;runCatching { fieldFocus.requestFocus() };onSubmitted()})
     }
     if (editing && !searchStyle) {
         val manager=LocalFocusManager.current
@@ -6254,7 +6456,7 @@ fun PlayerScreen(
                     )
                 }
             }
-            pvRef?.player = null
+            pvRef?.let { Playback.detachVideoView(it); it.player = null }
             if (matchFps) (context as? android.app.Activity)?.let { clearFrameRateMatch(it) }
         }
     }
@@ -6561,6 +6763,7 @@ fun PlayerScreen(
             factory = { ctx ->
                 PlayerView(ctx).apply {
                     player = exo
+                    Playback.attachVideoView(this)
                     // Live TV has ONE controller: RYZOD's cable-box mini guide.
                     // Media3's stock controller was competing for OK/focus and
                     // trapping the remote on its gear/title row. VOD/recordings

@@ -62,11 +62,18 @@ class GuideInteractionTest {
             LivePane(prefs,0,AppData(emptyList(),channels,emptyList(),emptyList(),emptyList(),emptyList()),"all",{_,_->}) }
         ui.onNodeWithText("Program 0").performSemanticsAction(SemanticsActions.RequestFocus) {it()}
         ui.onNodeWithText("Program 0").assertIsFocused()
-        repeat(20) { i ->
+        repeat(24) { i ->
             ui.onNodeWithText("Program $i").performKeyInput {pressKey(Key.DirectionDown)}
             ui.waitUntil(5_000) {ui.onAllNodesWithText("Program ${i+1}").filter(isFocused()).fetchSemanticsNodes().isNotEmpty()}
         }
-        ui.onNodeWithText("Program 20").assertIsFocused()
+        ui.onNodeWithText("Program 24").performKeyInput {pressKey(Key.DirectionDown)}
+        ui.onNodeWithText("Program 24").assertIsFocused()
+        repeat(24) { i ->
+            ui.onNodeWithText("Program ${24-i}").performKeyInput {pressKey(Key.DirectionUp)}
+            ui.onNodeWithText("Program ${23-i}").assertIsFocused()
+        }
+        ui.onNodeWithText("Program 0").performKeyInput {pressKey(Key.DirectionUp)}
+        ui.onNodeWithText("Program 0").assertIsFocused()
     }
     @Test fun manualRecordingHasHalfHourChoicesAndSavesSelectedStop() {
         render(); ui.onNodeWithText("Family").performClick()

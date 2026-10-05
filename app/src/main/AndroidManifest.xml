@@ -23,7 +23,7 @@
         android:icon="@mipmap/ryzod_launcher_470"
         android:banner="@drawable/ryzod_tv_banner_467"
         android:label="@string/app_name"
-        android:roundIcon="@mipmap/ryzod_launcher_464"
+        android:roundIcon="@mipmap/ryzod_launcher_470"
         android:supportsRtl="true"
         android:usesCleartextTraffic="true"
         android:theme="@style/Theme.EasyIPTV">

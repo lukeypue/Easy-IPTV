@@ -24,8 +24,8 @@ android {
         applicationId = "com.easyiptv.player"
         minSdk = 26
         targetSdk = 34
-        versionCode = 95
-        versionName = "4.71"
+        versionCode = 96
+        versionName = "4.72"
     }
 
     signingConfigs {
@@ -92,9 +92,12 @@ dependencies {
 
     implementation("io.coil-kt:coil-compose:2.6.0")
 
-    val media3Version = "1.9.0"
+    val media3Version = "1.9.4"
     implementation("androidx.media3:media3-exoplayer:$media3Version")
     implementation("androidx.media3:media3-exoplayer-hls:$media3Version")
+    implementation("androidx.media3:media3-exoplayer-dash:$media3Version")
+    implementation("androidx.media3:media3-exoplayer-smoothstreaming:$media3Version")
+    implementation("androidx.media3:media3-exoplayer-rtsp:$media3Version")
     implementation("androidx.media3:media3-ui:$media3Version")
     // Prebuilt FFmpeg software audio decoder (AC-3, E-AC-3, DTS, MP2, TrueHD, etc.)
     // so channels with Dolby audio still have sound even if the phone lacks the codec.
