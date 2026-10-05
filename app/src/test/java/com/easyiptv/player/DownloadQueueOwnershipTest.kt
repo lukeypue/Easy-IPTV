@@ -19,6 +19,7 @@ import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import org.robolectric.android.controller.ServiceController
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28])
@@ -27,16 +28,42 @@ class DownloadQueueOwnershipTest {
     private val prefs get() = app.getSharedPreferences("easyiptv", Context.MODE_PRIVATE)
 
     @Before fun reset() {
+        resetIdleDispatch()
         Playback.releaseAll()
         Recorder.usesProviderConnection = false
         prefs.edit().clear().putInt("provider_streams", 1).commit()
-        DownloadService::class.java.getDeclaredField("activeId").apply { isAccessible = true }.setLong(null, 0L)
         while (shadowOf(app).nextStartedService != null) {}
     }
 
     @After fun cleanUp() {
-        DownloadService::class.java.getDeclaredField("activeId").apply { isAccessible = true }.setLong(null, 0L)
+        resetIdleDispatch()
         while (shadowOf(app).nextStartedService != null) {}
+    }
+
+    private fun resetIdleDispatch() {
+        val owner = DownloadService::class.java.getDeclaredField("activeOwner").apply { isAccessible = true }
+        val id = DownloadService::class.java.getDeclaredField("activeId").apply { isAccessible = true }
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        // A terminal row is published before its completion callback releases the
+        // writer. Never change its id during that interval: doing so prevents the
+        // real callback from releasing activeOwner and poisons the next test.
+        while (synchronized(DownloadService.dispatchLock) { owner.get(null) != null } && System.nanoTime() < deadline) {
+            Thread.sleep(10)
+        }
+        synchronized(DownloadService.dispatchLock) {
+            assertNull("Previous download writer must complete before resetting a test reservation", owner.get(null))
+            id.setLong(null, 0L)
+        }
+    }
+
+    private fun destroyAndAwait(service: ServiceController<DownloadService>) {
+        val writer = DownloadService::class.java.getDeclaredField("job").apply { isAccessible = true }
+            .get(service.get()) as? Job
+        service.destroy()
+        writer?.cancel()
+        runBlocking { withTimeout(5_000) { writer?.join() } }
+        // join can observe a completed job just before callbacks finish. The
+        // guarded reset separately waits/asserts that ownership was released.
     }
 
     private fun queued(id: Long, url: String = "https://example.invalid/movie.mp4"): DownloadStore.Item {
@@ -82,7 +109,7 @@ class DownloadQueueOwnershipTest {
                 assertEquals("A stale head must not replace the next movie's reservation", DownloadStore.STATE_RUNNING, DownloadStore.state(app, 22))
                 assertNull("The next movie must be dispatched only once", shadowOf(app).nextStartedService)
             } finally {
-                service.destroy()
+                destroyAndAwait(service)
                 DownloadStore.stopAndRemove(app, prefs, second)
             }
         }
@@ -105,7 +132,7 @@ class DownloadQueueOwnershipTest {
             assertEquals(DownloadStore.STATE_RUNNING, DownloadStore.state(app, 72))
             assertNull(shadowOf(app).nextStartedService)
         } finally {
-            service.destroy()
+            destroyAndAwait(service)
             DownloadStore.stopAndRemove(app, prefs, second)
         }
     }
@@ -135,7 +162,7 @@ class DownloadQueueOwnershipTest {
             finish.countDown()
             runBlocking { old.join() }
             scope.cancel()
-            service.destroy()
+            destroyAndAwait(service)
         }
     }
 
@@ -143,7 +170,7 @@ class DownloadQueueOwnershipTest {
         val old = Robolectric.buildService(DownloadService::class.java).create()
         // Simulate replacement ownership while the old service receives delayed destruction.
         DownloadService::class.java.getDeclaredField("activeId").apply { isAccessible = true }.setLong(null, 41L)
-        old.destroy()
+        destroyAndAwait(old)
         assertTrue("Old destruction must leave the replacement writer's provider slot intact", DownloadService.isActive(41))
     }
 
@@ -170,7 +197,7 @@ class DownloadQueueOwnershipTest {
                 assertEquals("Existing resume bytes must survive the rejected provider response", "PART", part.readText())
                 assertFalse("Corrupt output must never be published as downloaded", File(item.path).exists())
             } finally {
-                service.destroy()
+                destroyAndAwait(service)
                 response.join(1000)
             }
         }
@@ -198,7 +225,7 @@ class DownloadQueueOwnershipTest {
                 assertEquals("PARTNEW", File(item.path).readText())
                 assertFalse(File(item.path + ".part").exists())
             } finally {
-                service.destroy()
+                destroyAndAwait(service)
                 response.join(1000)
             }
         }

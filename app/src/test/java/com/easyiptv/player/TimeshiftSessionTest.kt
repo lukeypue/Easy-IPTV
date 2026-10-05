@@ -31,6 +31,17 @@ class TimeshiftSessionTest {
         assertTrue(message, condition())
     }
 
+    private fun stopAndDrain() {
+        Timeshift.stop()
+        // Production Stop is deliberately nonblocking. Wait for the retired
+        // writer, then its cleanup, before the test removes the same directory.
+        for (name in listOf("ingest", "cleanup")) {
+            val executor=Timeshift::class.java.getDeclaredField(name).apply {isAccessible=true}
+                .get(null) as java.util.concurrent.ExecutorService
+            executor.submit { }.get(5,TimeUnit.SECONDS)
+        }
+    }
+
     private fun storageContext(dir: File, probe: (() -> Unit)? = null): Context {
         val app = ApplicationProvider.getApplicationContext<Context>()
         ShadowStatFs.registerStats(dir.absolutePath, 2_000_000, 1_500_000, 1_500_000)
@@ -78,7 +89,7 @@ class TimeshiftSessionTest {
                 }
                 assertTrue(Timeshift.bytesWritten > 0)
             } finally {
-                Timeshift.stop()
+                stopAndDrain()
             }
         }
         dir.deleteRecursively()
@@ -130,7 +141,7 @@ class TimeshiftSessionTest {
             } finally {
                 releaseProbe.countDown()
                 keepRecording.set(false)
-                Timeshift.stop()
+                stopAndDrain()
             }
         }
         dir.deleteRecursively()
