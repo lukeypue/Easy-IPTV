@@ -31,7 +31,7 @@ fun main() {
     expect(KeyboardLayout.move(normal, 1, 9, 1, 0) == (1 to 0), "Right wrap")
     expect(KeyboardLayout.move(normal, 1, 0, -1, 0) == (1 to 9), "Left wrap")
     expect(KeyboardLayout.move(normal, 0, 2, 0, -1) == (5 to 2), "Up wrap")
-    expect(KeyboardLayout.move(normal, 2, 9, 0, 1) == (3 to 8), "Short-row clamp")
+    expect(KeyboardLayout.move(normal, 2, 9, 0, 1) == (3 to 9), "Ten-column rows")
     var value = ""
     for (key in listOf("2", "0", "/", "2", "0")) value = KeyboardLayout.edit(value, key)
     expect(value == "20/20", "20/20 entry")

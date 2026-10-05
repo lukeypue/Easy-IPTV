@@ -58,6 +58,55 @@ class DvrOwnershipRegressionTest {
 
     private fun prefs() = app.getSharedPreferences("easyiptv", Context.MODE_PRIVATE).apply {
         edit().clear().putBoolean("simple_mode", false).putInt("provider_streams", 1).commit()
+        // Direct recording now checks free space before opening any provider socket.
+        ShadowStatFs.registerStats(Recorder.recordingsDir(app).absolutePath, 2_000_000, 1_500_000, 1_500_000)
+    }
+
+    @Test fun backgroundScheduledRecordingCannotRestartTheHiddenPlayer() {
+        val dir = Files.createTempDirectory("ryzod-silent-record").toFile()
+        val context = storageContext(dir)
+        val service = Robolectric.buildService(RecordingService::class.java).create()
+        ReviewProvider().use { provider ->
+            try {
+                val p = Playback.open(context, prefs(), listOf(Playable("watch", provider.url("watch"), true)), 0, null, false)
+                Playback.suspendForBackground()
+                service.get().onStartCommand(Intent(app, RecordingService::class.java).apply {
+                    action = RecordingService.ACTION_START
+                    putExtra("url", provider.url("watch"))
+                    putExtra("name", "silent recording")
+                    putExtra("stopAt", System.currentTimeMillis()+60_000)
+                }, 0, 1)
+                shadowOf(Looper.getMainLooper()).idle()
+                assertFalse("A scheduled recording must not restart audio over another app", p.playWhenReady)
+            } finally {
+                service.get().onStartCommand(Intent(app, RecordingService::class.java).apply { action=RecordingService.ACTION_STOP },0,2)
+                service.destroy(); Playback.releaseAll(); dir.deleteRecursively()
+            }
+        }
+    }
+
+    @Test fun foregroundReturnDoesNotStealTheOnlyStreamFromARecording() {
+        val dir=Files.createTempDirectory("ryzod-foreground-budget").toFile()
+        val context=storageContext(dir)
+        val service=Robolectric.buildService(RecordingService::class.java).create()
+        ReviewProvider().use { provider ->
+            try {
+                val p=Playback.open(context,prefs(),listOf(Playable("watch",provider.url("watch"),true)),0,null,false)
+                Playback.suspendForBackground()
+                service.get().onStartCommand(Intent(app,RecordingService::class.java).apply {
+                    action=RecordingService.ACTION_START;putExtra("url",provider.url("record"));putExtra("name","scheduled")
+                    putExtra("stopAt",System.currentTimeMillis()+60_000)
+                },0,1)
+                waitFor("Recorder did not reserve stream") {Recorder.usesProviderConnection}
+                Playback.resumeFromBackground()
+                assertFalse("Returning to the guide must not open a second stream",p.playWhenReady)
+                assertEquals(0,ProviderStreams.playbackSlots())
+                assertTrue(Recorder.usesProviderConnection)
+            } finally {
+                service.get().onStartCommand(Intent().setAction(RecordingService.ACTION_STOP),0,2)
+                service.destroy();Playback.releaseAll();dir.deleteRecursively()
+            }
+        }
     }
 
     @Test fun guideRecordingOfWatchedChannelPreparesOneSharedWriter() {

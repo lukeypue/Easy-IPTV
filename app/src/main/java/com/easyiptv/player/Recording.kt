@@ -20,6 +20,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.cancel
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
@@ -46,6 +48,9 @@ object Recorder {
         internal set
     @Volatile var activeUrl: String? = null
         internal set
+
+    @Volatile internal var activeScheduleId: Long = -1L
+    @Volatile internal var activeSessionId: String? = null
 
     fun recordingsDir(context: Context): File {
         val prefs = context.getSharedPreferences("easyiptv", Context.MODE_PRIVATE)
@@ -113,6 +118,11 @@ class RecordingService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var job: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private class NetworkOwner { @Volatile var call: okhttp3.Call? = null }
+    private var networkOwner: NetworkOwner? = null
+    private var latestStartId=0
+    private var session: RecordingRecovery.Session? = null
+    @Volatile private var stopRequested = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -141,40 +151,68 @@ class RecordingService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_START -> {
-                val url = intent.getStringExtra("url") ?: return START_NOT_STICKY.also { stopSelf() }
-                val prefs = getSharedPreferences("easyiptv", Context.MODE_PRIVATE)
-                val name = intent.getStringExtra("name") ?: "channel"
-                val stopAt = if (intent.hasExtra("stopAt")) intent.getLongExtra("stopAt", 0L) else null
-                // If this is the exact channel already playing through DVR Live,
-                // share that one stream even for scheduled/manual calls that did
-                // not explicitly know to request a tee.
-                val sameWatchedChannel = Playback.currentProviderUrl()?.let { it == url } == true
-                val tee = intent.getBooleanExtra("tee", false) ||
-                    (sameWatchedChannel && (Playback.canTeeRecording() || Playback.prepareCurrentForRecording()))
-
-                // A tee costs zero extra provider streams. A direct recording
-                // costs one. Only cancel a download when the user's configured
-                // 1/2/3-stream budget would otherwise be exceeded.
-                if (!tee) {
-                    val max = ProviderStreams.max(prefs)
-                    val playback = ProviderStreams.playbackSlots()
-                    val download = ProviderStreams.downloadSlots(this, prefs)
-                    if (playback + download + 1 > max && download > 0) {
-                        DownloadStore.cancelInFlight(this, prefs)
-                    }
-                }
-                startForeground(NOTIF_ID, notification(name))
-                beginRecording(url, name, stopAt, tee)
+        latestStartId=startId
+        val prefs=getSharedPreferences("easyiptv",Context.MODE_PRIVATE)
+        if(intent?.action==ACTION_STOP) {
+            stopRequested=true
+            (session ?: RecordingRecovery.load(prefs))?.let { saved ->
+                RecordingRecovery.clear(prefs,saved.id)
+                Recorder.activeScheduleId=-1
+                if(saved.scheduleId>=0) ScheduleStore.cancel(this,prefs,saved.scheduleId)
             }
-            ACTION_STOP -> {
-                job?.cancel()
-                job = null
+            networkOwner?.call?.cancel(); job?.cancel()
+            if(job==null) stopSelf()
+            return START_NOT_STICKY
+        }
+        val saved=RecordingRecovery.load(prefs)
+        val request=intent ?: saved?.let { RecordingRecovery.intent(this,it) }
+        if(request?.action!=ACTION_START) return START_NOT_STICKY.also { stopSelf() }
+        val url=request.getStringExtra("url") ?: return START_NOT_STICKY.also { stopSelf() }
+        val name=request.getStringExtra("name") ?: "channel"
+        val scheduleId=request.getLongExtra("schedId",-1L)
+        val scheduled=if(scheduleId>=0) ScheduleStore.load(prefs).firstOrNull {
+            it.id==scheduleId && it.url==url && it.endMs>System.currentTimeMillis() && it.startMs<=System.currentTimeMillis()+1_000
+        } else null
+        if(scheduleId>=0 && scheduled==null) {
+            if(job==null || job?.isCompleted==true) stopSelf(startId)
+            return START_NOT_STICKY
+        }
+        val end=scheduled?.endMs ?: request.getLongExtra("stopAt",saved?.takeIf { it.url==url && it.name==name }?.end ?: (System.currentTimeMillis()+6*60*60*1000L))
+        if(end<=System.currentTimeMillis()) {
+            if(job?.isActive!=true) {
+                saved?.let { if(it.end<=System.currentTimeMillis()) RecordingRecovery.clear(prefs,it.id) }
                 stopSelf()
             }
+            return START_NOT_STICKY
         }
-        return START_NOT_STICKY
+        if(job!=null && job?.isCompleted!=true) {
+            // Cancellation is asynchronous: the old writer owns cleanup until
+            // COMPLETED, not merely until isActive becomes false.
+            if(job?.isActive!=true) Recorder.lastStatus.value="Stopping the previous recording. Try again in a moment."
+            // Rearming or returning to the app cannot replace/truncate its writer.
+            if(scheduleId>=0 && scheduleId!=session?.scheduleId) ScheduleStore.retry(this,prefs,scheduleId)
+            return START_REDELIVER_INTENT
+        }
+        // Ignore a recovery intent whose persisted session was explicitly stopped.
+        if(request.hasExtra("sessionId") && request.getStringExtra("sessionId")!=saved?.id) {
+            stopSelf(); return START_NOT_STICKY
+        }
+        val resume=saved?.takeIf { it.url==url && it.name==name && it.end>System.currentTimeMillis() && it.scheduleId==scheduleId }
+        val safe=name.replace(Regex("[^A-Za-z0-9 _-]"),"").trim().replace(' ','_').take(40).ifBlank { "channel" }
+        val id=resume?.id ?: java.util.UUID.randomUUID().toString()
+        val destination=resume?.path ?: File(Recorder.recordingsDir(this),"REC_${safe}_${SimpleDateFormat("MMM-d_h-mm-ss_a",Locale.US).format(Date())}_${id.take(6)}.ts").absolutePath
+        val next=resume ?: RecordingRecovery.Session(id,url,name,end,scheduleId,destination)
+        session=next;stopRequested=false
+        RecordingRecovery.save(prefs,next)
+        val sameWatchedChannel=Playback.currentProviderUrl()==url
+        val tee=(request.getBooleanExtra("tee",false) && Playback.canTeeRecording()) ||
+            (sameWatchedChannel && (Playback.canTeeRecording() || Playback.prepareCurrentForRecording()))
+        if(!tee && ProviderStreams.playbackSlots()+ProviderStreams.downloadSlots(this,prefs)+1>ProviderStreams.max(prefs)) {
+            DownloadStore.cancelInFlight(this,prefs)
+        }
+        startForeground(NOTIF_ID,notification(name))
+        beginRecording(url,name,next.end,tee)
+        return START_REDELIVER_INTENT
     }
 
     /** Copy the live DVR (timeshift) file into the recording as it grows —
@@ -233,7 +271,11 @@ class RecordingService : Service() {
     }
 
     private fun beginRecording(url: String, name: String, stopAt: Long?, tee: Boolean) {
-        job?.cancel()
+        val recordingSession=session ?: return
+        val owner=NetworkOwner()
+        networkOwner=owner
+        Recorder.activeSessionId=recordingSession.id
+        Recorder.activeScheduleId=recordingSession.scheduleId
         Recorder.activeName.value = name
         Recorder.activeUrl = url
         Recorder.usesProviderConnection = false
@@ -246,13 +288,15 @@ class RecordingService : Service() {
         val dir = Recorder.recordingsDir(this)
         job = scope.launch {
             var currentFile: File? = null
+            val deadline=launch {
+                while(isActive && System.currentTimeMillis()<recordingSession.end) delay(minOf(500L,(recordingSession.end-System.currentTimeMillis()).coerceAtLeast(1L)))
+                if(isActive) owner.call?.cancel()
+            }
             try {
-                val stamp = SimpleDateFormat("MMM-d_h-mm-ss_a", Locale.US).format(Date())
-                val safe = name.replace(Regex("[^A-Za-z0-9 _-]"), "").trim()
-                    .replace(' ', '_').take(40).ifBlank { "channel" }
-                val f = File(dir, "REC_${safe}_$stamp.ts")
-                currentFile = f
-                FileOutputStream(f).use { out ->
+                val f=File(recordingSession.path)
+                f.parentFile?.mkdirs()
+                currentFile=f
+                FileOutputStream(f,true).use { out ->
                     var needNetwork = !tee
                     if (tee) {
                         // SAME-CHANNEL RECORDING: copy from the live DVR file,
@@ -310,37 +354,17 @@ class RecordingService : Service() {
                         if (!isActive || (stopAt != null && System.currentTimeMillis() >= stopAt)) return@launch
                         // Direct connection (different-channel/scheduled recording,
                         // or a tee that genuinely lost its source).
-                        // ZAKO_V452_RECORD_RETRY
-                        var lastNetworkError: Exception? = null
-                        var connected = false
-                        for (attempt in 0 until 5) {
-                            if (!isActive || (stopAt != null && System.currentTimeMillis() >= stopAt)) break
-                            try {
-                                val req=Request.Builder().url(url).header("User-Agent",Net.UA).build()
-                                Net.streamClient.newCall(req).execute().use { resp ->
-                                    if(!resp.isSuccessful) throw java.io.IOException("HTTP ${resp.code}")
-                                    val body=resp.body ?: throw java.io.IOException("Empty stream")
-                                    connected=true
-                                    body.byteStream().use { inp ->
-                                        val buf=ByteArray(64*1024); var sinceCheck=0L
-                                        while(isActive && (stopAt==null || System.currentTimeMillis()<stopAt)) {
-                                            val n=inp.read(buf); if(n<0) break; out.write(buf,0,n); sinceCheck+=n
-                                            if(sinceCheck>32_000_000){sinceCheck=0
-                                                val free=runCatching{android.os.StatFs(dir.absolutePath).availableBytes}.getOrDefault(Long.MAX_VALUE)
-                                                if(free<2_000_000_000L) break
-                                            }
-                                        }
-                                    }
-                                }
-                                break
-                            } catch(e:Exception) {
-                                lastNetworkError=e
-                                if(attempt<4) Thread.sleep(1500L*(attempt+1))
-                            }
-                        }
-                        if(!connected) throw(lastNetworkError ?: java.io.IOException("Provider stream did not start"))
+                        RecordingTransfer(Net.streamClient).copy(url,out,recordingSession.end,
+                            active={isActive},
+                            space={runCatching { android.os.StatFs(dir.absolutePath).availableBytes>=2_000_000_000L }.getOrDefault(true)},
+                            onCall={owner.call=it;if(!isActive || System.currentTimeMillis()>=recordingSession.end) it?.cancel()},
+                            onRetry={Recorder.lastStatus.value="Connection lost — retrying until the recording stop time."},
+                            onConnected={Recorder.lastStatus.value="Recording: $name"})
+
                     }
                 }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
             } catch (e: Exception) {
                 // Stream closed or network error — keep any non-empty partial
                 // recording because it may still be playable, but tell the user.
@@ -352,6 +376,16 @@ class RecordingService : Service() {
                     "Recording failed — no video data was received. ${e.message ?: "Check the channel and try again."}"
                 }
             } finally {
+                deadline.cancel()
+                owner.call?.cancel();owner.call=null
+                if(networkOwner===owner) networkOwner=null
+                val terminal=isActive || stopRequested || System.currentTimeMillis()>=recordingSession.end
+                if(terminal) {
+                    val prefs=getSharedPreferences("easyiptv",Context.MODE_PRIVATE)
+                    RecordingRecovery.clear(prefs,recordingSession.id)
+                    if(Recorder.activeSessionId==recordingSession.id) Recorder.activeScheduleId=-1
+                    if(recordingSession.scheduleId>=0) ScheduleStore.cancel(this@RecordingService,prefs,recordingSession.scheduleId)
+                }
                 // Never leave a fake 0 MB recording behind after a 403, dead
                 // socket, or failed storage open. This was confusing in v4.17.
                 currentFile?.let { f ->
@@ -366,21 +400,30 @@ class RecordingService : Service() {
                         Recorder.lastStatus.value = "Saved recording: ${String.format(Locale.US, "%.1f", mb)} MB"
                     }
                 }
-                Recorder.activeName.value = null
-                Recorder.activeUrl = null
-                Recorder.usesProviderConnection = false
-                stopSelf()
+                if(Recorder.activeSessionId==recordingSession.id) {
+                    Recorder.activeName.value = null
+                    Recorder.activeUrl = null
+                    Recorder.activeSessionId=null
+                    Recorder.activeScheduleId=-1
+                    Recorder.usesProviderConnection = false
+                }
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    Playback.recordingFinished(url)
+                    if(session?.id==recordingSession.id) stopSelf(latestStartId)
+                }
             }
         }
     }
 
     override fun onDestroy() {
-        job?.cancel()
-        job = null
-        Recorder.activeName.value = null
-        Recorder.activeUrl = null
-        Recorder.usesProviderConnection = false
-        runCatching { wakeLock?.let { if (it.isHeld) it.release() } }
+        networkOwner?.call?.cancel()
+        scope.cancel()
+        job=null
+        if(Recorder.activeSessionId==session?.id) {
+            Recorder.activeName.value=null;Recorder.activeUrl=null;Recorder.activeSessionId=null
+            Recorder.activeScheduleId=-1;Recorder.usesProviderConnection=false
+        }
+        runCatching { wakeLock?.let { if(it.isHeld) it.release() } }
         super.onDestroy()
     }
 }
@@ -438,7 +481,7 @@ object ScheduleStore {
         val i = Intent(context, AlarmReceiver::class.java).apply {
             putExtra("url", s.url)
             putExtra("name", "${s.title} (${s.channelName})")
-            putExtra("stopAt", s.endMs + 2 * 60 * 1000)   // small pad after the show
+            putExtra("stopAt", s.endMs)   // Honor the chosen stop time exactly.
             putExtra("schedId", s.id)
         }
         return PendingIntent.getBroadcast(
@@ -448,6 +491,7 @@ object ScheduleStore {
     }
 
     /** Schedule a recording. Returns a message to show the user. */
+    @Synchronized
     fun add(context: Context, prefs: SharedPreferences, title: String, channelName: String, url: String, startMs: Long, endMs: Long): String {
         val s = Sched(System.currentTimeMillis(), title, channelName, url, startMs, endMs)
         save(prefs, load(prefs) + s)
@@ -458,7 +502,7 @@ object ScheduleStore {
         // Future recording must never crash when Android exact-alarm access is off.
         val result = RecordingScheduler.schedule(
             context = context,
-            triggerAtMs = startMs - 60 * 1000,
+            triggerAtMs = startMs,
             operation = pending(context, s),
             showIntent = show
         )
@@ -468,7 +512,7 @@ object ScheduleStore {
                 "Scheduled: " + title + " on " + channelName + ", " + fmt.format(Date(startMs)) + ". The device must be powered on at that time."
             ScheduleResult.PermissionRequired -> {
                 RecordingScheduler.requestExactAlarmAccess(context)
-                "Zako saved this recording. Allow Alarms & reminders, then return to Zako so it can schedule exactly."
+                "RYZOD saved this recording. Allow Alarms & reminders, then return to RYZOD so it can schedule exactly."
             }
             is ScheduleResult.Failed ->
                 "Recording saved, but Android could not schedule it yet: ${result.message}"
@@ -488,14 +532,22 @@ object ScheduleStore {
 
     private fun arm(context: Context, s: Sched): ScheduleResult {
         val show = PendingIntent.getActivity(context, 0, Intent(context, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
-        return RecordingScheduler.schedule(context, s.startMs - 60 * 1000, pending(context, s), show)
+        return RecordingScheduler.schedule(context, maxOf(System.currentTimeMillis()+1_000,s.startMs), pending(context, s), show)
     }
 
     fun rearmAll(context: Context, prefs: SharedPreferences) {
         val now = System.currentTimeMillis()
-        load(prefs).filter { it.endMs > now }.forEach { arm(context, it) }
+        load(prefs).filter { it.endMs > now && it.id!=Recorder.activeScheduleId }.forEach { arm(context, it) }
+        RecordingRecovery.rearm(context,prefs)
     }
 
+    fun retry(context:Context,prefs:SharedPreferences,id:Long) {
+        val s=load(prefs).firstOrNull { it.id==id && it.endMs>System.currentTimeMillis()+30_000 } ?: return
+        val show=PendingIntent.getActivity(context,0,Intent(context,MainActivity::class.java),PendingIntent.FLAG_IMMUTABLE)
+        RecordingScheduler.schedule(context,System.currentTimeMillis()+30_000,pending(context,s),show)
+    }
+
+    @Synchronized
     fun edit(context: Context, prefs: SharedPreferences, id: Long, title: String, channelName: String, url: String, startMs: Long, endMs: Long): String {
         validateManual(startMs, endMs)?.let { return it }
         val old = load(prefs).firstOrNull { it.id == id } ?: return "Recording schedule was not found."
@@ -507,41 +559,48 @@ object ScheduleStore {
             ScheduleResult.Scheduled -> "Updated recording: TITLE".replace("TITLE", replacement.title)
             ScheduleResult.PermissionRequired -> {
                 RecordingScheduler.requestExactAlarmAccess(context)
-                "Recording updated. Allow Alarms & reminders so Zako can start it exactly."
+                "Recording updated. Allow Alarms & reminders so RYZOD can start it exactly."
             }
             is ScheduleResult.Failed -> "Recording updated, but Android could not arm it yet: ERROR".replace("ERROR", result.message)
         }
     }
 
+    @Synchronized
     fun cancel(context: Context, prefs: SharedPreferences, id: Long) {
+        RecordingRecovery.load(prefs)?.takeIf { it.scheduleId==id }?.let { RecordingRecovery.clear(prefs,it.id) }
         val list = load(prefs)
         val s = list.firstOrNull { it.id == id } ?: return
         val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         am.cancel(pending(context, s))
         save(prefs, list.filterNot { it.id == id })
+        if(Recorder.activeScheduleId==id) Recorder.stop(context)
     }
 
-    /** Drop schedules whose start time is long past. Call at app start. */
+    /** Drop schedules only after their stop time. Call at app start. */
+    @Synchronized
     fun cleanup(prefs: SharedPreferences) {
         val now = System.currentTimeMillis()
-        save(prefs, load(prefs).filter { it.startMs > now - 5 * 60 * 1000 })
+        save(prefs, load(prefs).filter { it.endMs > now })
     }
 }
 
 class AlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        val url = intent.getStringExtra("url") ?: return
-        val name = intent.getStringExtra("name") ?: "Scheduled recording"
-        val stopAt = intent.getLongExtra("stopAt", 0L)
-        val schedId = intent.getLongExtra("schedId", -1L)
-        val prefs = context.getSharedPreferences("easyiptv", Context.MODE_PRIVATE)
-        if (schedId >= 0) ScheduleStore.cancel(context, prefs, schedId)
-        val i = Intent(context, RecordingService::class.java).apply {
-            action = RecordingService.ACTION_START
-            putExtra("url", url)
-            putExtra("name", name)
-            if (stopAt > 0) putExtra("stopAt", stopAt)
+        val prefs=context.getSharedPreferences("easyiptv",Context.MODE_PRIVATE)
+        val request=if(intent.action==RecordingRecovery.ACTION) {
+            val saved=RecordingRecovery.load(prefs) ?: return
+            if(saved.end<=System.currentTimeMillis()) {RecordingRecovery.clear(prefs,saved.id);return}
+            RecordingRecovery.intent(context,saved)
+        } else {
+            val id=intent.getLongExtra("schedId",-1L)
+            val schedule=ScheduleStore.load(prefs).firstOrNull { it.id==id } ?: return
+            if(schedule.endMs<=System.currentTimeMillis()) {ScheduleStore.cancel(context,prefs,id);return}
+            Intent(context,RecordingService::class.java).setAction(RecordingService.ACTION_START)
+                .putExtra("url",schedule.url).putExtra("name","${schedule.title} (${schedule.channelName})")
+                .putExtra("stopAt",schedule.endMs).putExtra("schedId",id)
         }
-        ContextCompat.startForegroundService(context, i)
+        try { ContextCompat.startForegroundService(context,request) }
+        catch(_:IllegalStateException) { Recorder.lastStatus.value="Recording is saved; open RYZOD to allow it to resume." }
+        catch(_:SecurityException) { Recorder.lastStatus.value="Recording is saved; check recording permissions in RYZOD." }
     }
 }

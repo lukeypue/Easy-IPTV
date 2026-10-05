@@ -811,11 +811,19 @@ object EpgStore {
 
     data class GuideHit(val channelXmlId: String, val channelName: String, val entry: EpgEntry)
 
+    internal fun searchEntries(): List<GuideHit> {
+        val channels=byChannel
+        val names=idToName
+        val now=System.currentTimeMillis()
+        return channels.flatMap { (id,entries) -> entries.filter { it.endMs>now }.map { GuideHit(id,names[id]?:id,it) } }
+            .sortedBy { it.entry.startMs }
+    }
+
     /** Search every channel's schedule for upcoming shows matching the text. */
     fun search(q: String, limit: Int = 40): List<GuideHit> {
         val query = q.trim()
         val titleQuery = TitleQuery(query)
-        if (query.length < 2 || byChannel.isEmpty()) return emptyList()
+        if (query.isEmpty() || byChannel.isEmpty()) return emptyList()
         val now = System.currentTimeMillis()
         val out = ArrayList<Pair<Int, GuideHit>>()
         for ((cid, list) in byChannel) {

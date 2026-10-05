@@ -102,6 +102,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
@@ -476,6 +478,7 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         Playback.resumeFromBackground()
+        ScheduleStore.rearmAll(this,getSharedPreferences("easyiptv",MODE_PRIVATE))
     }
 
     override fun onStop() {
@@ -1578,7 +1581,8 @@ fun LivePane(
     val favKey = "fav_live_$activeIdx"
     var favs by remember(activeIdx) { mutableStateOf(prefs.getStringSet(favKey, emptySet())?.toSet() ?: emptySet()) }
     var expandedId by remember { mutableStateOf<String?>(null) }
-    var manualDayOffset by remember { mutableIntStateOf(0) }
+    var manualListChannel by remember { mutableStateOf<LiveChannel?>(null) }
+    manualListChannel?.let { ch -> ManualRecordingDialog(prefs,ch,onClose={manualListChannel=null}) }
     // ZAKO_V431_LIVE_INFO
     var liveInfo by remember { mutableStateOf<Pair<LiveChannel, EpgEntry?>?>(null) }
     var showGridGuide by remember { mutableStateOf(true) }
@@ -1818,31 +1822,7 @@ fun LivePane(
                         if (expandedId == ch.id) {
                             Spacer(Modifier.height(6.dp))
                             val dayFmt = remember { SimpleDateFormat("EEE h:mm a", Locale.getDefault()) }
-                            // ZAKO_V452_SEVEN_DAY_TIMER
-                            Text(if(schedule.isEmpty()) "No program information from provider • Manual timer available"
-                                else "Manual timer • choose any day/time up to 7 days",
-                                color=ElectricCyan,fontSize=11.sp,fontWeight=FontWeight.Bold)
-                            LazyRow(horizontalArrangement=Arrangement.spacedBy(5.dp)) {
-                                items(7) { day ->
-                                    val cal=java.util.Calendar.getInstance().apply{add(java.util.Calendar.DAY_OF_YEAR,day)}
-                                    val label=SimpleDateFormat(if(day==0)"'Today'" else "EEE M/d",Locale.getDefault()).format(cal.time)
-                                    Chip(label,manualDayOffset==day){manualDayOffset=day}
-                                }
-                            }
-                            Spacer(Modifier.height(4.dp))
-                            val chosen=java.util.Calendar.getInstance().apply{
-                                add(java.util.Calendar.DAY_OF_YEAR,manualDayOffset);set(java.util.Calendar.MINUTE,0);
-                                set(java.util.Calendar.SECOND,0);set(java.util.Calendar.MILLISECOND,0)
-                            }
-                            LazyRow(horizontalArrangement=Arrangement.spacedBy(5.dp)) {
-                                items(24) { hour ->
-                                    val startMs=(chosen.clone() as java.util.Calendar).apply{set(java.util.Calendar.HOUR_OF_DAY,hour)}.timeInMillis
-                                    val endMs=startMs+60L*60L*1000L
-                                    if(endMs>now) Chip(SimpleDateFormat("h a",Locale.getDefault()).format(Date(startMs)),false) {
-                                        toast(context,ScheduleStore.add(context,prefs,"Manual Recording",ch.name,ch.url,startMs,endMs))
-                                    }
-                                }
-                            }
+                            Chip("Manual timer • up to 7 days",false) { manualListChannel=ch }
                             schedule.take(30).forEach { e ->
                                 val isNow = now in e.startMs until e.endMs
                                 Row(
@@ -1924,10 +1904,6 @@ private fun LiveGridGuide(
         }
     }
     var manualChannel by remember { mutableStateOf<LiveChannel?>(null) }
-    var manualDay by remember { mutableIntStateOf(0) }
-    var manualHour by remember { mutableIntStateOf(java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)) }
-    var manualMinute by remember { mutableIntStateOf((java.util.Calendar.getInstance().get(java.util.Calendar.MINUTE)/5)*5) }
-    var confirmManual by remember { mutableStateOf<Triple<LiveChannel,Long,Long>?>(null) }
     BackHandler { onClose() }
 
     val guideRevision = EpgStore.revision.intValue
@@ -1939,15 +1915,35 @@ private fun LiveGridGuide(
         }
     }
     val halfHour = 30L * 60L * 1000L
-    val base = now - (now % halfHour)
+    val base = remember { now }
     val windowStart = base + page * 4L * halfHour
+
+    val firstCells = remember(channels) { channels.map { FocusRequester() } }
+    val lastCells = remember(channels) { channels.map { FocusRequester() } }
+    val channelCells = remember(channels) { channels.map { FocusRequester() } }
+    var pendingFocus by remember { mutableStateOf<Pair<Int,Boolean>?>(null) }
+    var focusRequest by remember { mutableIntStateOf(0) }
+    fun moveTo(row: Int, last: Boolean=false, afterPageChange:Boolean=false) {
+        if(!afterPageChange && guideListState.layoutInfo.visibleItemsInfo.any { it.index==row }) {
+            if(runCatching { (if(last) lastCells[row] else firstCells[row]).requestFocus() }.isSuccess) return
+        }
+        pendingFocus=row to last;focusRequest++
+    }
+    LaunchedEffect(focusRequest) {
+        val target=pendingFocus ?: return@LaunchedEffect
+        if(guideListState.layoutInfo.visibleItemsInfo.none { it.index==target.first }) guideListState.scrollToItem(target.first)
+        androidx.compose.runtime.withFrameNanos { }
+        androidx.compose.runtime.withFrameNanos { }
+        runCatching { (if(target.second) lastCells[target.first] else firstCells[target.first]).requestFocus() }
+        pendingFocus=null
+    }
 
     Column(Modifier.fillMaxSize()) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 3.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("CHANNEL", color = Ink, fontSize = 10.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(142.dp))
+            Text(SimpleDateFormat("EEE M/d",Locale.getDefault()).format(Date(windowStart)), color = Ink, fontSize = 10.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(142.dp))
             repeat(4) { slot ->
                 Text(
                     fmt.format(Date(windowStart + slot * halfHour)),
@@ -1958,20 +1954,6 @@ private fun LiveGridGuide(
         }
         // RYZOD_V459_GUIDE_SEPARATORS
         Box(Modifier.fillMaxWidth().height(1.dp).background(Color.White.copy(alpha=.55f)))
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            TextButton(modifier = Modifier.tvFocus(RoundedCornerShape(14.dp)), onClick = { page = (page - 1).coerceAtLeast(-1) }) {
-                Text("◀ EARLIER", color = Ink, fontSize = 10.sp)
-            }
-            TextButton(modifier = Modifier.tvFocus(RoundedCornerShape(14.dp)), onClick = { page = 0 }) {
-                Text("NOW", color = ProgramCyan, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-            }
-            TextButton(modifier = Modifier.tvFocus(RoundedCornerShape(14.dp)), onClick = { page = (page + 1).coerceAtMost(23) }) {
-                Text("LATER ▶", color = Ink, fontSize = 10.sp)
-            }
-        }
         LazyColumn(
             state = guideListState,
             contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
@@ -1979,7 +1961,9 @@ private fun LiveGridGuide(
             modifier = Modifier.weight(1f)
         ) {
             itemsIndexed(channels, key = { _, ch -> ch.id }) { chIndex, ch ->
-                val schedule = EpgStore.guide(ch.epgId, ch.name, windowStart)
+                val schedule = remember(ch.id, windowStart, guideRevision) { EpgStore.guide(ch.epgId, ch.name, windowStart) }
+                val cells = remember(schedule,windowStart) { GuideGeometry.cells(schedule,windowStart,windowStart+GuideNavigation.WINDOW_MS) }
+                val cellFocus = remember(ch.id,cells.size) { cells.map { FocusRequester() } }
                 Row(
                     Modifier.fillMaxWidth().height(58.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -1988,7 +1972,16 @@ private fun LiveGridGuide(
                         Modifier.width(142.dp).fillMaxHeight()
                             .then(if(ch.url==returnUrl) Modifier.focusRequester(returnFocus) else Modifier)
                             .border(if(ch.url==returnUrl) 3.dp else 1.dp,if(ch.url==returnUrl) Accent else Color.White.copy(alpha=.45f),RoundedCornerShape(8.dp))
-                            .background(SurfaceCol, RoundedCornerShape(8.dp))
+                            .background(ChannelOrange, RoundedCornerShape(8.dp))
+                            .focusRequester(channelCells[chIndex])
+                            .onPreviewKeyEvent { ev ->
+                                if(ev.type!=KeyEventType.KeyDown) false else when(ev.key) {
+                                    Key.DirectionRight -> { moveTo(chIndex); true }
+                                    Key.DirectionDown -> { moveTo(GuideNavigation.row(chIndex,1,channels.size)); true }
+                                    Key.DirectionUp -> { moveTo(GuideNavigation.row(chIndex,-1,channels.size)); true }
+                                    else -> false
+                                }
+                            }
                             .tvFocus(RoundedCornerShape(8.dp)).clickable { manualChannel = ch }.padding(5.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -1997,12 +1990,32 @@ private fun LiveGridGuide(
                         Text(ch.name, color = Ink, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     }
                     Row(Modifier.weight(1f).fillMaxHeight()) {
-                        val cells = GuideGeometry.cells(schedule, windowStart, windowStart + 4L * halfHour)
-                        cells.forEach { cell ->
+                        cells.forEachIndexed { cellIndex, cell ->
                             val entry = cell.entry
                             val airing = entry != null && now in entry.startMs until entry.endMs
                             Box(Modifier.weight((cell.endMs - cell.startMs).toFloat()).fillMaxHeight()
                                 .padding(start = 2.dp)
+                                .focusRequester(cellFocus[cellIndex])
+                                .then(if(cellIndex==0) Modifier.focusRequester(firstCells[chIndex]) else Modifier)
+                                .then(if(cellIndex==cells.lastIndex) Modifier.focusRequester(lastCells[chIndex]) else Modifier)
+                                .onPreviewKeyEvent { ev ->
+                                    if(ev.type!=KeyEventType.KeyDown) false else when(ev.key) {
+                                        Key.DirectionDown -> { moveTo(GuideNavigation.row(chIndex,1,channels.size)); true }
+                                        Key.DirectionUp -> { moveTo(GuideNavigation.row(chIndex,-1,channels.size)); true }
+                                        Key.DirectionRight -> {
+                                            if(cellIndex<cells.lastIndex) cellFocus[cellIndex+1].requestFocus()
+                                            else if(page<GuideNavigation.LAST_PAGE) { page=GuideNavigation.page(page,1); moveTo(chIndex,afterPageChange=true) }
+                                            true
+                                        }
+                                        Key.DirectionLeft -> {
+                                            if(cellIndex>0) cellFocus[cellIndex-1].requestFocus()
+                                            else if(page>0) { page=GuideNavigation.page(page,-1);moveTo(chIndex,true,afterPageChange=true) }
+                                            else channelCells[chIndex].requestFocus()
+                                            true
+                                        }
+                                        else -> false
+                                    }
+                                }
                                 .tvFocus(RoundedCornerShape(4.dp))
                                 .background(if (airing) ProgramCyan.copy(alpha = 0.20f) else Surface2, RoundedCornerShape(4.dp))
                                 .clickable { selected = ch to (entry ?: EpgEntry("Manual Recording",
@@ -2024,50 +2037,7 @@ private fun LiveGridGuide(
         }
     }
 
-    manualChannel?.let { ch ->
-        val chosen=java.util.Calendar.getInstance().apply {
-            add(java.util.Calendar.DAY_OF_YEAR,manualDay)
-            set(java.util.Calendar.HOUR_OF_DAY,manualHour);set(java.util.Calendar.MINUTE,manualMinute)
-            set(java.util.Calendar.SECOND,0);set(java.util.Calendar.MILLISECOND,0)
-        }
-        AlertDialog(onDismissRequest={manualChannel=null},containerColor=SurfaceCol,
-            title={Text("Schedule "+ch.name,color=Ink,fontWeight=FontWeight.ExtraBold)},
-            text={Column {
-                Text("Day • next 7 days",color=Muted,fontSize=11.sp)
-                LazyRow(horizontalArrangement=Arrangement.spacedBy(4.dp)){items(7){day->
-                    val cal=java.util.Calendar.getInstance().apply{add(java.util.Calendar.DAY_OF_YEAR,day)}
-                    val label=SimpleDateFormat(if(day==0)"'Today'" else "EEE M/d",Locale.getDefault()).format(cal.time)
-                    Chip(label,manualDay==day){manualDay=day}
-                }}
-                Text("Hour • 24 hours",color=Muted,fontSize=11.sp)
-                LazyRow(horizontalArrangement=Arrangement.spacedBy(4.dp)){items(24){hour->
-                    val cal=(chosen.clone() as java.util.Calendar).apply{set(java.util.Calendar.HOUR_OF_DAY,hour)}
-                    Chip(SimpleDateFormat("h a",Locale.getDefault()).format(cal.time),manualHour==hour){manualHour=hour}
-                }}
-                Text("Minutes • every 5 minutes",color=Muted,fontSize=11.sp)
-                LazyRow(horizontalArrangement=Arrangement.spacedBy(4.dp)){items(12){ix->
-                    val minute=ix*5; Chip(String.format(Locale.US,"%02d",minute),manualMinute==minute){manualMinute=minute}
-                }}
-                Spacer(Modifier.height(6.dp))
-                Text("Start: "+SimpleDateFormat("EEE h:mm a",Locale.getDefault()).format(chosen.time),color=Accent,fontWeight=FontWeight.Bold)
-            }},
-            confirmButton={TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(14.dp)),onClick={
-                val st=chosen.timeInMillis
-                if(st<=System.currentTimeMillis()) toast(context,"Choose a future time.")
-                else { confirmManual=Triple(ch,st,st+60L*60L*1000L);manualChannel=null }
-            }){Text("RECORD",color=Live,fontWeight=FontWeight.Bold)}},
-            dismissButton={TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(14.dp)),onClick={manualChannel=null}){Text("CLOSE",color=Ink)}}
-        )
-    }
-    confirmManual?.let { req ->
-        val ch=req.first;val st=req.second;val en=req.third
-        val whenText=SimpleDateFormat("EEEE 'at' h:mm a",Locale.getDefault()).format(Date(st))
-        AlertDialog(onDismissRequest={confirmManual=null},containerColor=SurfaceCol,
-            title={Text("Are you sure?",color=Ink,fontWeight=FontWeight.ExtraBold)},
-            text={Text("Are you sure you want to record "+whenText+" on "+ch.name+"?",color=Ink)},
-            confirmButton={TextButton(onClick={toast(context,ScheduleStore.add(context,prefs,"Manual Recording",ch.name,ch.url,st,en));confirmManual=null}){Text("YES, RECORD",color=Live,fontWeight=FontWeight.Bold)}},
-            dismissButton={TextButton(onClick={confirmManual=null}){Text("CLOSE",color=Ink)}})
-    }
+    manualChannel?.let { ch -> ManualRecordingDialog(prefs,ch,onClose={manualChannel=null}) }
 
     selected?.let { pair ->
         val ch = pair.first
@@ -2112,6 +2082,62 @@ private fun LiveGridGuide(
             dismissButton = {}
         )
     }
+}
+
+@Composable
+private fun ManualRecordingDialog(prefs:SharedPreferences,ch:LiveChannel,onClose:()->Unit,onSaved:()->Unit={}) {
+    val context=LocalContext.current
+    var day by remember { mutableIntStateOf(0) }
+    var hour by remember { mutableIntStateOf(java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)) }
+    var minute by remember { mutableIntStateOf((java.util.Calendar.getInstance().get(java.util.Calendar.MINUTE)/5)*5) }
+    var duration by remember { mutableIntStateOf(60) }
+    var confirmation by remember { mutableStateOf<Pair<Long,Long>?>(null) }
+    val chosen=java.util.Calendar.getInstance().apply {
+        add(java.util.Calendar.DAY_OF_YEAR,day);set(java.util.Calendar.HOUR_OF_DAY,hour);set(java.util.Calendar.MINUTE,minute)
+        set(java.util.Calendar.SECOND,0);set(java.util.Calendar.MILLISECOND,0)
+    }
+    val end=ManualRecordingDuration.end(chosen.timeInMillis,duration)
+    val fmt=remember { SimpleDateFormat("EEE h:mm a",Locale.getDefault()) }
+    val request=confirmation
+    if(request!=null) {
+        AlertDialog(onDismissRequest={confirmation=null},containerColor=SurfaceCol,
+            title={Text("Are you sure?",color=Ink,fontWeight=FontWeight.Bold)},
+            text={Text("Record ${ch.name} from ${fmt.format(Date(request.first))} until ${fmt.format(Date(request.second))} (${ManualRecordingDuration.label(duration)})?",color=Ink)},
+            confirmButton={TextButton(modifier=Modifier.tvFocus(),onClick={
+                toast(context,ScheduleStore.add(context,prefs,"Manual Recording",ch.name,ch.url,request.first,request.second));onSaved();onClose()
+            }){Text("YES, RECORD",color=Live,fontWeight=FontWeight.Bold)}},
+            dismissButton={TextButton(modifier=Modifier.tvFocus(),onClick={confirmation=null}){Text("CLOSE",color=Ink)}})
+    } else AlertDialog(onDismissRequest=onClose,containerColor=SurfaceCol,
+        title={Text("Schedule "+ch.name,color=Ink,fontWeight=FontWeight.Bold)},
+        text={Column(Modifier.verticalScroll(rememberScrollState())) {
+            Text("Day • next 7 days",color=Muted,fontSize=11.sp)
+            LazyRow(horizontalArrangement=Arrangement.spacedBy(4.dp)) { items(7) { d ->
+                val date=java.util.Calendar.getInstance().apply { add(java.util.Calendar.DAY_OF_YEAR,d) }
+                Chip(SimpleDateFormat(if(d==0) "'Today'" else "EEE M/d",Locale.getDefault()).format(date.time),day==d){day=d}
+            } }
+            Text("Hour • 24 hours",color=Muted,fontSize=11.sp)
+            LazyRow(horizontalArrangement=Arrangement.spacedBy(4.dp)) { items(24) { h ->
+                val date=(chosen.clone() as java.util.Calendar).apply { set(java.util.Calendar.HOUR_OF_DAY,h) }
+                Chip(SimpleDateFormat("h a",Locale.getDefault()).format(date.time),hour==h){hour=h}
+            } }
+            Text("Minutes • every 5 minutes",color=Muted,fontSize=11.sp)
+            LazyRow(horizontalArrangement=Arrangement.spacedBy(4.dp)) { items(12) { i ->
+                Chip(String.format(Locale.US,"%02d",i*5),minute==i*5){minute=i*5}
+            } }
+            Text("Stop after",color=Muted,fontSize=11.sp)
+            // Two fixed rows keep all ten durations reachable and visible on TV.
+            ManualRecordingDuration.minutes.chunked(5).forEach { group ->
+                Row(horizontalArrangement=Arrangement.spacedBy(3.dp)) { group.forEach { mins ->
+                    Chip(ManualRecordingDuration.label(mins),duration==mins){duration=mins}
+                } }
+            }
+            Text("Start: ${fmt.format(chosen.time)}\nStop: ${fmt.format(Date(end))}",color=Accent,fontWeight=FontWeight.Bold,fontSize=12.sp)
+        }},
+        confirmButton={TextButton(modifier=Modifier.tvFocus(),onClick={
+            val error=ScheduleStore.validateManual(chosen.timeInMillis,end)
+            if(error!=null) toast(context,error) else confirmation=chosen.timeInMillis to end
+        }){Text("RECORD",color=Live,fontWeight=FontWeight.Bold)}},
+        dismissButton={TextButton(modifier=Modifier.tvFocus(),onClick=onClose){Text("CLOSE",color=Ink)}})
 }
 
 private fun chIndexOf(channels: List<LiveChannel>, target: LiveChannel): Int =
@@ -2700,7 +2726,7 @@ object Playback {
         stopGovernor()
         p.stop()
         p.clearMediaItems()
-        p.playWhenReady = keepPlaying
+        p.playWhenReady = keepPlaying && !backgroundSuspended
         Timeshift.start(ctx, tsUrl(ch.url), prefsRef) { ready ->
             if (myGen != playbackGen || player !== p || !liveMode) return@start
             if (!ready) {
@@ -2892,6 +2918,10 @@ object Playback {
         p.addListener(object : Player.Listener {
             private var prevIdx = 0
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                if (backgroundSuspended && playWhenReady) {
+                    p.pause()
+                    return
+                }
                 if (pausePreparing && reason == Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST) {
                     pauseResumeRequested = playWhenReady
                 }
@@ -2917,7 +2947,7 @@ object Playback {
                     // picture does not sit paused waiting for the customer to press Play.
                     val myGen = playbackGen
                     android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                        if (myGen == playbackGen && liveMode && player === p) {
+                        if (myGen == playbackGen && liveMode && player === p && !backgroundSuspended) {
                             if (!recoverTemporaryLive()) zapTo(currentIdxC.intValue, preserveDirect = directLive)
                         }
                     }, 700)
@@ -2930,6 +2960,7 @@ object Playback {
             }
 
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                if (backgroundSuspended) return
                 // ZAKO_V437_LIVE_EDGE_RECOVERY: Media3 documents this as the
                 // correct recovery when an HLS/live player falls behind the live window.
                 if (liveMode && error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) {
@@ -2978,7 +3009,7 @@ object Playback {
                 // look exactly like random buffering. Stale retries do nothing.
                 val myGen = playbackGen
                 android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                    if (myGen != playbackGen) return@postDelayed
+                    if (myGen != playbackGen || backgroundSuspended) return@postDelayed
                     runCatching {
                         if (liveMode) {
                             // Timeshift trouble? After 3 strikes, flip to direct
@@ -3221,7 +3252,7 @@ object Playback {
         val source = liveDvrMediaSources?.createMediaSource(item)
         if (source != null) p.setMediaSource(source) else p.setMediaItem(item)
         p.prepare()
-        p.playWhenReady = keepPlaying
+        p.playWhenReady = keepPlaying && !backgroundSuspended
     }
 
     /**
@@ -3336,6 +3367,7 @@ object Playback {
     }
 
     fun zapTo(idx: Int, preserveDirect: Boolean = false) {
+        if (backgroundSuspended) return
         // A viewer-initiated channel change always gets a fresh attempt at the
         // selected mode. Only an INTERNAL retry is allowed to preserve the
         // current-channel direct-rescue state. This prevents a hidden rescue
@@ -3451,7 +3483,9 @@ object Playback {
      * DVR path first; otherwise a tee has no source and a second network stream
      * would violate the provider connection rule. */
     fun prepareCurrentForRecording(): Boolean {
-        if (!liveMode) return false
+        // A timer may arrive while another app is visible. It owns a silent
+        // network writer; never bring a hidden player back to life for a tee.
+        if (!liveMode || backgroundSuspended) return false
         if (!canTeeRecording()) beginTemporaryLive(true)
         return Timeshift.active && (Timeshift.snapshot() != null || Timeshift.isPreparing)
     }
@@ -3462,8 +3496,11 @@ object Playback {
     /** Stop hidden live playback/DVR work. An active recording is the one
      * intentional exception: it owns the single provider stream while hidden. */
     fun suspendForBackground() {
-        val p = player ?: return
         backgroundSuspended = true
+        pauseResumeRequested = false
+        stopGovernor()
+        val p = player ?: return
+        p.pause()
         if (Recorder.activeName.value != null) {
             p.pause()
             return
@@ -3481,10 +3518,27 @@ object Playback {
         }
     }
 
+    internal fun recordingFinished(url:String) {
+        if(backgroundSuspended && Recorder.activeName.value==null && currentProviderUrl()==url) suspendForBackground()
+    }
+
     /** Reconnect the remembered live channel when the viewer returns. */
     fun resumeFromBackground() {
+        val wasBackground = backgroundSuspended
+        backgroundSuspended = false
         val p = player ?: return
-        if (backgroundSuspended && liveMode && queue.isNotEmpty()) {
+        val prefs=prefsRef
+        val context=appContext
+        val remote=queue.getOrNull(currentIdxC.intValue)?.url?.let { it.startsWith("http://") || it.startsWith("https://") }==true
+        if(wasBackground && remote && prefs!=null && context!=null &&
+            ProviderStreams.recordingSlots()+ProviderStreams.downloadSlots(context,prefs)+1>ProviderStreams.max(prefs)) {
+            // Foreground lifecycle is not permission to steal the recorder's stream.
+            p.pause()
+            if(!canTeeRecording()) {p.stop();liveProviderReserved=false}
+            toast(context,"Recording is using your available provider stream. Stop the recording to watch live TV.")
+            return
+        }
+        if (wasBackground && liveMode && queue.isNotEmpty()) {
             backgroundSuspended = false
             if (Timeshift.active) p.play() else zapTo(currentIdxC.intValue)
         } else if (queue.isNotEmpty()) {
@@ -4054,6 +4108,8 @@ fun ManagedDvrSchedulePane(
 ) {
     val context = LocalContext.current
     val rows = remember(refreshToken) { ManagedDvrUi.upcoming(prefs) }
+    var manual by remember { mutableStateOf<Playable?>(null) }
+    manual?.let { ch -> ManualRecordingDialog(prefs,LiveChannel(ch.url,ch.name,null,null,ch.url),onClose={manual=null},onSaved=onRefresh) }
     Column(Modifier.fillMaxWidth().padding(12.dp)) {
         Text(ManagedDvrUi.upcomingLabel, color = Ink, fontWeight = FontWeight.Bold, fontSize = 18.sp)
         if (rows.isEmpty()) Text("No future recordings scheduled.", color = Muted, fontSize = 11.sp)
@@ -4081,11 +4137,7 @@ fun ManagedDvrSchedulePane(
         Text("Choose a channel and enter a future start/end time even when the provider guide does not reach that far.", color = Muted, fontSize = 10.sp)
         if (channels.isNotEmpty()) {
             Chip("Manual Recording", false) {
-                val ch = channels.first()
-                val start = System.currentTimeMillis() + 60L * 60L * 1000L
-                val end = start + 60L * 60L * 1000L
-                toast(context, ManagedDvrUi.manualRecording(context, prefs, "", ch.name, ch.url, start, end))
-                onRefresh()
+                manual=channels.first()
             }
         }
     }
@@ -4539,10 +4591,13 @@ private fun SearchTvKeyboardField(value: String, onValueChange: (String) -> Unit
         placeholder = "SEARCH movies, shows, actors, directors & live TV", searchStyle = true)
 }
 
+private val KeyboardOrange = Color(0xFFD66B14)
+private val ChannelOrange = Color(0xFF9C450A)
+
 @Composable
-private fun RyzodKeyboardDialog(
+private fun RyzodKeyboardPanel(
     value: String, onValueChange: (String) -> Unit, label: String, password: Boolean,
-    onClose: () -> Unit
+    compact: Boolean = false, onPrevious: () -> Unit = {}, onNext: () -> Unit = {}, onClose: () -> Unit
 ) {
     var page by remember { mutableIntStateOf(0) }
     var upper by remember { mutableStateOf(false) }
@@ -4552,70 +4607,76 @@ private fun RyzodKeyboardDialog(
     val keyFocus = remember { FocusRequester() }
     fun press(key: String) {
         when (key) {
-            "ABC", "!?#", "+=<>" -> { page = listOf("ABC", "!?#", "+=<>").indexOf(key); row = 0; col = page }
+            "abc", "#$%", "áçé" -> {
+                page = when(key) { "#$%" -> 1; "áçé" -> 2; else -> 0 }
+                row = 0; col = 0
+            }
             "SHIFT" -> upper = !upper
+            "PREVIOUS" -> onPrevious()
+            "NEXT" -> onNext()
             "DONE" -> onClose()
             else -> onValueChange(KeyboardLayout.edit(value, key))
         }
     }
-    androidx.compose.ui.window.Dialog(onDismissRequest = onClose,
-        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)) {
-        LaunchedEffect(Unit) { androidx.compose.runtime.withFrameNanos { }; keyFocus.requestFocus() }
-        androidx.compose.foundation.layout.BoxWithConstraints(
-            Modifier.fillMaxSize().background(Color(0xB3000000)).padding(10.dp), contentAlignment = Alignment.Center
-        ) {
-            val keyHeight = ((maxHeight - 108.dp) / 6).coerceIn(22.dp, 38.dp)
-            Column(Modifier.widthIn(max = 620.dp).fillMaxWidth(.96f)
-                .background(Color(0xFF0A2038), RoundedCornerShape(14.dp))
-                .border(2.dp, ElectricCyan, RoundedCornerShape(14.dp))
-                .focusRequester(keyFocus)
-                .onPreviewKeyEvent { ev ->
-                    if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                    val delta = when (ev.key) {
-                        Key.DirectionLeft -> -1 to 0
-                        Key.DirectionRight -> 1 to 0
-                        Key.DirectionUp -> 0 to -1
-                        Key.DirectionDown -> 0 to 1
-                        else -> null
-                    }
-                    if (delta != null) {
-                        val next = KeyboardLayout.move(rows, row, col, delta.first, delta.second)
-                        row = next.first; col = next.second; true
-                    } else when (ev.key) {
-                        Key.DirectionCenter, Key.Enter -> { press(rows[row][col]); true }
-                        Key.Backspace -> { press("DELETE"); true }
-                        else -> {
-                            val native = ev.nativeKeyEvent
-                            val code = native.unicodeChar
-                            if (code >= 32 && !native.isCtrlPressed && !native.isAltPressed) {
-                                onValueChange(value + String(Character.toChars(code))); true
-                            } else false
-                        }
-                    }
-                }.focusable().padding(8.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text(label, color = ElectricCyan, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                Text(if (password) "•".repeat(value.length.coerceAtMost(30)) else value.ifEmpty { "Type here" },
-                    color = Ink, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.fillMaxWidth().border(2.dp, Accent, RoundedCornerShape(6.dp)).padding(6.dp))
-                rows.forEachIndexed { ri, keys ->
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                        keys.forEachIndexed { ci, key ->
-                            val selected = row == ri && col == ci
-                            val activePage = ri == 0 && ci == page
-                            Box(Modifier.weight(if (key == "SPACE") 1.7f else 1f).height(keyHeight)
-                                .background(if (selected) FocusPink.copy(alpha = .32f) else if (activePage) ElectricCyan.copy(alpha = .22f) else PanelGlow,
-                                    RoundedCornerShape(6.dp))
-                                .border(if (selected) 3.dp else 1.dp, if (selected) FocusPink else ElectricCyan.copy(alpha = .35f), RoundedCornerShape(6.dp))
-                                .focusProperties { canFocus = false }
-                                .clickable { row = ri; col = ci; press(key) }, contentAlignment = Alignment.Center) {
-                                Text(if (key == "SHIFT") if (upper) "abc" else "ABC ↑" else key,
-                                    color = if (key == "DONE") NeonGreen else Ink,
-                                    fontWeight = FontWeight.Bold, fontSize = if (key.length > 3) 10.sp else 14.sp, maxLines = 1)
-                            }
-                        }
+    LaunchedEffect(Unit) { androidx.compose.runtime.withFrameNanos { }; keyFocus.requestFocus() }
+    BackHandler(onBack=onClose)
+    Column(Modifier.fillMaxWidth().widthIn(max=620.dp)
+        .background(KeyboardOrange.copy(alpha=.82f), RoundedCornerShape(12.dp))
+        .border(1.dp, Color(0xFFFFBA65), RoundedCornerShape(12.dp))
+        .focusRequester(keyFocus)
+        .onPreviewKeyEvent { ev ->
+            if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+            val delta = when (ev.key) {
+                Key.DirectionLeft -> -1 to 0; Key.DirectionRight -> 1 to 0
+                Key.DirectionUp -> 0 to -1; Key.DirectionDown -> 0 to 1
+                else -> null
+            }
+            if (delta != null) {
+                val next=KeyboardLayout.move(rows,row,col,delta.first,delta.second)
+                row=next.first; col=next.second; true
+            } else when(ev.key) {
+                Key.DirectionCenter, Key.Enter -> { press(rows[row][col]); true }
+                Key.Backspace -> { press("DELETE"); true }
+                else -> {
+                    val native=ev.nativeKeyEvent
+                    if(native.unicodeChar>=32 && !native.isCtrlPressed && !native.isAltPressed) {
+                        onValueChange(value+String(Character.toChars(native.unicodeChar))); true
+                    } else false
+                }
+            }
+        }.focusable().padding(6.dp), verticalArrangement=Arrangement.spacedBy(3.dp)) {
+        if(!compact) Text(label, color=Ink, fontWeight=FontWeight.Bold, fontSize=12.sp)
+        if(!compact) Text(if(password) "•".repeat(value.length.coerceAtMost(30)) else value.ifEmpty { "Type here" },
+            color=Ink,fontSize=15.sp,maxLines=1,overflow=TextOverflow.Ellipsis,
+            modifier=Modifier.fillMaxWidth().border(1.dp,Accent,RoundedCornerShape(6.dp)).padding(6.dp))
+        rows.forEachIndexed { ri, keys ->
+            Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(3.dp)) {
+                keys.forEachIndexed { ci,key ->
+                    val selected=row==ri && col==ci
+                    Box(Modifier.weight(if(key=="SPACE") 1.6f else 1f).height(if(compact) 25.dp else 32.dp)
+                        .background(if(selected) Color.White else Color(0x66371B08),RoundedCornerShape(4.dp))
+                        .border(if(selected) 2.dp else 1.dp,if(selected) Accent else Color.White.copy(alpha=.25f),RoundedCornerShape(4.dp))
+                        .focusProperties { canFocus=false }
+                        .clickable { row=ri;col=ci;press(key) },contentAlignment=Alignment.Center) {
+                        Text(if(key=="SHIFT") "aA" else key, color=if(selected) Color(0xFF331600) else Color.White,
+                            fontWeight=FontWeight.Bold,fontSize=if(key.length>3) 10.sp else 14.sp,maxLines=1)
                     }
                 }
-                Text("Page ${page + 1}/3 • D-pad moves • OK types • Back closes", color = ElectricCyan, fontSize = 10.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun RyzodKeyboardDialog(
+    value: String,onValueChange:(String)->Unit,label:String,password:Boolean,
+    onPrevious:()->Unit={},onNext:()->Unit={},onClose:()->Unit
+) {
+    androidx.compose.ui.window.Dialog(onDismissRequest=onClose,
+        properties=androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth=false)) {
+        Box(Modifier.fillMaxSize().padding(10.dp),contentAlignment=Alignment.TopCenter) {
+            Column(Modifier.widthIn(max=620.dp).fillMaxWidth().verticalScroll(rememberScrollState())) {
+                RyzodKeyboardPanel(value,onValueChange,label,password,onPrevious=onPrevious,onNext=onNext,onClose=onClose)
             }
         }
     }
@@ -4623,7 +4684,7 @@ private fun RyzodKeyboardDialog(
 
 
 private data class SearchMatches(
-    val query: String,
+    val query: String, val indexIdentity: Any,
     val live: List<LiveChannel>, val movies: List<Movie>, val series: List<SeriesItem>,
     val guide: List<EpgStore.GuideHit>
 )
@@ -4649,11 +4710,14 @@ fun SearchTab(
         )
     }
     var recents by remember { mutableStateOf(loadRecents(prefs)) }
-    // ZAKO_V428_SEARCH_DEBOUNCE: type instantly, filter after a short quiet beat.
-    var settledQuery by remember { mutableStateOf(query) }
-    LaunchedEffect(query) {
-        kotlinx.coroutines.delay(180L)
-        settledQuery = query
+    val indexes by androidx.compose.runtime.produceState<Triple<SearchIndex<LiveChannel>, SearchIndex<Movie>, SearchIndex<SeriesItem>>?>(null,data) {
+        value=kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            val task=kotlinx.coroutines.currentCoroutineContext()
+            val check={ task.ensureActive() }
+            Triple(SearchIndex(data.live,{it.name},checkActive=check),
+                SearchIndex(data.movies,{it.name},{it.searchMeta},check),
+                SearchIndex(data.series,{it.name},{it.searchMeta},check))
+        }
     }
 
     fun saveRecent(q: String) {
@@ -4726,15 +4790,15 @@ fun SearchTab(
             )
         }
 
-        val q = settledQuery.trim()
-        if (q.length < 2) {
+        val q = query.trim()
+        if (q.isEmpty()) {
             if (recents.isEmpty()) {
                 Column(
                     Modifier.fillMaxSize(),
                     verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Text("Type at least 2 letters to search.", color = Muted, fontSize = 14.sp)
+                    Text("Type a letter to search.", color = Muted, fontSize = 14.sp)
                 }
             } else {
                 Row(
@@ -4775,29 +4839,41 @@ fun SearchTab(
             return
         }
 
-        // Rank off the UI thread so a large provider catalog cannot stall typing.
-        val guideLoaded = EpgStore.loaded.value
-        val matches by androidx.compose.runtime.produceState<SearchMatches?>(
-            initialValue = null, key1 = q, key2 = data, key3 = guideLoaded
-        ) {
-            value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
-                val queryMatcher = TitleQuery(q)
-                SearchMatches(q,
-                    queryMatcher.find(data.live, { it.name }),
-                    queryMatcher.find(data.movies, { it.name }, { it.searchMeta }),
-                    queryMatcher.find(data.series, { it.name }, { it.searchMeta }),
-                    if (guideLoaded) EpgStore.search(q, 30) else emptyList())
+        // Catalog results never wait for the guide index to finish.
+        val matches by androidx.compose.runtime.produceState<SearchMatches?>(null,q,indexes) {
+            val index=indexes ?: return@produceState
+            value=kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                val task=kotlinx.coroutines.currentCoroutineContext()
+                val check={ task.ensureActive() }
+                val matcher=TitleQuery(q)
+                SearchMatches(q,index,index.first.find(matcher,checkActive=check),
+                    index.second.find(matcher,checkActive=check),index.third.find(matcher,checkActive=check),emptyList())
             }
         }
-        val currentMatches = matches
-        if (currentMatches == null || currentMatches.query != q) {
-            Text("Searching…", color = Muted, modifier = Modifier.padding(16.dp))
+        val revision=EpgStore.revision.intValue
+        val guideIndex by androidx.compose.runtime.produceState<SearchIndex<EpgStore.GuideHit>?>(null,revision) {
+            value=kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                val task=kotlinx.coroutines.currentCoroutineContext()
+                SearchIndex(EpgStore.searchEntries(),{it.entry.title},checkActive={task.ensureActive()})
+            }
+        }
+        val guideMatches by androidx.compose.runtime.produceState<Triple<String,SearchIndex<EpgStore.GuideHit>,List<EpgStore.GuideHit>>?>(null,q,guideIndex) {
+            val index=guideIndex ?: return@produceState
+            value=kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                val task=kotlinx.coroutines.currentCoroutineContext()
+                val now=System.currentTimeMillis()
+                Triple(q,index,index.find(TitleQuery(q),30,{task.ensureActive()},{it.entry.endMs>now}))
+            }
+        }
+        val currentMatches=matches?.takeIf { it.query==q && it.indexIdentity===indexes }
+        if(currentMatches==null) {
+            Text("Searching…",color=Muted,modifier=Modifier.padding(16.dp))
             return
         }
-        val liveHits = currentMatches.live
-        val movieHits = currentMatches.movies
-        val seriesHits = currentMatches.series
-        val guideHits = currentMatches.guide
+        val liveHits=currentMatches.live
+        val movieHits=currentMatches.movies
+        val seriesHits=currentMatches.series
+        val guideHits=guideMatches?.takeIf { it.first==q && it.second===guideIndex }?.third.orEmpty()
 
 
         // Match guide channels back to playable channels (by guide id, then by name).
@@ -5538,7 +5614,7 @@ fun RecordingsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
                 }
             }
             Text(
-                "The device must be powered on when a scheduled recording starts.",
+                "Keep the device powered on. If it starts late, RYZOD records the remaining time.",
                 fontSize = 11.sp, color = Muted,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp)
             )
@@ -5776,10 +5852,17 @@ private fun TvTextField(
                 password -> "•".repeat(value.length.coerceAtMost(24)); else -> value },
                 color = if (value.isEmpty()) Muted else Ink, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
+        if(editing && searchStyle) RyzodKeyboardPanel(value,onValueChange,label,password,compact=true,
+            onPrevious={editing=false;runCatching { fieldFocus.requestFocus() }},
+            onNext={editing=false;runCatching { fieldFocus.requestFocus() }},
+            onClose={editing=false;runCatching { fieldFocus.requestFocus() }})
     }
-    if (editing) RyzodKeyboardDialog(value, onValueChange, label, password) {
-        editing = false
-        runCatching { fieldFocus.requestFocus() }
+    if (editing && !searchStyle) {
+        val manager=LocalFocusManager.current
+        fun close() { editing=false; runCatching { fieldFocus.requestFocus() } }
+        RyzodKeyboardDialog(value,onValueChange,label,password,
+            onPrevious={close();manager.moveFocus(FocusDirection.Previous)},
+            onNext={close();manager.moveFocus(FocusDirection.Next)},onClose={close()})
     }
 }
 
