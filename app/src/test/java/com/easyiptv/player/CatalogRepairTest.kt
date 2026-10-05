@@ -16,6 +16,40 @@ import kotlin.concurrent.thread
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk=[28])
 class CatalogRepairTest {
+    @Test fun cancelledMovieArtworkLookupClosesItsSocket() = runBlocking {
+        CatalogFixture(stall=true).use {server ->
+            val source=XtreamSource(server.host,"u","p")
+            val task=launch(Dispatchers.IO) {source.movieArtwork("1")}
+            try {
+                withTimeout(5000) {while(server.requests.isEmpty()) delay(10)}
+                task.cancel()
+                assertTrue(server.closed.await(1500,java.util.concurrent.TimeUnit.MILLISECONDS))
+            } finally {server.close();task.cancelAndJoin()}
+        }
+    }
+    @Test fun movieDetailsCanSupplyArtworkMissingFromTheList() = runBlocking {
+        CatalogFixture().use { server ->
+            val source=XtreamSource(server.host,"u","p")
+            assertEquals("${server.host}/posters/detail.jpg",source.movieArtwork("1"))
+            assertEquals("${server.host}/posters/detail.jpg",source.movieArtwork("1"))
+            assertEquals("One detail lookup should serve repeated cards",1,server.requests.count {it.contains("action=get_vod_info")})
+        }
+    }
+    @Test fun duplicateMovieRowCannotEraseEarlierArtwork() = runBlocking {
+        CatalogFixture(moviesBody="""[{"stream_id":1,"name":"Film","stream_icon":"https://example/poster.jpg"},{"stream_id":1,"name":"Film","stream_icon":""}]""").use { server ->
+            val movies=XtreamSource(server.host,"u","p").loadMoviesOnly().movies
+            assertEquals(1,movies.size)
+            assertEquals("https://example/poster.jpg",movies.single().icon)
+        }
+    }
+    @Test fun blankRefreshPreservesSavedArtworkForTheSameMovie() = runBlocking {
+        CatalogFixture(moviesBody="""[{"stream_id":1,"name":"Film","stream_icon":""}]""").use { server ->
+            val source=XtreamSource(server.host,"u","p")
+            val old=AppData(emptyList(),emptyList(),emptyList(),listOf(Movie("1","Film","https://example/poster.jpg",null,"${server.host}/movie/u/p/1.mp4")),emptyList(),emptyList())
+            val result=CatalogRefresh.load(source,old,CatalogRefresh.Section.MOVIES)
+            assertEquals("https://example/poster.jpg",result.data.movies.single().icon)
+        }
+    }
     @Test fun blankMovieIconUsesAlternateArtworkAndSurvivesCacheReload() = runBlocking {
         CatalogFixture().use { server ->
             val data=XtreamSource(server.host,"u","p").loadOnDemandOnly()
@@ -68,7 +102,7 @@ class CatalogRepairTest {
     }
 }
 
-internal class CatalogFixture(private val failMovies:Boolean=false,private val stall:Boolean=false):AutoCloseable {
+internal class CatalogFixture(private val failMovies:Boolean=false,private val stall:Boolean=false,private val moviesBody:String?=null):AutoCloseable {
     private val server=ServerSocket(0)
     private val sockets=CopyOnWriteArrayList<Socket>()
     val requests=CopyOnWriteArrayList<String>()
@@ -87,7 +121,8 @@ internal class CatalogFixture(private val failMovies:Boolean=false,private val s
                 else {
                     val failed=failMovies && request.contains("action=get_vod_streams")
                     val body=when {
-                        request.contains("action=get_vod_streams") -> """[{"stream_id":1,"name":"Example Movie","stream_icon":"","movie_image":"https://images.example/movie.jpg","container_extension":"mp4"}]"""
+                        request.contains("action=get_vod_info") -> """{"info":{"movie_image":"/posters/detail.jpg"},"movie_data":{"stream_icon":""}}"""
+                        request.contains("action=get_vod_streams") -> moviesBody ?: """[{"stream_id":1,"name":"Example Movie","stream_icon":"","movie_image":"https://images.example/movie.jpg","container_extension":"mp4"}]"""
                         request.contains("action=get_series&") || request.contains("action=get_series ") -> """[{"series_id":2,"name":"Example Series","cover":"https://images.example/series.jpg"}]"""
                         else -> "[]"
                     }

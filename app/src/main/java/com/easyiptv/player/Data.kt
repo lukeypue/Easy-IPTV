@@ -278,6 +278,8 @@ interface Source {
     suspend fun epg(channelId: String, limit: Int): List<EpgEntry>
     /** Lazy detail call. M3U/default sources simply have no separate metadata endpoint. */
     suspend fun mediaInfo(movieId: String): MediaInfo? = null
+    suspend fun movieArtwork(movieId: String): String? = null
+    fun forgetMovieArtwork(movieId:String,failedAddress:String) {}
     suspend fun seriesEpisodes(seriesId: String): Map<Int, List<Episode>>
 }
 
@@ -478,9 +480,11 @@ class XtreamSource(rawHost: String, private val user: String, private val pass: 
             val ext=o["container_extension"]?.ifBlank {"mp4"} ?: "mp4"
             val meta=listOf(o["cast"],o["director"],o["genre"],o["plot"],o["releaseDate"] ?: o["releasedate"])
                 .filterNotNull().filter {it.isNotBlank()}.joinToString(" • ")
-            movies[id]=Movie(id,o["name"]?.ifBlank {"Movie"} ?: "Movie",
+            val movie=Movie(id,o["name"]?.ifBlank {"Movie"} ?: "Movie",
                 artwork(o,"stream_icon","movie_image","cover","cover_big","poster"),
                 o["category_id"],"$base/movie/$user/$pass/$id.$ext",meta)
+            val earlier=movies[id]
+            movies[id]=if(movie.icon==null && earlier?.name==movie.name && earlier.url==movie.url) movie.copy(icon=earlier.icon) else movie
         }
         val cats=parseCats(EpgRequests.get(api("get_vod_categories")))
         AppData(emptyList(),emptyList(),cats,movies.values.toList(),emptyList(),emptyList())
@@ -598,6 +602,18 @@ class XtreamSource(rawHost: String, private val user: String, private val pass: 
                 emptyList()
             }
         }
+
+    private val movieArtworkLookup=MovieArtworkLookup {movieId ->
+        val id=URLEncoder.encode(movieId,"UTF-8")
+        val root=JSONObject(EpgRequests.get(api("get_vod_info")+"&vod_id=$id"))
+        val rows=listOfNotNull(root.optJSONObject("info"),root.optJSONObject("movie_data"))
+        rows.firstNotNullOfOrNull {row ->
+            val fields=listOf("movie_image","cover_big","cover","stream_icon","poster")
+            artwork(fields.associateWith {row.optString(it,"")},*fields.toTypedArray())
+        }
+    }
+    override suspend fun movieArtwork(movieId:String):String? = movieArtworkLookup.resolve(movieId)
+    override fun forgetMovieArtwork(movieId:String,failedAddress:String) {movieArtworkLookup.forget(movieId,failedAddress)}
 
     override suspend fun mediaInfo(movieId: String): MediaInfo? = withContext(Dispatchers.IO) {
         try {

@@ -3972,6 +3972,7 @@ fun MoviesPane(
                 PosterGridCard(
                     name = (if (WatchStore.isWatched(prefs, m.url)) "✓  " else "") + m.name,
                     icon = m.icon,
+                    movie = m, source = source,
                     modifier = Modifier
                         .then(if (target) Modifier.focusRequester(targetFocus) else Modifier)
                         .onPreviewKeyEvent { ev ->
@@ -5127,7 +5128,7 @@ fun SearchTab(
                 item {
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         items(movieHits) { m ->
-                            PosterCard(m.name, m.icon) {
+                            PosterCard(m.name, m.icon, movie=m, source=source) {
                                 saveRecent(q)
                                 searchInfoMovie = m
                             }
@@ -6095,7 +6096,9 @@ private fun PosterGridCard(
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
     onInfo: (() -> Unit)? = null,
-    onDownload: (() -> Unit)? = null
+    onDownload: (() -> Unit)? = null,
+    movie:Movie? = null,
+    source:Source? = null
 ) {
     var longOkFired by remember { mutableStateOf(false) }
     Column(
@@ -6140,7 +6143,9 @@ private fun PosterGridCard(
                 .clip(RoundedCornerShape(11.dp))
                 .background(Surface2)
         ) {
-            if (!icon.isNullOrBlank()) {
+            if(movie!=null) {
+                MoviePosterImage(movie,source,name,Modifier.fillMaxSize())
+            } else if (!icon.isNullOrBlank()) {
                 AsyncImage(
                     model = icon,
                     contentDescription = name,
@@ -6201,7 +6206,7 @@ private fun PosterGridCard(
 }
 
 @Composable
-private fun PosterCard(name: String, icon: String?, onClick: () -> Unit) {
+private fun PosterCard(name: String, icon: String?, movie:Movie?=null, source:Source?=null, onClick: () -> Unit) {
     Column(
         Modifier
             .width(126.dp)
@@ -6215,7 +6220,9 @@ private fun PosterCard(name: String, icon: String?, onClick: () -> Unit) {
                 .clip(RoundedCornerShape(10.dp))
                 .background(Surface2)
         ) {
-            if (!icon.isNullOrBlank()) {
+            if(movie!=null) {
+                MoviePosterImage(movie,source,name,Modifier.fillMaxSize())
+            } else if (!icon.isNullOrBlank()) {
                 AsyncImage(
                     model = icon, contentDescription = name, contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize()

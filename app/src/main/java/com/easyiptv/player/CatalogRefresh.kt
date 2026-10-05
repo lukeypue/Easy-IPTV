@@ -12,7 +12,13 @@ internal object CatalogRefresh {
         if(section!=Section.SERIES) {
             try {
                 val fresh=source.loadMoviesOnly()
-                next=next.copy(vodCats=fresh.vodCats,movies=fresh.movies)
+                val saved=previous.movies.associateBy {it.id}
+                val movies=fresh.movies.map {movie ->
+                    val old=saved[movie.id]
+                    if(movie.icon.isNullOrBlank() && old?.name==movie.name && old.url==movie.url)
+                        movie.copy(icon=old.icon) else movie
+                }
+                next=next.copy(vodCats=fresh.vodCats,movies=movies)
             } catch(cancelled:CancellationException) {throw cancelled
             } catch(_:Exception) {failed+="Movies"}
         }
