@@ -1,0 +1,30 @@
+name: RYZOD 4.76 Search Stability
+on:
+  push:
+    branches: [ryzod-v4.76-search-memory]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: ryzod-476
+  cancel-in-progress: true
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Reproduce reported Search regressions before fixing
+        run: gradle testDebugUnitTest --tests '*SearchPlaybackUiTest' --tests '*SearchTypingUiTest' --max-workers=1 --no-daemon --stacktrace
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: RYZOD-4.76-regression-results
+          path: app/build/test-results
