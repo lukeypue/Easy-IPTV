@@ -32,7 +32,7 @@ class LauncherActivityIconTest {
         assertTrue("An alternate launcher must receive the same complete brand artwork",roundId!=0)
         val round=context.getDrawable(roundId)
         assertTrue("Round-icon consumers must not get the obsolete cropped adaptive emblem",round is BitmapDrawable)
-        val expected=(context.getDrawable(R.drawable.ryzod_artwork_464) as BitmapDrawable).bitmap
+        val expected=(context.getDrawable(if(BuildConfig.TV_ARTWORK) R.drawable.ryzod_tv_artwork_466 else R.drawable.ryzod_artwork_464) as BitmapDrawable).bitmap
         assertTrue("Alternate icon keeps the wordmark",(round as BitmapDrawable).bitmap.sameAs(expected))
     }
 
@@ -66,4 +66,25 @@ class LauncherActivityIconTest {
         assertTrue(activity.loadIcon(pm) is BitmapDrawable)
         assertTrue(activity.applicationInfo.loadIcon(pm) is BitmapDrawable)
     }
+    @Test
+    @Config(sdk=[26,28,30],qualifiers="w960dp-h540dp-land-television-tvdpi")
+    fun bothLauncherCategoriesKeepWideArtworkAtEveryRequestedDensity() {
+        val pm=context.packageManager
+        val app=pm.getApplicationInfo(context.packageName,0)
+        val activity=pm.getActivityInfo(ComponentName(context,MainActivity::class.java),0)
+        for(density in listOf(160,213,240,320,480,640)) {
+            for(id in listOf(app.icon,activity.icon,activity.logo,app.banner,activity.banner)) {
+                val drawable=context.resources.getDrawableForDensity(id,density,context.theme)
+                assertTrue(drawable is BitmapDrawable)
+                val bitmap=(drawable as BitmapDrawable).bitmap
+                assertEquals("Wide artwork at density $density",16.0/9.0,bitmap.width.toDouble()/bitmap.height,0.002)
+            }
+        }
+        for(category in listOf(Intent.CATEGORY_LAUNCHER,Intent.CATEGORY_LEANBACK_LAUNCHER)) {
+            val resolved=pm.resolveActivity(Intent(Intent.ACTION_MAIN).addCategory(category).setPackage(context.packageName),0)!!
+            val bitmap=(resolved.loadIcon(pm) as BitmapDrawable).bitmap
+            assertEquals(category,16.0/9.0,bitmap.width.toDouble()/bitmap.height,0.002)
+        }
+    }
+
 }

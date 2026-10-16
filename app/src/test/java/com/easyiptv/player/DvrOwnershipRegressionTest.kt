@@ -85,6 +85,34 @@ class DvrOwnershipRegressionTest {
         }
     }
 
+    @Test fun recordingDuringAppHandoffStaysSilentBeforeActivityStop() {
+        val dir=Files.createTempDirectory("ryzod-handoff-record").toFile()
+        val context=storageContext(dir)
+        val activity=Robolectric.buildActivity(MainActivity::class.java).setup()
+        val service=Robolectric.buildService(RecordingService::class.java).create()
+        ReviewProvider().use { provider ->
+            try {
+                val p=Playback.open(context,prefs(),listOf(Playable("watch",provider.url("watch"),true)),0,null,false)
+                Playback.resumeFromBackground()
+                assertTrue(p.playWhenReady)
+                activity.pause()
+                service.get().onStartCommand(Intent(app,RecordingService::class.java).apply {
+                    action=RecordingService.ACTION_START
+                    putExtra("url",provider.url("watch"))
+                    putExtra("name","silent handoff recording")
+                    putExtra("stopAt",System.currentTimeMillis()+60_000)
+                },0,1)
+                shadowOf(Looper.getMainLooper()).idle()
+                assertFalse("A recording must not play audio during YouTube handoff",p.playWhenReady)
+                assertEquals("silent handoff recording",Recorder.activeName.value)
+                assertFalse("Hidden direct recording needs no audible DVR player",Timeshift.active)
+            } finally {
+                service.get().onStartCommand(Intent().setAction(RecordingService.ACTION_STOP),0,2)
+                service.destroy();activity.stop().destroy();Playback.releaseAll();dir.deleteRecursively()
+            }
+        }
+    }
+
     @Test fun foregroundReturnDoesNotStealTheOnlyStreamFromARecording() {
         val dir=Files.createTempDirectory("ryzod-foreground-budget").toFile()
         val context=storageContext(dir)

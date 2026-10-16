@@ -468,7 +468,7 @@ object DownloadStore {
     /** Start the oldest queued item when no download socket is active.
      * Returns true when a transfer was launched. */
     fun kickQueue(context: Context, prefs: SharedPreferences): Boolean = synchronized(DownloadService.dispatchLock) {
-        if (DownloadService.hasActive()) return@synchronized false
+        if (BackgroundTransferBudget.exhausted || DownloadService.hasActive()) return@synchronized false
         val next = load(prefs).firstOrNull {
             state(context, it.id) == STATE_PENDING && it.url.isNotBlank()
         } ?: return@synchronized false
@@ -568,6 +568,7 @@ class DownloadService : Service() {
     @Volatile private var job: Job? = null
     @Volatile private var transfer: Transfer? = null
     private var latestStartId = 0
+    @Volatile private var systemTimedOut = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -606,6 +607,21 @@ class DownloadService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = synchronized(dispatchLock) {
+        if(systemTimedOut) {
+            val id = intent?.getLongExtra("id",0L) ?: 0L
+            val generation = intent?.getLongExtra("dispatchGeneration",-1L) ?: -1L
+            if(intent?.action == ACTION_START && id != 0L && activeId == id &&
+                dispatchGeneration == generation && activeOwner == null) {
+                val prefs = getSharedPreferences("easyiptv",Context.MODE_PRIVATE)
+                val item = DownloadStore.load(prefs).firstOrNull { it.id == id }
+                DownloadStore.mark(this,id,DownloadStore.STATE_FAILED,
+                    item?.let { File(it.path + ".part").length() } ?: 0L,
+                    error="Previous download is stopping. Resume this item from Downloads.")
+                activeId = 0L
+            }
+            stopSelf(startId)
+            return@synchronized START_NOT_STICKY
+        }
         latestStartId = startId
         when (intent?.action) {
             ACTION_START -> {
@@ -812,7 +828,7 @@ class DownloadService : Service() {
                         DownloadStore.STATE_FAILED,
                         partialDone,
                         total,
-                        (t.message ?: "Download failed") + if (partialDone > 0L) " — Resume is available." else ""
+                        (if(systemTimedOut) "Android background time limit reached. Open RYZOD to resume." else t.message ?: "Download failed") + if (partialDone > 0L) " — Resume is available." else ""
                     )
                 }
             }
@@ -824,14 +840,49 @@ class DownloadService : Service() {
             owner.wakeLock = null
             synchronized(dispatchLock) {
                 if (activeOwner === owner && activeId == id && dispatchGeneration == owner.generation) {
-                    stopForeground(STOP_FOREGROUND_DETACH)
+                    stopForeground(if(systemTimedOut) STOP_FOREGROUND_REMOVE else STOP_FOREGROUND_DETACH)
                     activeCall = null; activeId = 0L; activeOwner = null
                     if (transfer === owner) { transfer = null; job = null }
                     val prefs = getSharedPreferences("easyiptv", Context.MODE_PRIVATE)
-                    val startedNext = DownloadStore.kickQueue(applicationContext, prefs)
+                    val startedNext = !systemTimedOut && DownloadStore.kickQueue(applicationContext, prefs)
                     if (!startedNext) stopSelf(latestStartId)
                 }
             }
+        }
+    }
+
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        synchronized(dispatchLock) {
+            systemTimedOut = true
+            BackgroundTransferBudget.onTimeout()
+            val prefs = getSharedPreferences("easyiptv", Context.MODE_PRIVATE)
+            // Publish terminal state even if cancellation wins before the
+            // coroutine body enters its try/catch block.
+            val ownedId = transfer?.takeIf { activeOwner === it }?.id
+                ?: activeId.takeIf { activeOwner == null }
+            if(ownedId != null && ownedId != 0L && DownloadStore.state(this, ownedId) == DownloadStore.STATE_RUNNING) {
+                val item = DownloadStore.load(prefs).firstOrNull { it.id == ownedId }
+                DownloadStore.mark(this, ownedId, DownloadStore.STATE_FAILED,
+                    item?.let { File(it.path + ".part").length() } ?: 0L,
+                    error = "Android background time limit reached. Open RYZOD to resume.")
+            }
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            // Cancellation closes the stream; its completion callback still
+            // owns the provider reservation until the writer has closed.
+            transfer?.let { owner ->
+                runCatching { owner.call?.cancel() }
+                owner.job?.cancel()
+                runCatching { owner.wakeLock?.let { if(it.isHeld) it.release() } }
+            }
+            if(activeOwner == null && activeId != 0L) {
+                val prefs = getSharedPreferences("easyiptv", Context.MODE_PRIVATE)
+                val item = DownloadStore.load(prefs).firstOrNull { it.id == activeId }
+                DownloadStore.mark(this, activeId, DownloadStore.STATE_FAILED,
+                    item?.let { File(it.path + ".part").length() } ?: 0L,
+                    error = "Android background time limit reached. Open RYZOD to resume.")
+                activeId = 0L
+            }
+            stopSelf()
         }
     }
 

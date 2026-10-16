@@ -123,6 +123,7 @@ class RecordingService : Service() {
     private var latestStartId=0
     private var session: RecordingRecovery.Session? = null
     @Volatile private var stopRequested = false
+    @Volatile private var systemTimedOut = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -151,6 +152,7 @@ class RecordingService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if(systemTimedOut) { stopSelf(); return START_NOT_STICKY }
         latestStartId=startId
         val prefs=getSharedPreferences("easyiptv",Context.MODE_PRIVATE)
         if(intent?.action==ACTION_STOP) {
@@ -413,6 +415,27 @@ class RecordingService : Service() {
                 }
             }
         }
+    }
+
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        // Android 15+ shares a background budget across dataSync services.
+        // Stop promptly, retain the video, and invalidate automatic recovery.
+        systemTimedOut = true
+        BackgroundTransferBudget.onTimeout()
+        stopRequested = true
+        val prefs = getSharedPreferences("easyiptv", Context.MODE_PRIVATE)
+        (session ?: RecordingRecovery.load(prefs))?.let { saved ->
+            RecordingRecovery.clear(prefs, saved.id)
+            // Avoid sending a new service-start intent from timeout cleanup.
+            if(Recorder.activeSessionId == saved.id) Recorder.activeScheduleId = -1
+            if(saved.scheduleId >= 0) ScheduleStore.cancel(this, prefs, saved.scheduleId)
+        }
+        Recorder.lastStatus.value = "Recording stopped early — Android's background time limit was reached. Saved video is in Recordings."
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        networkOwner?.call?.cancel()
+        job?.cancel()
+        runCatching { wakeLock?.let { if(it.isHeld) it.release() } }
+        stopSelf()
     }
 
     override fun onDestroy() {

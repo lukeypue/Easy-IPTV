@@ -17,7 +17,7 @@ import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28], qualifiers = "w960dp-h540dp-land")
-@OptIn(ExperimentalTestApi::class)
+@OptIn(ExperimentalTestApi::class, androidx.compose.ui.ExperimentalComposeUiApi::class)
 class LibraryItemMenusTest {
     @get:Rule val ui = createComposeRule()
     private val context = ApplicationProvider.getApplicationContext<Context>()
@@ -63,9 +63,18 @@ class LibraryItemMenusTest {
 
     @Test fun remoteOpensMenuAndWrapsFromPlayToClose() {
         download(DownloadStore.STATE_SUCCESS)
-        ui.setContent { DownloadsPane(prefs) { played = it } }
+        var inputMode: androidx.compose.ui.input.InputModeManager? = null
+        ui.setContent {
+            inputMode = androidx.compose.ui.platform.LocalInputModeManager.current
+            DownloadsPane(prefs) { played = it }
+        }
+        ui.runOnIdle {
+            assertTrue("Fixture must use remote/keyboard mode",inputMode!!.requestInputMode(androidx.compose.ui.input.InputMode.Keyboard))
+        }
         ui.onNodeWithText("Test movie").performSemanticsAction(SemanticsActions.RequestFocus) { it() }
+        ui.onNodeWithText("Test movie").assertIsFocused()
         ui.onNodeWithText("Test movie").performKeyInput { pressKey(Key.DirectionCenter) }
+        ui.runOnIdle { assertNull("Opening the menu must not also activate Play",played) }
         ui.onNodeWithText("PLAY").assertIsFocused()
         ui.onNodeWithText("PLAY").performKeyInput { pressKey(Key.DirectionLeft) }
         ui.onNodeWithText("CLOSE").assertIsFocused()

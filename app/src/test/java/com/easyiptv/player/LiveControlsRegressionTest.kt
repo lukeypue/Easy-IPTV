@@ -91,4 +91,33 @@ class LiveControlsRegressionTest {
             } finally {Playback.releaseAll()}
         }
     }
+    @Test fun activityStartDoesNotRestoreLastChannelBeforeVideoIsVisible() {
+        val controller=Robolectric.buildActivity(MainActivity::class.java).setup()
+        val context=controller.get()
+        try {
+            val p=Playback.open(context,context.getSharedPreferences("silent-startup",Context.MODE_PRIVATE),listOf(Playable("Last channel","http://127.0.0.1:9/live.ts",true)),0,null,false)
+            Playback.resumeFromBackground()
+            assertTrue("Fixture must start an audible live request",p.playWhenReady)
+            controller.pause().stop()
+            assertFalse(p.playWhenReady)
+            controller.start()
+            assertFalse("Activity start must not restore audio behind loading or home screens",p.playWhenReady)
+            controller.resume()
+            assertFalse("No video screen was requested, so startup stays silent",p.playWhenReady)
+        } finally {controller.pause().stop().destroy();Playback.releaseAll()}
+    }
+
+    @Test fun losingForegroundSilencesPlayerBeforeActivityStop() {
+        val controller=Robolectric.buildActivity(MainActivity::class.java).setup()
+        val context=controller.get()
+        try {
+            val p=Playback.open(context,context.getSharedPreferences("silent-handoff",Context.MODE_PRIVATE),listOf(Playable("Last channel","http://127.0.0.1:9/live.ts",true)),0,null,false)
+            Playback.resumeFromBackground()
+            assertTrue("Fixture must start an audible live request",p.playWhenReady)
+            controller.pause()
+            assertFalse("YouTube handoff must silence RYZOD before onStop",p.playWhenReady)
+            assertFalse("A timer during the handoff cannot revive a hidden player",Playback.prepareCurrentForRecording())
+        } finally {controller.stop().destroy();Playback.releaseAll()}
+    }
+
 }

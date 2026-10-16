@@ -19,6 +19,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.setContent
 import androidx.annotation.OptIn
 import androidx.compose.foundation.Canvas
@@ -33,6 +34,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Column
@@ -43,6 +45,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -428,6 +431,8 @@ private fun RyzodGridBackground() {
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val television = resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_TYPE_MASK == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+        if(!television) enableEdgeToEdge()
         // RYZOD low-memory profile: cap poster/logo RAM cache on Fire TV.
         coil.Coil.setImageLoader(
             coil.ImageLoader.Builder(this)
@@ -454,7 +459,7 @@ class MainActivity : ComponentActivity() {
                             )
                         )
                 ) {
-                    App()
+                    Box(if(television) Modifier.fillMaxSize() else Modifier.fillMaxSize().safeDrawingPadding()) { App() }
                 }
             }
         }
@@ -493,8 +498,15 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        Playback.resumeFromBackground()
+        BackgroundTransferBudget.onForeground()
         ScheduleStore.rearmAll(this,getSharedPreferences("easyiptv",MODE_PRIVATE))
+    }
+
+    override fun onPause() {
+        // Silence the player before another app takes the screen, including
+        // the gap before onStop in which a scheduled recording may arrive.
+        Playback.pauseForVisibility()
+        super.onPause()
     }
 
     override fun onStop() {
@@ -614,6 +626,8 @@ fun App() {
 
     // The corner mini player: whatever you backed out of keeps playing here.
     var mini by remember { mutableStateOf<MiniState?>(null) }
+    SyncPlaybackVisibility(playlists.isNotEmpty() && startupSettled &&
+        (nav is Nav.Play || (nav is Nav.Home && mini != null)))
     fun openPlay(p: Nav.Play) {
         val target = p.queue.getOrNull(p.start)
         val remoteTarget = target?.url?.let { !it.startsWith("/") && !it.startsWith("file:") } == true
@@ -2892,6 +2906,7 @@ object Playback {
     }
 
     fun setPlaying(playing: Boolean) {
+        backgroundResumePlaying = playing
         val p = player ?: return
         if (pausePreparing) {
             pauseResumeRequested = playing
@@ -3605,11 +3620,15 @@ object Playback {
     ): ExoPlayer {
         val p = ensurePlayer(context, prefs)
         if (attachOnly && queue.isNotEmpty()) return p
+        // A newly selected show requests playback once its visible surface is ready.
+        backgroundResumePlaying = true
         // Leaving a successfully watched live channel should make it immediately
         // available in the surf strip, even before the next channel reaches READY.
         if (liveMode && everReadyC.value) queue.getOrNull(currentIdxC.intValue)?.let { RecentChannels.push(it, prefsRef) }
         queue = newQueue
         val s = start.coerceIn(0, (newQueue.size - 1).coerceAtLeast(0))
+        // Keep the requested channel even when visibility defers zapTo().
+        currentIdxC.intValue = s
         if (newQueue.getOrNull(s)?.isLive == true) {
             directLive = false
             // LIVE only: the lightweight governor may run (Simple Mode disables it).
@@ -3637,7 +3656,7 @@ object Playback {
             }
             p.setMediaSources(sources, s, startAtMs ?: C.TIME_UNSET)
             p.prepare()
-            p.playWhenReady = true
+            p.playWhenReady = !backgroundSuspended
         }
         return p
     }
@@ -3664,7 +3683,10 @@ object Playback {
 
     /** Stop hidden live playback/DVR work. An active recording is the one
      * intentional exception: it owns the single provider stream while hidden. */
-    fun suspendForBackground() {
+    internal fun pauseForVisibility() {
+        // An empty player has no audio intent to suspend. In particular, a
+        // disposed screen must not suspend a later, newly selected player.
+        if(player == null) return
         if (!backgroundSuspended) {
             backgroundResumePlaying = if (pausePreparing) pauseResumeRequested else player?.playWhenReady == true
         }
@@ -3672,8 +3694,12 @@ object Playback {
         pauseResumeRequested = false
         stopGovernor()
         stopVideoHealthWatchdog()
+        player?.pause()
+    }
+
+    fun suspendForBackground() {
+        pauseForVisibility()
         val p = player ?: return
-        p.pause()
         if (Recorder.activeName.value != null) {
             p.pause()
             return
@@ -4572,6 +4598,7 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         }
 
         Spacer(Modifier.height(24.dp))
+        if(BuildConfig.SELF_UPDATES) {
         Text("Updates", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
         Text(
@@ -4617,7 +4644,8 @@ val obj = org.json.JSONObject(raw)
                             Triple(
                                 obj.optInt("versionCode", 0),
                                 obj.optString("versionName", "new version"),
-                                obj.optString("downloadUrl", "")
+                                UpdateDistribution.downloadUrl(obj, BuildConfig.TV_ARTWORK ||
+                                    (ctx.resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_TYPE_MASK == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION))
                             )
                         }
                     }
@@ -4669,6 +4697,36 @@ val obj = org.json.JSONObject(raw)
         }
         if (updateStatus.isNotBlank()) {
             Text(updateStatus, color = Accent, fontSize = 10.sp, modifier = Modifier.padding(top = 5.dp))
+        }
+
+        } else {
+            Text("Updates are supplied by " + if(BuildConfig.DISTRIBUTION == "amazon") "Amazon Appstore." else "Google Play.", color=Muted, fontSize=12.sp)
+        }
+
+        var artworkReport by remember { mutableStateOf<String?>(null) }
+        Chip("Device & artwork check", false) {
+            updateScope.launch {
+                artworkReport = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { LauncherDiagnostics.report(ctx) }
+            }
+        }
+        if(artworkReport != null) {
+            AlertDialog(onDismissRequest={artworkReport=null}, containerColor=SurfaceCol,
+                title={Text("Device & artwork",color=Ink)},
+                text={Column(Modifier.heightIn(max=300.dp).verticalScroll(rememberScrollState())) {
+                    Text("Artwork supplied by this installed app:",color=Ink,fontSize=12.sp)
+                    Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(12.dp)) {
+                        AndroidView(factory={ c -> android.widget.ImageView(c).apply {
+                            scaleType=android.widget.ImageView.ScaleType.FIT_CENTER
+                            setImageDrawable(c.packageManager.getApplicationIcon(c.packageName))
+                        }},modifier=Modifier.weight(1f).height(90.dp))
+                        AndroidView(factory={ c -> android.widget.ImageView(c).apply {
+                            scaleType=android.widget.ImageView.ScaleType.FIT_CENTER
+                            setImageDrawable(c.packageManager.getApplicationInfo(c.packageName,0).loadBanner(c.packageManager))
+                        }},modifier=Modifier.weight(1f).height(90.dp))
+                    }
+                    Text(artworkReport.orEmpty(),color=Ink,fontSize=12.sp)
+                }},
+                confirmButton={TextButton(onClick={artworkReport=null}) {Text("Close")}})
         }
 
         Spacer(Modifier.height(20.dp))
@@ -6401,7 +6459,7 @@ fun PlayerScreen(
     }
     val exo = remember {
         Playback.open(context, prefs, queue, start, startAtMs, attachOnly = attach).also { p ->
-            if (!attach && resumeAt != null) p.playWhenReady = false
+            if (!attach && resumeAt != null) Playback.setPlaying(false)
         }
     }
     fun setCcEnabled(on: Boolean) {
@@ -7155,7 +7213,7 @@ fun PlayerScreen(
                         val p = pendingResume!!
                         pendingResume = null
                         exo.seekTo(p)
-                        exo.playWhenReady = true
+                        Playback.setPlaying(true)
                     }) { Text("Resume", color = Accent) }
                 },
                 dismissButton = {
@@ -7163,7 +7221,7 @@ fun PlayerScreen(
                         pendingResume = null
                         WatchStore.clear(prefs, current.url)
                         exo.seekTo(0)
-                        exo.playWhenReady = true
+                        Playback.setPlaying(true)
                     }) { Text("Start over", color = Muted) }
                 }
             )

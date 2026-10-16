@@ -28,6 +28,7 @@ class DownloadQueueOwnershipTest {
     private val prefs get() = app.getSharedPreferences("easyiptv", Context.MODE_PRIVATE)
 
     @Before fun reset() {
+        BackgroundTransferBudget.onForeground()
         resetIdleDispatch()
         Playback.releaseAll()
         Recorder.usesProviderConnection = false
@@ -36,6 +37,7 @@ class DownloadQueueOwnershipTest {
     }
 
     @After fun cleanUp() {
+        BackgroundTransferBudget.onForeground()
         resetIdleDispatch()
         while (shadowOf(app).nextStartedService != null) {}
     }
@@ -230,4 +232,67 @@ class DownloadQueueOwnershipTest {
             }
         }
     }
+    @Test fun systemTimeoutKeepsPartialDownloadAndDoesNotAdvanceQueue() {
+        ServerSocket(0).use { stalled ->
+            val first=queued(81,"http://127.0.0.1:${stalled.localPort}/movie.mp4")
+            val second=queued(82)
+            val part=File(first.path+".part").apply {writeText("PART")}
+            assertTrue(DownloadStore.kickQueue(app,prefs))
+            val intent=shadowOf(app).nextStartedService!!
+            val service=Robolectric.buildService(DownloadService::class.java).create()
+            try {
+                service.get().onStartCommand(intent,0,1)
+                service.get().onTimeout(1,android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+                assertTrue("Timeout must stop before the platform deadline",shadowOf(service.get()).isStoppedBySelf)
+                destroyAndAwait(service)
+                resetIdleDispatch()
+                assertEquals("PART",part.readText())
+                assertEquals(DownloadStore.STATE_FAILED,DownloadStore.state(app,81))
+                assertEquals("Next movie must wait for user return",DownloadStore.STATE_PENDING,DownloadStore.state(app,82))
+                assertNull("Exhausted service must not auto-start another transfer",shadowOf(app).nextStartedService)
+                assertFalse("Background pane polling must also remain blocked",DownloadStore.kickQueue(app,prefs))
+                BackgroundTransferBudget.onForeground()
+                assertTrue("Returning to app can advance the queue",DownloadStore.kickQueue(app,prefs))
+            } finally {
+                if(DownloadService.hasActive()) destroyAndAwait(service)
+                DownloadStore.stopAndRemove(app,prefs,first)
+                DownloadStore.stopAndRemove(app,prefs,second)
+            }
+        }
+    }
+
+    @Test fun timeoutBeforeWorkerEntryLeavesDownloadResumable() {
+        val pending=java.util.concurrent.ConcurrentLinkedQueue<Runnable>()
+        val dispatcher=object: CoroutineDispatcher() {
+            override fun dispatch(context:kotlin.coroutines.CoroutineContext,block:Runnable) {pending.add(block)}
+        }
+        val service=Robolectric.buildService(DownloadService::class.java).create()
+        val field=DownloadService::class.java.getDeclaredField("scope").apply {isAccessible=true}
+        (field.get(service.get()) as CoroutineScope).cancel()
+        field.set(service.get(),CoroutineScope(SupervisorJob()+dispatcher))
+        val first=queued(91)
+        val next=queued(92)
+        File(first.path+".part").writeText("PART")
+        assertTrue(DownloadStore.kickQueue(app,prefs))
+        try {
+            service.get().onStartCommand(shadowOf(app).nextStartedService!!,0,1)
+            service.get().onTimeout(1,android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            while(pending.isNotEmpty()) pending.poll()?.run()
+            assertEquals("Cancelled-before-entry download must be resumable",DownloadStore.STATE_FAILED,DownloadStore.state(app,91))
+            assertFalse(DownloadService.hasActive())
+            assertEquals("PART",File(first.path+".part").readText())
+            assertTrue("Timeout must remove ongoing foreground notification",shadowOf(service.get()).notificationShouldRemoved)
+            BackgroundTransferBudget.onForeground()
+            assertTrue(DownloadStore.kickQueue(app,prefs))
+            service.get().onStartCommand(shadowOf(app).nextStartedService!!,0,2)
+            assertFalse("Retiring service must release the new unowned reservation",DownloadService.hasActive())
+            assertEquals("Rejected start must stay resumable",DownloadStore.STATE_FAILED,DownloadStore.state(app,92))
+        } finally {
+            service.destroy()
+            while(pending.isNotEmpty()) pending.poll()?.run()
+            DownloadStore.stopAndRemove(app,prefs,first)
+            DownloadStore.stopAndRemove(app,prefs,next)
+        }
+    }
+
 }

@@ -4,6 +4,12 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// Select distribution without changing application identity or customer data.
+val ryzodDistribution = providers.gradleProperty("ryzodDistribution").getOrElse("direct")
+require(ryzodDistribution in setOf("direct", "fire", "amazon", "play")) { "Unknown ryzodDistribution" }
+val tvArtwork = ryzodDistribution in setOf("fire", "amazon")
+val selfUpdates = ryzodDistribution in setOf("direct", "fire")
+
 val releaseKeystorePath = System.getenv("ZAKO_KEYSTORE_PATH")
 val releaseStorePassword = System.getenv("ZAKO_STORE_PASSWORD")
 val releaseKeyAlias = System.getenv("ZAKO_KEY_ALIAS")
@@ -16,16 +22,36 @@ val hasReleaseSigning = listOf(
 ).all { !it.isNullOrBlank() }
 
 android {
-    testOptions { unitTests.isIncludeAndroidResources = true }
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+        unitTests.all {
+            it.systemProperty("robolectric.graphicsMode", "NATIVE")
+            // Playback/recording singletons and native graphics are process-owned.
+            // Keep independent test classes from inheriting another screen's state.
+            it.forkEvery = 1
+        }
+    }
     namespace = "com.easyiptv.player"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.easyiptv.player"
         minSdk = 26
-        targetSdk = 34
-        versionCode = 98
-        versionName = "4.74"
+        targetSdk = 36
+        versionCode = 99
+        versionName = "4.75"
+        buildConfigField("boolean", "TV_ARTWORK", tvArtwork.toString())
+        buildConfigField("boolean", "SELF_UPDATES", selfUpdates.toString())
+        buildConfigField("String", "DISTRIBUTION", "\"$ryzodDistribution\"")
+    }
+
+    sourceSets {
+        for (variant in listOf("debug", "release")) {
+            getByName(variant) {
+                if(tvArtwork) res.srcDir("src/fire/res")
+                if(!selfUpdates) manifest.srcFile("src/store/AndroidManifest.xml")
+            }
+        }
     }
 
     signingConfigs {
@@ -80,7 +106,7 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.2")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.6")
 
-    testImplementation("org.robolectric:robolectric:4.14.1")
+    testImplementation("org.robolectric:robolectric:4.16.1")
     testImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
     val composeBom = platform("androidx.compose:compose-bom:2024.09.00")
