@@ -15,7 +15,7 @@ class LauncherDiagnosticsTest {
     fun reportIdentifiesInstalledWideArtAndBothLaunchPaths() {
         val context=ApplicationProvider.getApplicationContext<Context>()
         val report=LauncherDiagnostics.report(context)
-        assertTrue(report,report.contains("RYZOD 4.75 (99)"))
+        assertTrue(report,report.contains("RYZOD ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"))
         assertTrue(report,report.contains("uiMode=4"))
         assertTrue(report,report.contains("density=213"))
         assertTrue(report,report.contains("app.icon: 1672x941"))

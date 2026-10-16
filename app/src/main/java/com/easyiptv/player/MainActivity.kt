@@ -627,7 +627,7 @@ fun App() {
     // The corner mini player: whatever you backed out of keeps playing here.
     var mini by remember { mutableStateOf<MiniState?>(null) }
     SyncPlaybackVisibility(playlists.isNotEmpty() && startupSettled &&
-        (nav is Nav.Play || (nav is Nav.Home && mini != null)))
+        (nav is Nav.Play || (nav is Nav.Home && mini != null && railSection != "search")))
     fun openPlay(p: Nav.Play) {
         val target = p.queue.getOrNull(p.start)
         val remoteTarget = target?.url?.let { !it.startsWith("/") && !it.startsWith("file:") } == true
@@ -1170,6 +1170,9 @@ fun HomeScreen(
     onSeries: (SeriesItem) -> Unit
 ) {
     val guideRefreshScope = rememberCoroutineScope()
+    // Release the decoder/network even when recording hides the corner view.
+    // The existing full-stop callback also clears the retained mini-TV session.
+    LaunchedEffect(section) { if (section == "search") onCloseMini() }
     // Remote's Back button climbs out one level instead of leaving the app.
     BackHandler(enabled = depth == 1) { onBackToRoot() }
 
@@ -1340,7 +1343,7 @@ fun HomeScreen(
                 // The SAME stream you were watching, showing in the corner while
                 // you browse. Highlight it and press OK to go back full screen —
                 // nothing reloads, because it's one continuous stream.
-                if (mini != null && Playback.player != null && Recorder.activeName.value == null) {
+                if (section != "search" && mini != null && Playback.player != null && Recorder.activeName.value == null) {
                     val mp = mini.queue.getOrNull(Playback.currentIdxC.intValue)
                         ?: mini.queue.getOrNull(mini.index)
                     if (mp != null) {
@@ -4904,13 +4907,17 @@ fun SearchTab(
     val keyboardFocus=remember {FocusRequester()}
     var keyboardOpen by remember {mutableStateOf(false)}
     var resultsFocusRequest by remember {mutableIntStateOf(0)}
-    val indexes by androidx.compose.runtime.produceState<Triple<SearchIndex<LiveChannel>, SearchIndex<Movie>, SearchIndex<SeriesItem>>?>(null,data) {
+    // Raw letters update immediately; only the settled query reaches results.
+    val typedQuery = query.trim()
+    var submittedQuery by remember { mutableStateOf<String?>(null) }
+    val quietQuery by androidx.compose.runtime.produceState(typedQuery, typedQuery) {
+        kotlinx.coroutines.delay(250)
+        value = typedQuery
+    }
+    val indexes by androidx.compose.runtime.produceState<SearchCatalogIndex?>(null,data) {
         value=kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
             val task=kotlinx.coroutines.currentCoroutineContext()
-            val check={ task.ensureActive() }
-            Triple(SearchIndex(data.live,{it.name},checkActive=check),
-                SearchIndex(data.movies,{it.name},{it.searchMeta},check),
-                SearchIndex(data.series,{it.name},{it.searchMeta},check))
+            SearchCatalogIndex(data) { task.ensureActive() }
         }
     }
 
@@ -4956,7 +4963,7 @@ fun SearchTab(
         ) {
             SearchTvKeyboardField(
                 value = query, onValueChange = onQuery,
-                modifier = Modifier.weight(1f), keyboardFocus=keyboardFocus, onEditingChanged={keyboardOpen=it}, onSubmitted={resultsFocusRequest++}
+                modifier = Modifier.weight(1f), keyboardFocus=keyboardFocus, onEditingChanged={keyboardOpen=it}, onSubmitted={submittedQuery=typedQuery;resultsFocusRequest++}
             )
             if (voiceAvailable) {
                 Spacer(Modifier.width(8.dp))
@@ -4984,7 +4991,7 @@ fun SearchTab(
             )
         }
 
-        val q = query.trim()
+        val q = if (typedQuery.isEmpty() || submittedQuery == typedQuery) typedQuery else quietQuery
         if (q.isEmpty()) {
             if (recents.isEmpty()) {
                 Column(
@@ -5033,171 +5040,184 @@ fun SearchTab(
             return
         }
 
-        // Catalog results never wait for the guide index to finish.
-        val matches by androidx.compose.runtime.produceState<SearchMatches?>(null,q,indexes) {
-            val index=indexes ?: return@produceState
-            kotlinx.coroutines.delay(120)
-            value=kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
-                val task=kotlinx.coroutines.currentCoroutineContext()
-                val check={ task.ensureActive() }
-                val matcher=TitleQuery(q)
-                SearchMatches(q,index,index.first.find(matcher,checkActive=check),
-                    index.second.find(matcher,checkActive=check),index.third.find(matcher,checkActive=check),emptyList())
-            }
+        SearchResultsPane(source,prefs,data,q,indexes,resultsFocusRequest,resultsFocus,
+            keyboardOpen,keyboardFocus,{saveRecent(it)},{searchInfoMovie=it},onPlayLive,onSeries)
+    }
+}
+
+// Raw keystrokes can skip this expensive subtree until the query settles.
+@android.annotation.SuppressLint("ProduceStateDoesNotAssignValue")
+@Composable
+private fun SearchResultsPane(
+    source: Source?, prefs: SharedPreferences, data: AppData, q: String,
+    indexes: SearchCatalogIndex?, resultsFocusRequest: Int, resultsFocus: FocusRequester,
+    keyboardOpen: Boolean, keyboardFocus: FocusRequester,
+    onSaveRecent: (String) -> Unit, onMovieInfo: (Movie) -> Unit,
+    onPlayLive: (List<Playable>, Int) -> Unit, onSeries: (SeriesItem) -> Unit
+) {
+    // Catalog results never wait for the guide index to finish.
+    val matches by androidx.compose.runtime.produceState<SearchMatches?>(null,q,indexes) {
+        val index=indexes ?: return@produceState
+        value=kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            val task=kotlinx.coroutines.currentCoroutineContext()
+            val check={ task.ensureActive() }
+            val matcher=TitleQuery(q)
+            SearchMatches(q,index,index.live.find(matcher,checkActive=check),
+                index.movies.find(matcher,checkActive=check),index.series.find(matcher,checkActive=check),emptyList())
         }
-        val revision=EpgStore.revision.intValue
-        val guideIndex by androidx.compose.runtime.produceState<SearchIndex<EpgStore.GuideHit>?>(null,revision) {
-            value=kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
-                val task=kotlinx.coroutines.currentCoroutineContext()
-                SearchIndex(EpgStore.searchEntries(),{it.entry.title},checkActive={task.ensureActive()})
-            }
+    }
+    val revision=EpgStore.revision.intValue
+    val guideIndex by androidx.compose.runtime.produceState<SearchIndex<EpgStore.GuideHit>?>(null,revision) {
+        value=kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            val task=kotlinx.coroutines.currentCoroutineContext()
+            SearchIndex(EpgStore.searchEntries(),{it.entry.title},checkActive={task.ensureActive()})
         }
-        val guideMatches by androidx.compose.runtime.produceState<Triple<String,SearchIndex<EpgStore.GuideHit>,List<EpgStore.GuideHit>>?>(null,q,guideIndex) {
-            val index=guideIndex ?: return@produceState
-            kotlinx.coroutines.delay(180)
-            value=kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
-                val task=kotlinx.coroutines.currentCoroutineContext()
-                val now=System.currentTimeMillis()
-                Triple(q,index,index.find(TitleQuery(q),30,{task.ensureActive()},{it.entry.endMs>now}))
-            }
+    }
+    val guideMatches by androidx.compose.runtime.produceState<Triple<String,SearchIndex<EpgStore.GuideHit>,List<EpgStore.GuideHit>>?>(null,q,guideIndex) {
+        val index=guideIndex ?: return@produceState
+        kotlinx.coroutines.delay(180)
+        value=kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            val task=kotlinx.coroutines.currentCoroutineContext()
+            val now=System.currentTimeMillis()
+            Triple(q,index,index.find(TitleQuery(q),30,{task.ensureActive()},{it.entry.endMs>now}))
         }
-        val currentMatches=matches?.takeIf { it.query==q && it.indexIdentity===indexes }
-        if(currentMatches==null) {
-            Text("Searching…",color=Muted,modifier=Modifier.padding(16.dp))
-            return
-        }
-        val liveHits=currentMatches.live
-        val movieHits=currentMatches.movies
-        val seriesHits=currentMatches.series
-        val guideHits=guideMatches?.takeIf { it.first==q && it.second===guideIndex }?.third.orEmpty()
+    }
+    val currentMatches=matches?.takeIf { it.query==q && it.indexIdentity===indexes }
+    if(currentMatches==null) {
+        Text("Searching…",color=Muted,modifier=Modifier.padding(16.dp))
+        return
+    }
+    val liveHits=currentMatches.live
+    val movieHits=currentMatches.movies
+    val seriesHits=currentMatches.series
+    val guideHits=guideMatches?.takeIf { it.first==q && it.second===guideIndex }?.third.orEmpty()
 
 
-        // Match guide channels back to playable channels (by guide id, then by name).
-        val context = LocalContext.current
-        val byEpgId = remember(data) { data.live.filter { it.epgId != null }.associateBy { it.epgId!!.lowercase() } }
-        val byNorm = remember(data) {
-            data.live.associateBy { it.name.lowercase().replace(Regex("[^a-z0-9]"), "") }
-        }
-        val guideFmt = remember { SimpleDateFormat("EEE h:mm a", Locale.getDefault()) }
+    // Match guide channels back to playable channels (by guide id, then by name).
+    val context = LocalContext.current
+    // Prepared once off the UI thread, retained across query changes.
+    val byEpgId = indexes?.byEpgId.orEmpty()
+    val byNorm = indexes?.byNorm.orEmpty()
+    val guideFmt = remember { SimpleDateFormat("EEE h:mm a", Locale.getDefault()) }
 
-        // Search used to launch a live hit as a one-item queue. That made the
-        // channel play, but RYZOD no longer knew its real lineup position:
-        // channel up/down and the recent-channel mini guide broke (the 24/7
-        // Star Wars test exposed it). Always re-enter Live with the complete
-        // playlist queue and the searched channel's true index.
-        fun playLiveHit(ch: LiveChannel) {
-            val fullQueue = data.live.map { livePlayable(prefs, it) }
-            val idx = data.live.indexOfFirst { it.url == ch.url }.coerceAtLeast(0)
-            onPlayLive(fullQueue, idx)
-        }
+    // Search used to launch a live hit as a one-item queue. That made the
+    // channel play, but RYZOD no longer knew its real lineup position:
+    // channel up/down and the recent-channel mini guide broke (the 24/7
+    // Star Wars test exposed it). Always re-enter Live with the complete
+    // playlist queue and the searched channel's true index.
+    fun playLiveHit(ch: LiveChannel) {
+        val fullQueue = data.live.map { livePlayable(prefs, it) }
+        val idx = data.live.indexOfFirst { it.url == ch.url }.coerceAtLeast(0)
+        onPlayLive(fullQueue, idx)
+    }
 
-        if (liveHits.isEmpty() && movieHits.isEmpty() && seriesHits.isEmpty() && guideHits.isEmpty()) {
-            Column(
-                Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text("Nothing found for \"$q\".", color = Muted, fontSize = 14.sp)
-            }
-            return
-        }
-
-        LaunchedEffect(resultsFocusRequest) {
-            if(resultsFocusRequest>0) {
-                androidx.compose.runtime.withFrameNanos { }
-                androidx.compose.runtime.withFrameNanos { }
-                runCatching {resultsFocus.requestFocus()}
-            }
-        }
-        LazyColumn(
-            modifier=Modifier.focusRequester(resultsFocus).focusGroup(),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+    if (liveHits.isEmpty() && movieHits.isEmpty() && seriesHits.isEmpty() && guideHits.isEmpty()) {
+        Column(
+            Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            if (liveHits.isNotEmpty()) {
-                item { SectionHeader("Live TV") }
-                item {
-                    LazyRow(Modifier.focusProperties { up=if(keyboardOpen) keyboardFocus else FocusRequester.Default }, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-                        items(liveHits, key = { it.id }) { ch ->
-                            SearchLiveCard(ch) { saveRecent(q); playLiveHit(ch) }
+            Text("Nothing found for \"$q\".", color = Muted, fontSize = 14.sp)
+        }
+        return
+    }
+
+    LaunchedEffect(resultsFocusRequest) {
+        if(resultsFocusRequest>0) {
+            androidx.compose.runtime.withFrameNanos { }
+            androidx.compose.runtime.withFrameNanos { }
+            runCatching {resultsFocus.requestFocus()}
+        }
+    }
+    LazyColumn(
+        modifier=Modifier.focusRequester(resultsFocus).focusGroup(),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        if (liveHits.isNotEmpty()) {
+            item { SectionHeader("Live TV") }
+            item {
+                LazyRow(Modifier.focusProperties { up=if(keyboardOpen) keyboardFocus else FocusRequester.Default }, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                    items(liveHits, key = { it.id }) { ch ->
+                        SearchLiveCard(ch) { onSaveRecent(q); playLiveHit(ch) }
+                    }
+                }
+            }
+        }
+        if (movieHits.isNotEmpty()) {
+            item { SectionHeader("Movies • title / cast / director / genre") }
+            item {
+                LazyRow(Modifier.focusProperties { if(liveHits.isEmpty()) up=if(keyboardOpen) keyboardFocus else FocusRequester.Default }, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    items(movieHits) { m ->
+                        PosterCard(m.name, m.icon, movie=m, source=source) {
+                            onSaveRecent(q)
+                            onMovieInfo(m)
                         }
                     }
                 }
             }
-            if (movieHits.isNotEmpty()) {
-                item { SectionHeader("Movies • title / cast / director / genre") }
-                item {
-                    LazyRow(Modifier.focusProperties { if(liveHits.isEmpty()) up=if(keyboardOpen) keyboardFocus else FocusRequester.Default }, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        items(movieHits) { m ->
-                            PosterCard(m.name, m.icon, movie=m, source=source) {
-                                saveRecent(q)
-                                searchInfoMovie = m
+        }
+        if (seriesHits.isNotEmpty()) {
+            item { SectionHeader("Series • title / cast / director / genre") }
+            item {
+                LazyRow(Modifier.focusProperties { if(liveHits.isEmpty() && movieHits.isEmpty()) up=if(keyboardOpen) keyboardFocus else FocusRequester.Default }, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    items(seriesHits) { s ->
+                        PosterCard(s.name, s.icon) { onSaveRecent(q); onSeries(s) }
+                    }
+                }
+            }
+        }
+        if (guideHits.isNotEmpty()) {
+            item { SectionHeader("TV Guide — upcoming shows") }
+            itemsIndexed(guideHits) { hitIndex, hit ->
+                val ch = byEpgId[hit.channelXmlId]
+                    ?: byNorm[hit.channelName.lowercase().replace(Regex("[^a-z0-9]"), "")]
+                val now = System.currentTimeMillis()
+                val airingNow = now in hit.entry.startMs until hit.entry.endMs
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusProperties { if(hitIndex==0 && liveHits.isEmpty() && movieHits.isEmpty() && seriesHits.isEmpty()) up=if(keyboardOpen) keyboardFocus else FocusRequester.Default }
+                        .tvFocus()
+                        .background(SurfaceCol, RoundedCornerShape(14.dp))
+                        .clickable(enabled = ch != null) {
+                            if (ch == null) return@clickable
+                            onSaveRecent(q)
+                            if (airingNow) {
+                                playLiveHit(ch)
+                            } else {
+                                toast(context, ScheduleStore.add(context, prefs, hit.entry.title, ch.name, ch.url, hit.entry.startMs, hit.entry.endMs))
                             }
                         }
+                        .padding(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            hit.entry.title,
+                            color = Ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            "${guideFmt.format(Date(hit.entry.startMs))}  •  ${ch?.name ?: hit.channelName}" +
+                                if (ch == null) "  (channel not in your playlist)" else "",
+                            color = if (airingNow) Accent else Muted, fontSize = 12.sp,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis
+                        )
                     }
-                }
-            }
-            if (seriesHits.isNotEmpty()) {
-                item { SectionHeader("Series • title / cast / director / genre") }
-                item {
-                    LazyRow(Modifier.focusProperties { if(liveHits.isEmpty() && movieHits.isEmpty()) up=if(keyboardOpen) keyboardFocus else FocusRequester.Default }, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        items(seriesHits) { s ->
-                            PosterCard(s.name, s.icon) { saveRecent(q); onSeries(s) }
-                        }
-                    }
-                }
-            }
-            if (guideHits.isNotEmpty()) {
-                item { SectionHeader("TV Guide — upcoming shows") }
-                itemsIndexed(guideHits) { hitIndex, hit ->
-                    val ch = byEpgId[hit.channelXmlId]
-                        ?: byNorm[hit.channelName.lowercase().replace(Regex("[^a-z0-9]"), "")]
-                    val now = System.currentTimeMillis()
-                    val airingNow = now in hit.entry.startMs until hit.entry.endMs
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .focusProperties { if(hitIndex==0 && liveHits.isEmpty() && movieHits.isEmpty() && seriesHits.isEmpty()) up=if(keyboardOpen) keyboardFocus else FocusRequester.Default }
-                            .tvFocus()
-                            .background(SurfaceCol, RoundedCornerShape(14.dp))
-                            .clickable(enabled = ch != null) {
-                                if (ch == null) return@clickable
-                                saveRecent(q)
-                                if (airingNow) {
-                                    playLiveHit(ch)
-                                } else {
-                                    toast(context, ScheduleStore.add(context, prefs, hit.entry.title, ch.name, ch.url, hit.entry.startMs, hit.entry.endMs))
-                                }
-                            }
-                            .padding(10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                hit.entry.title,
-                                color = Ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                "${guideFmt.format(Date(hit.entry.startMs))}  •  ${ch?.name ?: hit.channelName}" +
-                                    if (ch == null) "  (channel not in your playlist)" else "",
-                                color = if (airingNow) Accent else Muted, fontSize = 12.sp,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        if (ch != null && (airingNow || ch.url.endsWith(".ts"))) {
-                            Icon(
-                                if (airingNow) Icons.Filled.PlayArrow else Icons.Filled.FiberManualRecord,
-                                contentDescription = if (airingNow) "Watch now" else "Schedule recording",
-                                tint = if (airingNow) Accent else Live
-                            )
-                        }
+                    if (ch != null && (airingNow || ch.url.endsWith(".ts"))) {
+                        Icon(
+                            if (airingNow) Icons.Filled.PlayArrow else Icons.Filled.FiberManualRecord,
+                            contentDescription = if (airingNow) "Watch now" else "Schedule recording",
+                            tint = if (airingNow) Accent else Live
+                        )
                     }
                 }
             }
         }
     }
 }
+
 
 @Composable
 private fun SearchLiveCard(ch: LiveChannel, onClick: () -> Unit) {
