@@ -4909,10 +4909,10 @@ fun SearchTab(
     var resultsFocusRequest by remember {mutableIntStateOf(0)}
     // Raw letters update immediately; only the settled query reaches results.
     val typedQuery = query.trim()
-    var submittedQuery by remember { mutableStateOf<String?>(null) }
-    val quietQuery by androidx.compose.runtime.produceState(typedQuery, typedQuery) {
-        kotlinx.coroutines.delay(250)
-        value = typedQuery
+    var appliedQuery by remember { mutableStateOf(typedQuery) }
+    LaunchedEffect(typedQuery) {
+        if (typedQuery.isNotEmpty()) kotlinx.coroutines.delay(250)
+        appliedQuery = typedQuery
     }
     val indexes by androidx.compose.runtime.produceState<SearchCatalogIndex?>(null,data) {
         value=kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
@@ -4963,7 +4963,7 @@ fun SearchTab(
         ) {
             SearchTvKeyboardField(
                 value = query, onValueChange = onQuery,
-                modifier = Modifier.weight(1f), keyboardFocus=keyboardFocus, onEditingChanged={keyboardOpen=it}, onSubmitted={submittedQuery=typedQuery;resultsFocusRequest++}
+                modifier = Modifier.weight(1f), keyboardFocus=keyboardFocus, onEditingChanged={keyboardOpen=it}, onSubmitted={appliedQuery=typedQuery;resultsFocusRequest++}
             )
             if (voiceAvailable) {
                 Spacer(Modifier.width(8.dp))
@@ -4991,7 +4991,7 @@ fun SearchTab(
             )
         }
 
-        val q = if (typedQuery.isEmpty() || submittedQuery == typedQuery) typedQuery else quietQuery
+        val q = if (typedQuery.isEmpty()) "" else appliedQuery
         if (q.isEmpty()) {
             if (recents.isEmpty()) {
                 Column(

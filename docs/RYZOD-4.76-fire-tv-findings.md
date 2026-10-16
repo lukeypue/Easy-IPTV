@@ -17,6 +17,13 @@ so stale launcher state is a strong inference rather than a directly inspected
 database finding. Changing another resource name or resizing another banner
 does not have evidence behind it as a fix for that stale tile.
 
+At 14:44 MDT Luke also confirmed the correct icon in Fire Stick's own app
+Settings. At 14:53 MDT he reported clearing RYZOD cache/data, uninstalling,
+and reinstalling the Fire APK, with the old home tile unchanged. This rules
+out RYZOD's private cache/preferences as the cause of that old image. Amazon
+Home's persistent launcher state or catalog image mapping remain hypotheses;
+this workspace cannot inspect either. Do not repeat app resets as a remedy.
+
 ## Current primary-source reports
 
 - NuvioTV issue 2347, opened June 15, 2026, documents a GitHub-sideloaded APK
