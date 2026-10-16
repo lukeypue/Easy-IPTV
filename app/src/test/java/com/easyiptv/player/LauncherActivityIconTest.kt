@@ -32,7 +32,7 @@ class LauncherActivityIconTest {
         assertTrue("An alternate launcher must receive the same complete brand artwork",roundId!=0)
         val round=context.getDrawable(roundId)
         assertTrue("Round-icon consumers must not get the obsolete cropped adaptive emblem",round is BitmapDrawable)
-        val expected=(context.getDrawable(if(BuildConfig.TV_ARTWORK) R.drawable.ryzod_tv_artwork_466 else R.drawable.ryzod_artwork_464) as BitmapDrawable).bitmap
+        val expected=(context.getDrawable(R.drawable.ryzod_artwork_464) as BitmapDrawable).bitmap
         assertTrue("Alternate icon keeps the wordmark",(round as BitmapDrawable).bitmap.sameAs(expected))
     }
 
@@ -43,12 +43,13 @@ class LauncherActivityIconTest {
         val activity = pm.getActivityInfo(ComponentName(context, MainActivity::class.java), 0)
         assertTrue("Fire TV launchers must have an explicit activity icon", activity.icon != 0)
         assertTrue("Fire TV launchers must have an explicit activity logo", activity.logo != 0)
-        for (icon in listOf(activity.loadIcon(pm), activity.loadLogo(pm), activity.loadBanner(pm))) {
+        for ((index, icon) in listOf(activity.loadIcon(pm), activity.loadLogo(pm), activity.loadBanner(pm)).withIndex()) {
             assertTrue("TV artwork must resolve directly to a legacy bitmap", icon is BitmapDrawable)
             val bitmap = (icon as BitmapDrawable).bitmap
-            assertEquals(16.0 / 9.0, bitmap.width.toDouble() / bitmap.height, 0.002)
-            val expected = context.getDrawable(R.drawable.ryzod_tv_artwork_466) as BitmapDrawable
-            assertTrue("Use the approved wide logo", bitmap.sameAs(expected.bitmap))
+            val squareIcon = BuildConfig.TV_ARTWORK && index < 2
+            assertEquals(if (squareIcon) 1.0 else 16.0 / 9.0, bitmap.width.toDouble() / bitmap.height, 0.002)
+            val expected = context.getDrawable(if (squareIcon) R.drawable.ryzod_artwork_464 else R.drawable.ryzod_tv_artwork_466) as BitmapDrawable
+            assertTrue("Use the approved artwork for this launcher surface", bitmap.sameAs(expected.bitmap))
         }
         val launch = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER)
             .setPackage(context.packageName)
@@ -60,7 +61,7 @@ class LauncherActivityIconTest {
 
     @Test
     @Config(sdk = [28], qualifiers = "w360dp-h640dp-port-notnight-xhdpi")
-    fun defaultLauncherConfigurationAlsoExposesWideArtwork() {
+    fun defaultLauncherConfigurationAlsoExposesBitmapArtwork() {
         val pm = context.packageManager
         val activity = pm.getActivityInfo(ComponentName(context, MainActivity::class.java), 0)
         assertTrue(activity.loadIcon(pm) is BitmapDrawable)
@@ -68,7 +69,7 @@ class LauncherActivityIconTest {
     }
     @Test
     @Config(sdk=[26,28,30],qualifiers="w960dp-h540dp-land-television-tvdpi")
-    fun bothLauncherCategoriesKeepWideArtworkAtEveryRequestedDensity() {
+    fun bothLauncherCategoriesKeepArtworkProportionsAtEveryRequestedDensity() {
         val pm=context.packageManager
         val app=pm.getApplicationInfo(context.packageName,0)
         val activity=pm.getActivityInfo(ComponentName(context,MainActivity::class.java),0)
@@ -77,13 +78,16 @@ class LauncherActivityIconTest {
                 val drawable=context.resources.getDrawableForDensity(id,density,context.theme)
                 assertTrue(drawable is BitmapDrawable)
                 val bitmap=(drawable as BitmapDrawable).bitmap
-                assertEquals("Wide artwork at density $density",16.0/9.0,bitmap.width.toDouble()/bitmap.height,0.002)
+                val squareIcon = BuildConfig.TV_ARTWORK && id != app.banner && id != activity.banner
+                assertEquals("Artwork at density $density",if (squareIcon) 1.0 else 16.0/9.0,bitmap.width.toDouble()/bitmap.height,0.002)
+                val expected = context.getDrawable(if (squareIcon) R.drawable.ryzod_artwork_464 else R.drawable.ryzod_tv_artwork_466) as BitmapDrawable
+                assertTrue(bitmap.sameAs(expected.bitmap))
             }
         }
         for(category in listOf(Intent.CATEGORY_LAUNCHER,Intent.CATEGORY_LEANBACK_LAUNCHER)) {
             val resolved=pm.resolveActivity(Intent(Intent.ACTION_MAIN).addCategory(category).setPackage(context.packageName),0)!!
             val bitmap=(resolved.loadIcon(pm) as BitmapDrawable).bitmap
-            assertEquals(category,16.0/9.0,bitmap.width.toDouble()/bitmap.height,0.002)
+            assertEquals(category,if (BuildConfig.TV_ARTWORK) 1.0 else 16.0/9.0,bitmap.width.toDouble()/bitmap.height,0.002)
         }
     }
 

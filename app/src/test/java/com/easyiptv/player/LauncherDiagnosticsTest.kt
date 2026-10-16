@@ -18,7 +18,7 @@ class LauncherDiagnosticsTest {
         assertTrue(report,report.contains("RYZOD ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"))
         assertTrue(report,report.contains("uiMode=4"))
         assertTrue(report,report.contains("density=213"))
-        assertTrue(report,report.contains("app.icon: 1672x941"))
+        assertTrue(report,report.contains(if(BuildConfig.TV_ARTWORK) "app.icon: 1536x1536" else "app.icon: 1672x941"))
         assertTrue(report,report.contains("LEANBACK_LAUNCHER:"))
         assertTrue(report,report.contains("LAUNCHER:"))
         assertTrue(report,report.contains("sha256="))
@@ -28,7 +28,7 @@ class LauncherDiagnosticsTest {
     @Test @Config(qualifiers="mdpi-notouch")
     fun defaultLoaderConfigurationIdentifiesSquareFallback() {
         val report=LauncherDiagnostics.report(ApplicationProvider.getApplicationContext())
-        assertTrue(report,report.contains(if(BuildConfig.TV_ARTWORK) "app.icon: 1672x941" else "app.icon: 1536x1536"))
+        assertTrue(report,report.contains("app.icon: 1536x1536"))
         assertTrue(report,report.contains("app.banner: 1672x941"))
     }
 }

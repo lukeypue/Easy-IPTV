@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Fire Home uses a square icon slot; the wide artwork belongs to the banner. -->
 <bitmap xmlns:android="http://schemas.android.com/apk/res/android"
-    android:src="@drawable/ryzod_tv_artwork_466"
+    android:src="@drawable/ryzod_artwork_464"
     android:gravity="fill" android:filter="true" />

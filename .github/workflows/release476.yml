@@ -39,7 +39,7 @@ jobs:
       - name: Full phone/universal regression suite
         run: |
           gradle testDebugUnitTest --max-workers=1 --no-daemon --stacktrace
-          python3 tools/verify_unit_results.py app/build/test-results/testDebugUnitTest 153
+          python3 tools/verify_unit_results.py app/build/test-results/testDebugUnitTest 155
           cp -R app/build/test-results /tmp/ryzod-476-tests-direct
       - name: Lint and build signed phone/universal APK
         env:
@@ -53,7 +53,7 @@ jobs:
       - name: Full Fire TV regression suite
         run: |
           gradle -PryzodDistribution=fire testDebugUnitTest --max-workers=1 --no-daemon --stacktrace
-          python3 tools/verify_unit_results.py app/build/test-results/testDebugUnitTest 153
+          python3 tools/verify_unit_results.py app/build/test-results/testDebugUnitTest 155
           cp -R app/build/test-results /tmp/ryzod-476-tests-fire
       - name: Lint and build signed Fire TV APK
         env:

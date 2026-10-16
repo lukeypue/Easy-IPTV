@@ -13,12 +13,12 @@
   for the typing pause.
 - Includes 4.75's startup/background audio fixes and the existing Live TV fixes.
 
-The approved artwork is unchanged. Photos confirm 4.75's Fire package supplies
-the correct wide app icon/banner but Amazon's pinned tile retains the old R.
-Current developer reports distinguish that stale tile from Fire TV's square
-sideloaded-icon presentation. This release does not claim to reset Amazon's
-private launcher cache or force a full-width Appstore tile. See
-`docs/RYZOD-4.76-fire-tv-findings.md` for device evidence and research.
+Fire TV launcher icons now use the approved square RYZOD logo in every Fire
+resource configuration; the wide TV banner remains separate. This avoids
+feeding a wide image into the square Home icon slot shown in the device photo.
+Regression tests check the resolved artwork and its proportions. Amazon may
+still delay refreshing its Home image, and a full-width Appstore tile is not
+guaranteed. See `docs/RYZOD-4.76-fire-tv-findings.md` for device evidence.
 
 Fire TV: RYZOD-v4.76-FireTV.apk. Phone: RYZOD-v4.76.apk. Install over the
 existing app to retain playlists/settings. From 4.75, the in-app updater selects

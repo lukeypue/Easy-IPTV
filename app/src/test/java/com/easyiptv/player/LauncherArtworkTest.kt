@@ -34,8 +34,14 @@ class LauncherArtworkTest {
         val activity = pm.getActivityInfo(ComponentName(context, MainActivity::class.java), 0)
         assertWideArtwork(app.loadBanner(pm))
         assertWideArtwork(activity.loadBanner(pm))
-        assertWideArtwork(app.loadIcon(pm))
-        assertWideArtwork(activity.loadIcon(pm))
+        for (icon in listOf(app.loadIcon(pm), activity.loadIcon(pm))) {
+            if (BuildConfig.TV_ARTWORK) {
+                assertTrue(icon is BitmapDrawable)
+                val square = context.getDrawable(R.drawable.ryzod_artwork_464) as BitmapDrawable
+                assertTrue((icon as BitmapDrawable).bitmap.sameAs(square.bitmap))
+                assertEquals(1.0, icon.bitmap.width.toDouble() / icon.bitmap.height, 0.002)
+            } else assertWideArtwork(icon)
+        }
     }
 
     @Test
@@ -44,8 +50,9 @@ class LauncherArtworkTest {
         val pm = context.packageManager
         val icon = pm.getApplicationInfo(context.packageName, 0).loadIcon(pm)
         assertTrue(icon is BitmapDrawable)
-        assertEquals(if(BuildConfig.TV_ARTWORK) 16.0/9.0 else 1.0, (icon as BitmapDrawable).bitmap.width.toDouble()/icon.bitmap.height, 0.002)
+        assertEquals(1.0, (icon as BitmapDrawable).bitmap.width.toDouble()/icon.bitmap.height, 0.002)
         val original = context.getDrawable(R.drawable.ryzod_artwork_464) as BitmapDrawable
         assertEquals(original.bitmap.width, original.bitmap.height)
+        assertTrue(icon.bitmap.sameAs(original.bitmap))
     }
 }

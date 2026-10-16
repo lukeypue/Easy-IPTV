@@ -56,9 +56,24 @@ Treat stale **content** and square **shape** as separate issues. Keep the
 approved artwork and installed package identity. Do not erase RYZOD data,
 uninstall the app, change package names, add duplicate launcher apps, manipulate
 Amazon's private cache, or promise an APK can force Appstore tile geometry.
-Try the reported unpin/power-cycle/repin sequence on the affected device.
+Do not repeat the unpin/reset suggestions: this launcher does not offer Luke a separate unpin action and reinstalling did not immediately refresh the tile.
 An eventual Amazon Appstore listing needs its separately submitted Fire TV
 artwork; store acceptance and physical launcher results are still unverified.
 
-This update addresses Search memory/typing behavior independently of Amazon's
-launcher. No further speculative artwork rewrite is bundled with it.
+At 15:05 MDT on October 16, Luke reported that Home finally displayed the
+new RYZOD logo after navigating device settings. His 15:06 photo shows the
+wide artwork compressed into the square center of a grey rectangular tile.
+The old-content problem has therefore refreshed on this device; the remaining
+shape problem is directly visible. This also matches the separate square-slot
+reports above. Luke recalls an earlier update regressing a similar state.
+
+4.76 uses the existing approved 1536-by-1536 artwork for Fire application,
+activity, logo, round-icon and launcher-intent paths in default, v26 and
+television resource configurations. The 1672-by-941 TV banner stays separate
+and unchanged. The package identity and resource name remain stable. Phone
+icons and generic Android TV behavior are unchanged. Tests compare the actual
+resolved bitmap with the approved source, check banner separation and cover
+launcher categories, density requests and Android versions. These checks are
+release gates to prevent replacing the square Fire icon with a wide banner
+again. They cannot validate Amazon's refresh timing or force full-width tiles;
+physical-device verification after the update remains necessary.
