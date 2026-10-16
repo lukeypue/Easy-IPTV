@@ -168,6 +168,69 @@ class DvrOwnershipRegressionTest {
         }
     }
 
+    @Test fun failedPauseStorageNeverAutomaticallyResumesLive() {
+        val dir=Files.createTempDirectory("ryzod-paused-storage-failure").toFile()
+        val context=storageContext(dir,available=0)
+        ReviewProvider().use {provider ->
+            try {
+                val p=Playback.open(context,prefs(),listOf(Playable("watch",provider.url("watch"),true)),0,null,false)
+                Playback.setPlaying(false)
+                waitFor("Storage failure did not finish") {!Timeshift.isPreparing}
+                shadowOf(Looper.getMainLooper()).idle()
+                assertFalse("Failed pause storage must leave playback paused",p.playWhenReady)
+                assertFalse(Timeshift.active)
+                Playback.setPlaying(true)
+                assertTrue("Explicit Play must still recover direct viewing",p.playWhenReady)
+            } finally {Playback.releaseAll();dir.deleteRecursively()}
+        }
+    }
+
+    @Test fun liveButtonResumesPausedPlaybackWithoutReplacingRecordingWriter() {
+        val dir=Files.createTempDirectory("ryzod-recording-live-button").toFile()
+        val context=storageContext(dir)
+        ReviewProvider().use {provider ->
+            try {
+                val p=Playback.open(context,prefs(),listOf(Playable("watch",provider.url("watch"),true)),0,null,false)
+                Playback.setPlaying(false)
+                waitFor("Pause did not prime") {Timeshift.bytesWritten>=512*1024}
+                shadowOf(Looper.getMainLooper()).idle()
+                shadowOf(Looper.getMainLooper()).idleFor(2500,TimeUnit.MILLISECONDS)
+                Recorder.activeName.value="watch"
+                val generation=Timeshift.generation()
+                Playback.suspendForBackground()
+                Playback.resumeFromBackground()
+                assertFalse("Foreground return must leave a paused recording paused",p.playWhenReady)
+                assertEquals(generation,Timeshift.generation())
+                assertTrue(Playback.returnToLive())
+                assertTrue("LIVE must resume even when the saved recording owns the writer",p.playWhenReady)
+                assertEquals(generation,Timeshift.generation())
+            } finally {Recorder.activeName.value=null;Playback.releaseAll();dir.deleteRecursively()}
+        }
+    }
+
+    @Test fun recordingWithLateInitialDataStillPrimesThePausedReader() {
+        val dir=Files.createTempDirectory("ryzod-recording-late-prime").toFile()
+        val context=storageContext(dir)
+        val allowPackets=CountDownLatch(1)
+        ReviewProvider(allowPackets).use {provider ->
+            try {
+                val p=Playback.open(context,prefs(),listOf(Playable("watch",provider.url("watch"),true)),0,null,false)
+                Playback.setPlaying(false)
+                Recorder.activeName.value="watch"
+                waitFor("Storage setup did not finish") {!Timeshift.isPreparing}
+                shadowOf(Looper.getMainLooper()).idle()
+                val generation=Timeshift.generation()
+                shadowOf(Looper.getMainLooper()).idleFor(16,TimeUnit.SECONDS)
+                allowPackets.countDown()
+                waitFor("Recording did not receive delayed bytes") {Timeshift.bytesWritten>=512*1024}
+                shadowOf(Looper.getMainLooper()).idleFor(200,TimeUnit.MILLISECONDS)
+                assertNotNull("Late bytes must still attach the local reader",p.currentMediaItem)
+                assertFalse("Priming must preserve the explicit pause",p.playWhenReady)
+                assertEquals(generation,Timeshift.generation())
+            } finally {allowPackets.countDown();Recorder.activeName.value=null;Playback.releaseAll();dir.deleteRecursively()}
+        }
+    }
+
     @Test fun pendingAndFailedStorageKeepTheirProviderReservationUntilRelease() {
         val dir = Files.createTempDirectory("ryzod-pending-owner").toFile()
         val entered = CountDownLatch(1)
@@ -405,7 +468,7 @@ class DvrOwnershipRegressionTest {
         type.getDeclaredMethod("stop").apply { isAccessible = true }.invoke(instance)
     }
 
-    private class ReviewProvider : AutoCloseable {
+    private class ReviewProvider(private val allowPackets: CountDownLatch? = null) : AutoCloseable {
         private val server = ServerSocket(0)
         private val sockets = ConcurrentHashMap.newKeySet<Socket>()
         private val closed = AtomicBoolean()
@@ -426,6 +489,7 @@ class DvrOwnershipRegressionTest {
                             val packets = ByteArray(188 * 1024) { 0x22 }.also { b -> repeat(1024) { b[it * 188] = 0x47 } }
                             val out = socket.getOutputStream()
                             out.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nConnection: close\r\n\r\n".toByteArray())
+                            if(allowPackets!=null) check(allowPackets.await(5,TimeUnit.SECONDS))
                             while (!closed.get()) { out.write(packets); out.flush(); Thread.sleep(10) }
                         } catch (_: Exception) { }
                         finally { sockets.remove(socket); runCatching { socket.close() } }

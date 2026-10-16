@@ -1,9 +1,2 @@
 <?xml version="1.0" encoding="utf-8"?>
-<vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="108dp" android:height="108dp"
-    android:viewportWidth="108" android:viewportHeight="108">
-    <path android:fillColor="#FFFFFF"
-        android:pathData="M30,36h48a5,5 0 0,1 5,5v28a5,5 0 0,1 -5,5h-48a5,5 0 0,1 -5,-5v-28a5,5 0 0,1 5,-5z"/>
-    <path android:fillColor="#8A1FA8" android:pathData="M48,44l18,11l-18,11z"/>
-    <path android:fillColor="#FFFFFF" android:pathData="M44,77h20v4h-20z"/>
-</vector>
+<bitmap xmlns:android="http://schemas.android.com/apk/res/android" android:src="@drawable/ryzod_artwork_464" android:gravity="fill" android:filter="true" />

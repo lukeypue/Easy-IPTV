@@ -463,15 +463,26 @@ class MainActivity : ComponentActivity() {
     // This is the public Activity input entry point. ComponentActivity inherits
     // an AndroidX-internal annotation on its implementation; dispatch must still
     // delegate to super so Compose and the platform receive unhandled keys.
+    private val consumedRemoteKeys = mutableSetOf<Int>()
+
     @android.annotation.SuppressLint("RestrictedApi")
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
         // A cached playlist may be visible before the fresh provider refresh is
         // finished. During that short window, swallow remote input so nobody can
         // drive into half-built lists and trigger the startup crash/glitch path.
         if (AppInputGate.startupLocked) return true
-        if (event.action == android.view.KeyEvent.ACTION_DOWN &&
-            PlayerKeys.priority?.invoke(event.keyCode) == true
-        ) return true
+        // A press that opens an overlay owns its repeats and release. Otherwise
+        // ACTION_UP can click the Pause button which just gained focus.
+        if (event.action == android.view.KeyEvent.ACTION_UP && consumedRemoteKeys.remove(event.keyCode)) return true
+        if (event.action == android.view.KeyEvent.ACTION_DOWN) {
+            if (event.keyCode in consumedRemoteKeys && event.repeatCount > 0 &&
+                (event.keyCode == android.view.KeyEvent.KEYCODE_DPAD_CENTER ||
+                    event.keyCode == android.view.KeyEvent.KEYCODE_ENTER)) return true
+            if (PlayerKeys.priority?.invoke(event.keyCode) == true) {
+                consumedRemoteKeys.add(event.keyCode)
+                return true
+            }
+        }
         return super.dispatchKeyEvent(event)
     }
 
@@ -487,6 +498,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        consumedRemoteKeys.clear()
         StabilityCore.beforeBackground()
         BackgroundWorkSupervisor.cancelNonEssential()
         // Fire TV storage + provider safety: when RYZOD is hidden, stop the live
@@ -2850,6 +2862,7 @@ object Playback {
         videoHealthSession++
         val myGen = playbackGen
         pausePreparing = true
+        stallRestarts = 0
         pauseResumeRequested = keepPlaying
         simpleRaw = false
         directLive = false
@@ -2862,8 +2875,9 @@ object Playback {
             if (!ready) {
                 pausePreparing = false
                 Timeshift.stop()
-                toast(ctx, "Pause recording unavailable: check free storage. Returning to live TV.")
-                zapTo(currentIdxC.intValue)
+                toast(ctx, if(pauseResumeRequested) "Pause storage unavailable. Returning to live TV."
+                    else "Pause storage unavailable. Playback stays paused; press Play to continue live.")
+                zapTo(currentIdxC.intValue, startPlaying = pauseResumeRequested)
             } else {
                 startDvrWhenPrimed(p, ch, myGen, keepPlaying)
             }
@@ -2889,7 +2903,11 @@ object Playback {
 
     fun returnToLive(): Boolean {
         if (!liveMode || queue.isEmpty()) return false
-        if (Recorder.activeName.value != null) return seekDvrBy(Timeshift.windowMs())
+        if (Recorder.activeName.value != null && Timeshift.active) {
+            seekDvrBy(Timeshift.windowMs())
+            setPlaying(true)
+            return true
+        }
         zapTo(currentIdxC.intValue)
         return true
     }
@@ -2924,7 +2942,7 @@ object Playback {
         appContext = context.applicationContext
         prefsRef = prefs
         player?.let { return it }
-        simpleRaw = prefs.getBoolean("simple_mode", true)
+        simpleRaw = true
         val bufferSec = prefs.getInt("buffer_sec", 30)
         // How much video to collect before showing the picture (and 2x that
         // after a stall). Bigger = slower channel changes but steadier playback
@@ -3113,7 +3131,6 @@ object Playback {
                     StabilityCore.note("live_edge_recover")
                     p.seekToDefaultPosition()
                     p.prepare()
-                    p.playWhenReady = true
                     return
                 }
                 if (liveMode && prefsRef?.getBoolean("live_steady_recovery", false) == true) {
@@ -3215,7 +3232,6 @@ object Playback {
     internal fun noteBufferingStarted() { if (bufferingSince == 0L) bufferingSince = System.currentTimeMillis() }
     internal fun noteReadyForStall() {
         bufferingSince = 0L
-        stallRestarts = 0
         lastBufMs = -1L
     }
 
@@ -3237,45 +3253,36 @@ object Playback {
                     val steadyRecovery = prefsRef?.getBoolean("live_steady_recovery", false) == true
                     if (p.playbackParameters.speed != 1.0f) p.setPlaybackSpeed(1.0f)
 
-                    // Progress-based stall recovery (light): only act when the
-                    // buffer has been frozen several seconds while buffering.
-                    if (steadyRecovery && playStateC.intValue == Player.STATE_BUFFERING && bufferingSince > 0) {
+                    // Reopen a stalled local pause reader at the saved position.
+                    // Native seekTo() cannot seek this growing, unseekable HTTP TS.
+                    // Never resume an intentionally paused show or reset its writer.
+                    if (p.playWhenReady && playStateC.intValue == Player.STATE_BUFFERING &&
+                        bufferingSince > 0 && (Timeshift.active || steadyRecovery)) {
                         if (cushionMs > lastBufMs + 200 || lastBufMs < 0) {
                             lastBufMs = cushionMs
                             lastBufGrowthAt = now
                         }
-                        val frozenFor = now - lastBufGrowthAt
-                        val bufferingFor = now - bufferingSince
-                        val bytesFlowing = directLive ||
-                            (now - Timeshift.lastByteAt) < 3_000
-                        if (frozenFor > 4_000 && bufferingFor > 5_000) {
-                            when {
-                                !bytesFlowing && stallRestarts == 0 -> lastBufGrowthAt = now
-                                stallRestarts == 0 && !directLive && p.currentPosition > 12_000 -> {
-                                    stallRestarts = 1
-                                    bufferingSince = 0L; lastBufMs = -1L
-                                    p.seekTo((p.currentPosition - 8_000).coerceAtLeast(0))
-                                    p.play()
-                                }
-                                stallRestarts <= 1 -> {
-                                    stallRestarts = 2
-                                    bufferingSince = 0L; lastBufMs = -1L
-                                    if (!recoverTemporaryLive()) zapTo(currentIdxC.intValue, preserveDirect = true)
-                                }
-                                else -> streamDeadC.value = true
+                        val producerStalled = Timeshift.active && now - Timeshift.lastByteAt > 5_000L
+                        val graceMs = if (producerStalled) 30_000L else 12_000L
+                        if (now - lastBufGrowthAt >= graceMs && now - bufferingSince >= graceMs) {
+                            bufferingSince = 0L
+                            lastBufMs = -1L
+                            if (stallRestarts < 2 && !producerStalled && Timeshift.active) {
+                                stallRestarts++
+                                StabilityCore.note("pause_reader_recover attempt=$stallRestarts")
+                                recoverTemporaryLive()
+                            } else if (Recorder.activeName.value != null) {
+                                // The writer belongs to the saved recording; don't
+                                // discard it or open another provider connection.
+                                streamDeadC.value = true
+                            } else {
+                                StabilityCore.note("pause_stall_return_live attempts=$stallRestarts")
+                                appContext?.let { toast(it, "Pause playback stalled. Returning to live TV.") }
+                                zapTo(currentIdxC.intValue, preserveDirect = true)
                             }
                         }
                     }
 
-                    // Dead-feed watchdog: zero bytes 20s while buffering = down.
-                    if (!directLive) {
-                        val b = Timeshift.bytesWritten
-                        if (b != lastBytesSeen) { lastBytesSeen = b; lastBytesAt = now }
-                        else if (now - lastBytesAt > 20_000 &&
-                            playStateC.intValue == Player.STATE_BUFFERING) {
-                            streamDeadC.value = true
-                        }
-                    }
                 } else if (p.playbackParameters.speed != 1.0f) {
                     p.setPlaybackSpeed(1.0f)
                 }
@@ -3418,9 +3425,17 @@ object Playback {
                 // tune latency for enough retained video to ride through short provider stalls.
                 val steadyRecovery = prefsRef?.getBoolean("live_steady_recovery", false) == true
                 val ready = if (steadyRecovery) {
-                    (waited >= 4_000L && Timeshift.bytesWritten >= DVR_PRIME_BYTES) || waited >= 7_000L
+                    (waited >= 4_000L && Timeshift.bytesWritten >= DVR_PRIME_BYTES) || (waited >= 7_000L && Timeshift.bytesWritten >= 188L * 50L)
                 } else {
-                    Timeshift.bytesWritten >= DVR_PRIME_BYTES || waited >= 2_000L
+                    Timeshift.bytesWritten >= DVR_PRIME_BYTES || (waited >= 2_000L && Timeshift.bytesWritten >= 188L * 50L)
+                }
+                if (!ready && waited >= 15_000L && Recorder.activeName.value == null) {
+                    pausePreparing = false
+                    appContext?.let { toast(it, if(pauseResumeRequested)
+                        "Pause storage received no playable data. Returning to live TV."
+                        else "Pause storage received no playable data. Playback stays paused; press Play to continue live.") }
+                    zapTo(currentIdxC.intValue, startPlaying = pauseResumeRequested)
+                    return
                 }
                 if (ready) {
                     if (steadyRecovery) StabilityCore.note(
@@ -3512,7 +3527,7 @@ object Playback {
         }
     }
 
-    fun zapTo(idx: Int, preserveDirect: Boolean = false) {
+    fun zapTo(idx: Int, preserveDirect: Boolean = false, startPlaying: Boolean = if (preserveDirect) player?.playWhenReady ?: true else true) {
         if (backgroundSuspended) return
         // A viewer-initiated channel change always gets a fresh attempt at the
         // selected mode. Only an INTERNAL retry is allowed to preserve the
@@ -3549,9 +3564,10 @@ object Playback {
         dvrSourceBaseMs = 0L
         pausePreparing = false
         pauseResumeRequested = false
+        stallRestarts = 0
         stopGovernor()
         Timeshift.stop()
-        simpleRaw = prefsRef?.getBoolean("simple_mode", true) ?: true
+        simpleRaw = true
         directLive = true
         p.stop()
         p.clearMediaItems()
@@ -3562,8 +3578,10 @@ object Playback {
             .setMediaMetadata(MediaMetadata.Builder().setTitle(ch.name).build())
             .build()
         p.setMediaItem(item)
+        // Set the requested state while IDLE, before prepare. An internal paused
+        // fallback must not look like a new user Pause and start another writer.
+        p.playWhenReady = startPlaying
         p.prepare()
-        p.playWhenReady = true
         // Remember this channel for next app start.
         prefsRef?.edit()
             ?.putString("last_live_name", ch.name)
@@ -3641,11 +3659,15 @@ object Playback {
     }
 
     @Volatile private var backgroundSuspended = false
+    private var backgroundResumePlaying = true
     @Volatile private var liveProviderReserved = false
 
     /** Stop hidden live playback/DVR work. An active recording is the one
      * intentional exception: it owns the single provider stream while hidden. */
     fun suspendForBackground() {
+        if (!backgroundSuspended) {
+            backgroundResumePlaying = if (pausePreparing) pauseResumeRequested else player?.playWhenReady == true
+        }
         backgroundSuspended = true
         pauseResumeRequested = false
         stopGovernor()
@@ -3678,6 +3700,7 @@ object Playback {
         val wasBackground = backgroundSuspended
         backgroundSuspended = false
         val p = player ?: return
+        if (!wasBackground) return
         val prefs=prefsRef
         val context=appContext
         val remote=queue.getOrNull(currentIdxC.intValue)?.url?.let { it.startsWith("http://") || it.startsWith("https://") }==true
@@ -3691,10 +3714,11 @@ object Playback {
         }
         if (wasBackground && liveMode && queue.isNotEmpty()) {
             backgroundSuspended = false
-            if (Timeshift.active) p.play() else zapTo(currentIdxC.intValue)
+            if (Timeshift.active) setPlaying(backgroundResumePlaying)
+            else zapTo(currentIdxC.intValue, startPlaying = backgroundResumePlaying)
         } else if (queue.isNotEmpty()) {
             backgroundSuspended = false
-            p.play()
+            p.playWhenReady = backgroundResumePlaying
         }
     }
 
@@ -3704,20 +3728,6 @@ object Playback {
         directLive -> "LIVE • PAUSE AVAILABLE"
         liveMode -> "DVR LIVE"
         else -> "ON DEMAND"
-    }
-
-    /** User-visible escape from DIRECT RESCUE back to the selected DVR mode.
-     *  This restarts only the current live channel/timeshift path; it does not
-     *  rebuild the Activity or touch Smooth Live/VOD. */
-    fun retryDvrLive(): Boolean {
-        if (!liveMode || simpleRaw || queue.isEmpty()) return false
-        directLive = false
-        liveFails = 0
-        retriesP = 0
-        streamDeadC.value = false
-        startGovernor()
-        zapTo(currentIdxC.intValue)
-        return true
     }
 
     /** Provider-connection accounting for the user-selected 1/2/3 stream budget. */
@@ -3736,23 +3746,6 @@ object Playback {
     fun currentProviderUrl(): String? {
         val cur = queue.getOrNull(currentIdxC.intValue) ?: return null
         return if (cur.isLive) tsUrl(cur.url) else null
-    }
-
-    /** Switch the current LIVE channel between the light direct path and the
-     * disk DVR path without rebuilding the Activity or losing Movies/Series. */
-    fun setSmoothLive(enabled: Boolean, context: Context): Boolean {
-        if (!liveMode || queue.isEmpty()) return false
-        if (enabled && Recorder.activeName.value != null) return false
-        prefsRef?.edit()?.putBoolean("simple_mode", enabled)?.apply()
-        simpleRaw = enabled
-        directLive = false
-        if (enabled) {
-            stopGovernor()
-        } else {
-            startGovernor()
-        }
-        zapTo(currentIdxC.intValue)
-        return true
     }
 
     /** Full stop: close the one stream, stop the DVR recorder, free the decoders. */
@@ -3775,6 +3768,7 @@ object Playback {
         dvrSourceOffsetBytes = 0L
         dvrSourceBaseMs = 0L
         backgroundSuspended = false
+        backgroundResumePlaying = true
         liveFails = 0
         playStateC.intValue = Player.STATE_IDLE
         streamDeadC.value = false
@@ -4344,79 +4338,19 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
             .verticalScroll(androidx.compose.foundation.rememberScrollState())
             .padding(16.dp)
     ) {
-        // ---- Simple Mode (lightweight live playback) ----
-        Text("Smooth Live (Simple Mode)", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
+        Text("Live TV", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
-        var simpleMode by remember { mutableStateOf(prefs.getBoolean("simple_mode", true)) }
-        var showSimpleWarn by remember { mutableStateOf(false) }
         Text(
-            "Recommended for everyday Fire Stick viewing. Smooth Live plays the provider directly and avoids continuous DVR disk writes. DVR Live adds pause, rewind and recording; a verified USB drive is strongly recommended for that mode. Movies, Series, Search, Downloads, and saved Recordings work in either mode.",
+            "Live TV plays directly. Press Pause to start temporary storage, then Play to continue from where you paused. Up to 30 minutes can be retained, depending on free storage. Changing channels or choosing LIVE clears the pause history. Use REC to save a show in Recordings.",
             fontSize = 12.sp, color = Muted
         )
-        Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Chip("DVR Live", !simpleMode) {
-                if (simpleMode) {
-                    simpleMode = false
-                    prefs.edit().putBoolean("simple_mode", false).apply()
-                    Playback.releaseAll()
-                    onModeChanged()
-                    toast(
-                        ctx,
-                        if (Storage.usingDrive(ctx, prefs))
-                            "DVR Live on — pause, rewind and recording use the verified USB drive."
-                        else
-                            "DVR Live on. For long DVR/recording use, connect and verify a USB drive so the Fire Stick's small internal storage is not doing continuous video writes."
-                    )
-                }
-            }
-            Chip("Smooth Live", simpleMode) {
-                if (!simpleMode) showSimpleWarn = true
-            }
-        }
-        if (showSimpleWarn) {
-            AlertDialog(
-                onDismissRequest = { showSimpleWarn = false },
-                containerColor = SurfaceCol,
-                title = { Text("Turn on Simple Mode?", color = Ink) },
-                text = {
-                    Text(
-                        "Simple Mode changes LIVE TV only:\n\n" +
-                            "\u2022 Live channels play directly from the provider with the lightest path.\n" +
-                            "\u2022 Live DVR/timeshift, pause, rewind, recording, and the speed governor are off.\n" +
-                            "\u2022 Movies, Series, Search, Downloads, and recordings you already saved stay available.\n" +
-                            "\u2022 A live recording already running will stop, and scheduled live recordings do not start while Simple Mode is on.\n\n" +
-                            "Use this when a provider channel has trouble. Turn it off anytime in Settings.",
-                        color = Muted, fontSize = 13.sp
-                    )
-                },
-                confirmButton = {
-                    TextButton(onClick = {
-                        showSimpleWarn = false
-                        simpleMode = true
-                        prefs.edit().putBoolean("simple_mode", true).apply()
-                        // Stop a LIVE recording because Simple Mode promises one raw
-                        // playback stream. Downloads are local HTTP jobs and are not
-                        // destroyed just because the live playback mode changed.
-                        Recorder.stop(ctx)
-                        Playback.releaseAll()
-                        onModeChanged()
-                        toast(ctx, "Simple Mode on — lightweight live playback.")
-                    }) { Text("Turn it on", color = Accent) }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showSimpleWarn = false }) { Text("Cancel", color = Muted) }
-                }
-            )
-        }
-
         Spacer(Modifier.height(20.dp))
         // ---- Provider connection budget ----
         Text("Provider streams", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
         var providerStreams by remember { mutableIntStateOf(ProviderStreams.max(prefs)) }
         Text(
-            "Set this to the number of simultaneous connections INCLUDED with your IPTV service — not the number of Fire TV tuners. RYZOD defaults to 1. Recording the channel you are already watching in DVR Live shares that same stream; watching one channel while recording a different channel needs 2. A live stream + different-channel recording + download needs 3.",
+            "Set this to the number of simultaneous connections INCLUDED with your IPTV service — not the number of Fire TV tuners. RYZOD defaults to 1. Recording the channel you are already watching shares that same stream; watching one channel while recording a different channel needs 2. A live stream + different-channel recording + download needs 3.",
             fontSize = 12.sp, color = Muted
         )
         Spacer(Modifier.height(10.dp))
@@ -4495,7 +4429,7 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
             }
         }
         Text(
-            "New downloads and recordings are written directly to the selected destination — they do not move later. Anything already saved stays where it is. DVR Live keeps a rolling local history while you stay on the channel. RYZOD uses verified USB storage when available and safely falls back to internal storage.",
+            "New downloads and recordings are written directly to the selected destination — they do not move later. Anything already saved stays where it is. Temporary pause history starts only when you press Pause and is cleared on channel changes. Saved recordings and downloads remain until you delete them.",
             fontSize = 10.sp, color = Muted, modifier = Modifier.padding(top = 4.dp)
         )
 
@@ -4766,9 +4700,9 @@ private fun addRecent(prefs: SharedPreferences, q: String) {
 
 
 @Composable
-private fun SearchTvKeyboardField(value: String, onValueChange: (String) -> Unit, modifier: Modifier = Modifier, onSubmitted:()->Unit={}) {
+private fun SearchTvKeyboardField(value: String, onValueChange: (String) -> Unit, modifier: Modifier = Modifier, keyboardFocus: FocusRequester? = null, onEditingChanged:(Boolean)->Unit={}, onSubmitted:()->Unit={}) {
     TvTextField(value, onValueChange, "Search", modifier,
-        placeholder = "SEARCH movies, shows, actors, directors & live TV", searchStyle = true, onSubmitted=onSubmitted)
+        placeholder = "SEARCH movies, shows, actors, directors & live TV", searchStyle = true, keyboardFocus=keyboardFocus, onEditingChanged=onEditingChanged, onSubmitted=onSubmitted)
 }
 
 private val KeyboardOrange = Color(0xFFD66B14)
@@ -4777,14 +4711,15 @@ private val ChannelOrange = Color(0xFF9C450A)
 @Composable
 private fun RyzodKeyboardPanel(
     value: String, onValueChange: (String) -> Unit, label: String, password: Boolean,
-    compact: Boolean = false, onPrevious: () -> Unit = {}, onNext: () -> Unit = {}, onClose: () -> Unit
+    compact: Boolean = false, onPrevious: () -> Unit = {}, onNext: () -> Unit = {},
+    externalFocus: FocusRequester? = null, onBottomExit: (() -> Unit)? = null, onClose: () -> Unit
 ) {
     var page by remember { mutableIntStateOf(0) }
     var upper by remember { mutableStateOf(false) }
     var row by remember { mutableIntStateOf(1) }
     var col by remember { mutableIntStateOf(0) }
     val rows = remember(page, upper) { KeyboardLayout.rows(page, upper) }
-    val keyFocus = remember { FocusRequester() }
+    val keyFocus = externalFocus ?: remember { FocusRequester() }
     var confirmPressed by remember {mutableStateOf(false)}
     fun press(key: String) {
         when (key) {
@@ -4821,6 +4756,10 @@ private fun RyzodKeyboardPanel(
                 else -> null
             }
             if (delta != null) {
+                if (ev.key == Key.DirectionDown && row == rows.lastIndex && onBottomExit != null) {
+                    onBottomExit()
+                    return@onPreviewKeyEvent true
+                }
                 val next=KeyboardLayout.move(rows,row,col,delta.first,delta.second)
                 row=next.first; col=next.second; true
             } else when(ev.key) {
@@ -4904,6 +4843,8 @@ fun SearchTab(
     }
     var recents by remember { mutableStateOf(loadRecents(prefs)) }
     val resultsFocus=remember {FocusRequester()}
+    val keyboardFocus=remember {FocusRequester()}
+    var keyboardOpen by remember {mutableStateOf(false)}
     var resultsFocusRequest by remember {mutableIntStateOf(0)}
     val indexes by androidx.compose.runtime.produceState<Triple<SearchIndex<LiveChannel>, SearchIndex<Movie>, SearchIndex<SeriesItem>>?>(null,data) {
         value=kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
@@ -4957,7 +4898,7 @@ fun SearchTab(
         ) {
             SearchTvKeyboardField(
                 value = query, onValueChange = onQuery,
-                modifier = Modifier.weight(1f), onSubmitted={resultsFocusRequest++}
+                modifier = Modifier.weight(1f), keyboardFocus=keyboardFocus, onEditingChanged={keyboardOpen=it}, onSubmitted={resultsFocusRequest++}
             )
             if (voiceAvailable) {
                 Spacer(Modifier.width(8.dp))
@@ -5037,6 +4978,7 @@ fun SearchTab(
         // Catalog results never wait for the guide index to finish.
         val matches by androidx.compose.runtime.produceState<SearchMatches?>(null,q,indexes) {
             val index=indexes ?: return@produceState
+            kotlinx.coroutines.delay(120)
             value=kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
                 val task=kotlinx.coroutines.currentCoroutineContext()
                 val check={ task.ensureActive() }
@@ -5054,6 +4996,7 @@ fun SearchTab(
         }
         val guideMatches by androidx.compose.runtime.produceState<Triple<String,SearchIndex<EpgStore.GuideHit>,List<EpgStore.GuideHit>>?>(null,q,guideIndex) {
             val index=guideIndex ?: return@produceState
+            kotlinx.coroutines.delay(180)
             value=kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
                 val task=kotlinx.coroutines.currentCoroutineContext()
                 val now=System.currentTimeMillis()
@@ -5116,7 +5059,7 @@ fun SearchTab(
             if (liveHits.isNotEmpty()) {
                 item { SectionHeader("Live TV") }
                 item {
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                    LazyRow(Modifier.focusProperties { up=if(keyboardOpen) keyboardFocus else FocusRequester.Default }, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
                         items(liveHits, key = { it.id }) { ch ->
                             SearchLiveCard(ch) { saveRecent(q); playLiveHit(ch) }
                         }
@@ -5126,7 +5069,7 @@ fun SearchTab(
             if (movieHits.isNotEmpty()) {
                 item { SectionHeader("Movies • title / cast / director / genre") }
                 item {
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    LazyRow(Modifier.focusProperties { if(liveHits.isEmpty()) up=if(keyboardOpen) keyboardFocus else FocusRequester.Default }, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         items(movieHits) { m ->
                             PosterCard(m.name, m.icon, movie=m, source=source) {
                                 saveRecent(q)
@@ -5139,7 +5082,7 @@ fun SearchTab(
             if (seriesHits.isNotEmpty()) {
                 item { SectionHeader("Series • title / cast / director / genre") }
                 item {
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    LazyRow(Modifier.focusProperties { if(liveHits.isEmpty() && movieHits.isEmpty()) up=if(keyboardOpen) keyboardFocus else FocusRequester.Default }, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         items(seriesHits) { s ->
                             PosterCard(s.name, s.icon) { saveRecent(q); onSeries(s) }
                         }
@@ -5148,7 +5091,7 @@ fun SearchTab(
             }
             if (guideHits.isNotEmpty()) {
                 item { SectionHeader("TV Guide — upcoming shows") }
-                items(guideHits) { hit ->
+                itemsIndexed(guideHits) { hitIndex, hit ->
                     val ch = byEpgId[hit.channelXmlId]
                         ?: byNorm[hit.channelName.lowercase().replace(Regex("[^a-z0-9]"), "")]
                     val now = System.currentTimeMillis()
@@ -5156,6 +5099,7 @@ fun SearchTab(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .focusProperties { if(hitIndex==0 && liveHits.isEmpty() && movieHits.isEmpty() && seriesHits.isEmpty()) up=if(keyboardOpen) keyboardFocus else FocusRequester.Default }
                             .tvFocus()
                             .background(SurfaceCol, RoundedCornerShape(14.dp))
                             .clickable(enabled = ch != null) {
@@ -5761,7 +5705,7 @@ fun RecordingsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
     Column(Modifier.fillMaxSize()) {
         Text(
             if (ProviderStreams.max(prefs) == 1)
-                "Provider streams: 1 • Recording the channel you are watching in DVR Live shares that stream. Recording a different channel takes over Live TV."
+                "Provider streams: 1 • Recording the channel you are watching shares that stream. Recording a different channel takes over Live TV."
             else
                 "Provider streams: ${ProviderStreams.max(prefs)} • RYZOD may keep Live TV playing while a different channel records, up to your selected IPTV-plan limit.",
             color = Muted, fontSize = 10.sp,
@@ -6040,10 +5984,11 @@ private fun Chip(label: String, active: Boolean, onClick: () -> Unit) {
 private fun TvTextField(
     value: String, onValueChange: (String) -> Unit, label: String,
     modifier: Modifier = Modifier, placeholder: String = "", password: Boolean = false,
-    keyboardType: KeyboardType = KeyboardType.Text, searchStyle: Boolean = false, onSubmitted:()->Unit={}
+    keyboardType: KeyboardType = KeyboardType.Text, searchStyle: Boolean = false, keyboardFocus: FocusRequester? = null, onEditingChanged:(Boolean)->Unit={}, onSubmitted:()->Unit={}
 ) {
     var editing by remember { mutableStateOf(false) }
     val fieldFocus = remember { FocusRequester() }
+    LaunchedEffect(editing) { onEditingChanged(editing) }
     val borderColor = if (searchStyle) Accent else ElectricCyan
     Column(modifier) {
         Column(Modifier.fillMaxWidth().focusRequester(fieldFocus).tvFocus(RoundedCornerShape(12.dp))
@@ -6056,6 +6001,7 @@ private fun TvTextField(
                 color = if (value.isEmpty()) Muted else Ink, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         if(editing && searchStyle) RyzodKeyboardPanel(value,onValueChange,label,password,compact=true,
+            externalFocus=keyboardFocus, onBottomExit=onSubmitted,
             onPrevious={editing=false;runCatching { fieldFocus.requestFocus() }},
             onNext={editing=false;runCatching { fieldFocus.requestFocus() };onSubmitted()},
             onClose={editing=false;runCatching { fieldFocus.requestFocus() };onSubmitted()})
@@ -6331,6 +6277,20 @@ fun PlayerScreen(
     // title/gear overlay could still appear underneath the mini guide.
     var overlayVisible by remember { mutableStateOf(queue.getOrNull(start)?.isLive != true) }
     var showRecordChoice by remember { mutableStateOf(false) }
+    var showStopLiveRecording by remember { mutableStateOf(false) }
+    if (showStopLiveRecording) {
+        AlertDialog(
+            onDismissRequest = { showStopLiveRecording = false }, containerColor = SurfaceCol,
+            title = { Text("Are you sure?", color = Ink) },
+            text = { Text("Stop the recording now?", color = Muted) },
+            confirmButton = { TextButton(onClick = {
+                showStopLiveRecording = false
+                Recorder.stop(context)
+                toast(context, "Recording saved — find it in Recordings.")
+            }) { Text("STOP RECORDING", color = Live) } },
+            dismissButton = { TextButton(onClick = { showStopLiveRecording = false }) { Text("CLOSE", color = Ink) } }
+        )
+    }
     // Resume support: if there's a saved spot for the starting item, hold playback
     // and ask Resume / Start over. (Skipped when re-attaching to the running
     // stream from the corner — nothing should interrupt it.)
@@ -6584,6 +6544,15 @@ fun PlayerScreen(
         // checked before anything on screen sees the press.
         PlayerKeys.priority = { key ->
             when (key) {
+                android.view.KeyEvent.KEYCODE_DPAD_CENTER,
+                android.view.KeyEvent.KEYCODE_ENTER -> {
+                    if (queue.getOrNull(Playback.currentIdxC.intValue)?.isLive == true && !miniGuideOpen) {
+                        pvRef?.hideController()
+                        overlayVisible = false
+                        miniGuideOpen = true
+                        true
+                    } else false
+                }
                 // Real channel buttons (many TV remotes have them): always zap.
                 // Channel UP = next channel up the lineup (higher position);
                 // DOWN = previous. (Was reversed.)
@@ -6899,19 +6868,19 @@ fun PlayerScreen(
             ) {
                 MiniGuideControl("⏪ REW") {
                     touchDvrTick = System.currentTimeMillis()
-                    if (!Playback.seekDvrBy(-30_000L)) toast(context, "Rewind needs DVR Live and a little recorded history.")
+                    if (!Playback.seekDvrBy(-30_000L)) toast(context, "Press Pause first to build rewind history.")
                 }
-                MiniGuideControl(if (exo.isPlaying) "❚❚ PAUSE" else "▶ PLAY") {
+                MiniGuideControl(if (exo.playWhenReady) "❚❚ PAUSE" else "▶ PLAY") {
                     touchDvrTick = System.currentTimeMillis()
                     Playback.togglePlaying()
                 }
                 MiniGuideControl("FF ⏩") {
                     touchDvrTick = System.currentTimeMillis()
-                    if (!Playback.seekDvrBy(30_000L)) toast(context, "Fast forward needs DVR Live.")
+                    if (!Playback.seekDvrBy(30_000L)) toast(context, "Fast forward is available within your pause history.")
                 }
                 MiniGuideControl("LIVE", activeColor = ProgramCyan) {
                     touchDvrTick = System.currentTimeMillis()
-                    if (!Playback.returnToLive()) toast(context, "Already live, or DVR Live is not active.")
+                    if (!Playback.returnToLive()) toast(context, "Already watching live.")
                 }
                 MiniGuideControl("● REC", enabled = current.canRecord, activeColor = Live) {
                     touchDvrTick = System.currentTimeMillis()
@@ -6946,36 +6915,16 @@ fun PlayerScreen(
                     },
                     onRecord = {
                         if (recordingThis) {
-                            Recorder.stop(context)
-                            toast(context, "Recording saved — find it in Recordings.")
+                            showStopLiveRecording = true
                         } else if (Recorder.activeName.value != null) {
                             toast(context, "RYZOD is already recording ${Recorder.activeName.value}. Stop that recording first.")
-                        } else if (Playback.simpleRaw) {
-                            toast(context, "Recording needs DVR Live. Switch to DVR Live, let the picture lock in, then press REC.")
                         } else {
                             showRecordChoice = true
                         }
                     },
                     onResize = { cyclePictureSize() },
-                    onToggleLiveMode = {
-                        when {
-                            Playback.directLive -> {
-                                if (Playback.retryDvrLive()) {
-                                    toast(context, "Retrying DVR Live…")
-                                }
-                            }
-                            else -> {
-                                val nextSmooth = !Playback.simpleRaw
-                                if (nextSmooth && Recorder.activeName.value != null) {
-                                    toast(context, "Stop recording before switching to Smooth Live.")
-                                } else {
-                                    Playback.setSmoothLive(nextSmooth, context)
-                                }
-                                if (!nextSmooth && !Storage.usingDrive(context, prefs)) {
-                                    toast(context, "DVR Live is on. A verified USB drive is recommended for long pause/rewind/recording sessions.")
-                                }
-                            }
-                        }
+                    onReturnToLive = {
+                        Playback.returnToLive()
                         miniGuideOpen = false
                     },
                 onTune = { ch ->
@@ -7155,8 +7104,7 @@ fun PlayerScreen(
                         modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)),
                         onClick = {
                             if (recordingThis) {
-                                Recorder.stop(context)
-                                toast(context, "Recording saved — find it in Recordings.")
+                                showStopLiveRecording = true
                             } else {
                                 showRecordChoice = true
                             }
@@ -7249,7 +7197,7 @@ fun PlayerScreen(
                             // picture no longer pauses when you press record.
                             val tee = Playback.canTeeRecording() || Playback.prepareCurrentForRecording()
                             if (!tee) {
-                                toast(context, "Recording needs DVR Live. Turn off Smooth Live, then try again.")
+                                toast(context, "Could not prepare recording storage. Check free space and try again.")
                             } else if (nowShow != null) {
                                 Recorder.start(context, tsUrl(current.url), "${nowShow.title} (${current.name})", nowShow.endMs + 2 * 60 * 1000, teeFromTimeshift = tee)
                                 toast(context, "Recording until this show ends.")
@@ -7276,7 +7224,7 @@ fun PlayerScreen(
                                     Recorder.start(context, tsUrl(current.url), current.name, teeFromTimeshift = true)
                                     toast(context, "Recording until you stop it.")
                                 } else {
-                                    toast(context, "Recording needs DVR Live. Turn off Smooth Live, then try again.")
+                                    toast(context, "Could not prepare recording storage. Check free space and try again.")
                                 }
                             }
                         }) {
@@ -7368,7 +7316,7 @@ private fun MiniGuide(
     onToggleAfr: () -> Unit,
     onRecord: () -> Unit,
     onResize: () -> Unit,
-    onToggleLiveMode: () -> Unit,
+    onReturnToLive: () -> Unit,
     onTune: (Playable) -> Unit,
     onOpenSettings: () -> Unit,
     onRetry: () -> Unit,
@@ -7406,6 +7354,7 @@ private fun MiniGuide(
     var dvrBytes by remember { mutableLongStateOf(0L) }
     var displayHz by remember { mutableFloatStateOf(0f) }
     var isPlaying by remember { mutableStateOf(player?.isPlaying == true) }
+    var playRequested by remember { mutableStateOf(player?.playWhenReady == true) }
     val timelineSeek = remember { DvrSeekAccelerator() }
     val lineupFocus = remember { FocusRequester() }
     val lineupState = androidx.compose.foundation.lazy.rememberLazyListState(
@@ -7425,6 +7374,7 @@ private fun MiniGuide(
             dvrWindowMs = Timeshift.windowMs()
             dvrBytes = Timeshift.bytesWritten
             isPlaying = player?.isPlaying == true
+            playRequested = player?.playWhenReady == true
             displayHz = runCatching {
                 (context as? android.app.Activity)?.windowManager?.defaultDisplay?.mode?.refreshRate ?: 0f
             }.getOrDefault(0f)
@@ -7478,8 +7428,8 @@ private fun MiniGuide(
     fun seekDvr(deltaMs: Long, quiet: Boolean = false) {
         touch()
         when {
-            Playback.simpleRaw -> if (!quiet) toast(context, "Rewind needs DVR Live.")
-            Playback.directLive -> if (!quiet) toast(context, "DVR is in Direct Rescue. Select DVR RETRY first.")
+            Playback.simpleRaw -> if (!quiet) toast(context, "Press Pause first to build rewind history.")
+            Playback.directLive -> if (!quiet) toast(context, "Press Pause first to start temporary recording.")
             current?.isLive != true -> if (!quiet) toast(context, "DVR controls are only for Live TV.")
             !Playback.seekDvrBy(deltaMs) -> if (!quiet)
                 toast(context, "DVR is still building — pause a moment, then try again.")
@@ -7508,11 +7458,6 @@ private fun MiniGuide(
         return if (h > 0) "%d:%02d:%02d".format(h, m, ss) else "%d:%02d".format(m, ss)
     }
 
-    val modeLabel = when {
-        Playback.simpleRaw -> "SMOOTH"
-        Playback.directLive -> "DVR RETRY"
-        else -> "DVR LIVE"
-    }
 
     Column(
         Modifier
@@ -7599,7 +7544,7 @@ private fun MiniGuide(
             verticalAlignment = Alignment.CenterVertically
         ) {
             MiniGuideControl(
-                if (isPlaying) "❚❚ PAUSE" else "▶ PLAY",
+                if (playRequested) "❚❚ PAUSE" else "▶ PLAY",
                 modifier = Modifier.weight(1f).focusRequester(playFocus).focusProperties {
                     left = settingsFocus; right = recFocus; down = timelineFocus
                 }
@@ -7628,12 +7573,12 @@ private fun MiniGuide(
             ) { touch(); onToggleCc() }
 
             MiniGuideControl(
-                modeLabel,
+                "LIVE",
                 modifier = Modifier.weight(1f).focusRequester(modeFocus).focusProperties {
                     left = ccFocus; right = sizeFocus; down = timelineFocus
                 },
                 activeColor = if (Playback.directLive) Accent else Ink
-            ) { touch(); onToggleLiveMode() }
+            ) { touch(); onReturnToLive() }
 
             MiniGuideControl(
                 "SIZE",
@@ -7760,13 +7705,11 @@ private fun MiniGuide(
                     drawCircle(FocusPink, 6f, Offset(w * programPlayFraction, y))
                 }
                 val status = when {
-                    Playback.directLive -> "DVR unavailable — choose DVR RETRY above"
-                    Playback.simpleRaw -> "Smooth Live • ${String.format(java.util.Locale.US, "%.1f", playerBufferMs / 1000.0)}s player buffer"
                     dvrActive -> {
                         val available = minOf(dvrWindowMs, Timeshift.windowMs())
-                        "DVR ${shortTime(available)} available • ${shortTime(behindMs)} behind LIVE • FF/RW repeat or hold = faster"
+                        "Pause history ${shortTime(available)} • ${shortTime(behindMs)} behind LIVE"
                     }
-                    else -> "DVR building… ${String.format(java.util.Locale.US, "%.1f", playerBufferMs / 1000.0)}s"
+                    else -> "Live TV • Press Pause to save your place"
                 }
                 Text(status, color = Muted, fontSize = 8.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }

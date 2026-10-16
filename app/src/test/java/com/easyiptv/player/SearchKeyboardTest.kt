@@ -43,6 +43,26 @@ class SearchKeyboardTest {
         ui.onNodeWithText("DONE").assertDoesNotExist()
         ui.onNodeWithText("Alpha TV").assertIsFocused()
     }
+    @Test fun downPastBottomRowFocusesResultsAndUpReturnsToOpenKeyboard() {
+        val ctx=ApplicationProvider.getApplicationContext<Context>()
+        val prefs=ctx.getSharedPreferences("search-down",Context.MODE_PRIVATE)
+        val data=AppData(emptyList(),listOf(LiveChannel("1","Alpha TV",null,null,"https://example.invalid/live.ts")),emptyList(),emptyList(),emptyList(),emptyList())
+        ui.setContent {
+            val input=LocalInputModeManager.current
+            SideEffect {input.requestInputMode(InputMode.Keyboard)}
+            var q by remember {mutableStateOf("a")}
+            SearchTab(null,prefs,data,q,{q=it},{},{_,_->},{})
+        }
+        ui.onNodeWithText("Search").performClick()
+        ui.waitUntil(10_000) {ui.onAllNodesWithText("Alpha TV").fetchSemanticsNodes().isNotEmpty()}
+        ui.onRoot().performKeyInput {repeat(5) {pressKey(Key.DirectionDown)}}
+        ui.onNodeWithText("DONE").assertExists()
+        ui.onNodeWithText("Alpha TV").assertIsFocused()
+        ui.onRoot().performKeyInput {pressKey(Key.DirectionUp)}
+        ui.onNodeWithText("Alpha TV").assertIsNotFocused()
+        ui.onRoot().performKeyInput {pressKey(Key.DirectionDown)}
+        ui.onNodeWithText("Alpha TV").assertIsFocused()
+    }
     @Test fun firstLetterFindsResultsWhileKeyboardRemainsOpen() {
         val ctx = ApplicationProvider.getApplicationContext<Context>()
         val prefs = ctx.getSharedPreferences("easyiptv", Context.MODE_PRIVATE)

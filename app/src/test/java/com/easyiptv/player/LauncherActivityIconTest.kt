@@ -18,7 +18,7 @@ class LauncherActivityIconTest {
 
     @Test
     @Config(sdk = [28, 30], qualifiers = "w960dp-h540dp-land-xhdpi")
-    fun alternateRoundLauncherPathKeepsTheFullWideWordmark() {
+    fun alternateRoundLauncherPathKeepsTheFullSquareWordmark() {
         val parser=context.assets.openXmlResourceParser("AndroidManifest.xml")
         var roundId=0
         parser.use {
@@ -32,7 +32,7 @@ class LauncherActivityIconTest {
         assertTrue("An alternate launcher must receive the same complete brand artwork",roundId!=0)
         val round=context.getDrawable(roundId)
         assertTrue("Round-icon consumers must not get the obsolete cropped adaptive emblem",round is BitmapDrawable)
-        val expected=(context.getDrawable(R.drawable.ryzod_tv_artwork_466) as BitmapDrawable).bitmap
+        val expected=(context.getDrawable(R.drawable.ryzod_artwork_464) as BitmapDrawable).bitmap
         assertTrue("Alternate icon keeps the wordmark",(round as BitmapDrawable).bitmap.sameAs(expected))
     }
 

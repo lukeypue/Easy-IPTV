@@ -9,6 +9,7 @@ internal class SearchText(text: String) {
     private val normalized = Normalizer.normalize(literal, Normalizer.Form.NFKD)
     val compact = normalized.filter { it.isLetterOrDigit() }
     val words = normalized.replace(marks, "").replace(separators, " ").trim()
+    val paddedWords = " $words "
     companion object {
         private val marks = Regex("\\p{M}+")
         private val separators = Regex("[^\\p{L}\\p{N}]+")
@@ -17,6 +18,7 @@ internal class SearchText(text: String) {
 
 internal class TitleQuery(raw: String) {
     private val query = SearchText(raw.trim())
+    private val paddedQueryWords = " ${query.words} "
     fun <T> find(items: List<T>, title: (T) -> String, metadata: (T) -> String = { "" }, limit: Int = 30): List<T> =
         SearchIndex(items, title, metadata).find(this, limit)
     fun matches(text: String): Boolean = rank(text) != null
@@ -25,7 +27,7 @@ internal class TitleQuery(raw: String) {
         if (query.literal.isEmpty()) return null
         if (text.literal.contains(query.literal)) return 0
         if (query.compact.isEmpty()) return null
-        if (query.words.isNotEmpty() && (" " + text.words + " ").contains(" ${query.words} ")) return 1
+        if (query.words.isNotEmpty() && text.paddedWords.contains(paddedQueryWords)) return 1
         return when {
             text.compact == query.compact -> 2
             text.compact.contains(query.compact) -> 3

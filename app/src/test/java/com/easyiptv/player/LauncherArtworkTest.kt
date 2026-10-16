@@ -40,10 +40,11 @@ class LauncherArtworkTest {
 
     @Test
     @Config(qualifiers = "w360dp-h640dp-port-notnight-xhdpi")
-    fun defaultConfigurationHasWideLegacyFallback() {
+    fun defaultConfigurationHasCompleteSquareLogo() {
         val pm = context.packageManager
         val icon = pm.getApplicationInfo(context.packageName, 0).loadIcon(pm)
-        assertWideArtwork(icon)
+        assertTrue(icon is BitmapDrawable)
+        assertEquals(1.0, (icon as BitmapDrawable).bitmap.width.toDouble()/icon.bitmap.height, 0.002)
         val original = context.getDrawable(R.drawable.ryzod_artwork_464) as BitmapDrawable
         assertEquals(original.bitmap.width, original.bitmap.height)
     }
