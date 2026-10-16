@@ -29,6 +29,7 @@ class SearchTypingUiTest {
         ui.onNodeWithText("Search").performClick()
         ui.mainClock.autoAdvance=false
         try {
+            val typedAt=ui.mainClock.currentTime
             ui.runOnIdle {query.value="beta"}
             ui.mainClock.advanceTimeByFrame()
             // Done uses the same immediate-submit callback as bottom-row Down.
@@ -38,10 +39,16 @@ class SearchTypingUiTest {
                 ui.mainClock.advanceTimeByFrame()
                 ui.onAllNodesWithText("Beta TV").fetchSemanticsNodes().isNotEmpty()
             }
+            assertTrue("The probe must return to typing before the old debounce can finish",
+                ui.mainClock.currentTime-typedAt<190)
             ui.onNodeWithText("Search").performClick()
+            ui.mainClock.advanceTimeByFrame()
             ui.onNodeWithText("SPACE").performClick()
+            ui.mainClock.advanceTimeByFrame()
             ui.onNodeWithText("t",useUnmergedTree=true).performClick()
             ui.mainClock.advanceTimeByFrame()
+            assertTrue("The probe must exercise the pending-debounce window",
+                ui.mainClock.currentTime-typedAt<250)
             ui.onNodeWithText("Beta TV").assertExists()
             ui.onNodeWithText("Alpha TV").assertDoesNotExist()
         } finally {ui.mainClock.autoAdvance=true}
