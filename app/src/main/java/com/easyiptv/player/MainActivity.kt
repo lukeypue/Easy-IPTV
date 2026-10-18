@@ -91,6 +91,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.key
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -1215,6 +1216,7 @@ fun HomeScreen(
     }
 
     val railFocus = remember { FocusRequester() }
+    val previewFocus = remember { FocusRequester() }
     var railReturnRequest by remember { mutableIntStateOf(0) }
     val safeData = data ?: AppData(
         liveCats = emptyList(), live = emptyList(),
@@ -1281,81 +1283,14 @@ fun HomeScreen(
                         }
                     }
                 )
-                Box(Modifier.weight(1f)) {
-                    // ZAKO_V425_FOCUS_FIX: panes own Left at their true boundary.
-                    if (catalogLoading && (section == "movies" || section == "series")) {
-                        Row(
-                            Modifier
-                                .align(Alignment.TopCenter)
-                                .zIndex(10f)
-                                .background(Color(0xDD171922), RoundedCornerShape(10.dp))
-                                .padding(horizontal = 14.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = Accent)
-                            Spacer(Modifier.width(8.dp))
-                            Text("Loading on-demand catalog…", color = Ink, fontSize = 12.sp)
-                        }
-                    }
-                    when {
-                        data == null && loadError == null &&
-                            (section == "live" || section == "movies" || section == "series" || section == "search") ->
-                            LoadingBox("Loading your playlist…")
-                        data == null && loadError != null &&
-                            (section == "live" || section == "movies" || section == "series" || section == "search") ->
-                            ErrorBox(
-                                err = (loadError ?: "No internet connection") +
-                                    "\n\nDownloads and saved recordings still work. Choose them from the left menu.",
-                                onRetry = onRetry,
-                                title = "Live service unavailable"
-                            )
-                        !catalogLoading && catalogError != null &&
-                            (section == "movies" || section == "series") &&
-                            safeData.movies.isEmpty() && safeData.series.isEmpty() ->
-                            ErrorBox(
-                                err = catalogError ?: "On-demand catalog request failed",
-                                onRetry = onRetryCatalog,
-                                title = "Couldn't load Movies & Series"
-                            )
-                        depth == 1 && section == "live" -> LivePane(prefs, activeIdx, safeData, liveCat, onPlayLive,
-                            onLeftToRail = { railReturnRequest++ }, onRefreshGuide = {
-                                guideRefreshScope.launch { EpgStore.load(source?.xmltvUrl(), force = true) }
-                            })
-                        depth == 1 && section == "movies" -> MoviesPane(source, prefs, safeData, movieCat, onPlay, onLeftToRail = { railReturnRequest++ }, onRefresh=onRefreshMovies, refreshing=catalogLoading, refreshWarning=catalogError)
-                        depth == 1 && section == "series" -> SeriesPane(source, safeData, seriesCat, onSeries, onLeftToRail = { railReturnRequest++ }, onRefresh=onRefreshSeries, refreshing=catalogLoading, refreshWarning=catalogError)
-                        section == "search" -> SearchTab(
-                            source, prefs, safeData, searchQuery, onSearchQuery, onPlay, onPlayLive, onSeries,
-                            onDemandWarning = if (!catalogLoading) catalogError else null
-                        )
-                        section == "downloads" -> Box(Modifier.fillMaxSize().onPreviewKeyEvent { if (it.type == KeyEventType.KeyDown && it.key == Key.DirectionLeft) { railReturnRequest++; true } else false }) { DownloadsPane(prefs, onPlay) }
-                        section == "recordings" -> Box(Modifier.fillMaxSize().onPreviewKeyEvent { if (it.type == KeyEventType.KeyDown && it.key == Key.DirectionLeft) { railReturnRequest++; true } else false }) { RecordingsPane(prefs, onPlay) }
-                        section == "playlists" -> Box(Modifier.fillMaxSize().onPreviewKeyEvent { if (it.type == KeyEventType.KeyDown && it.key == Key.DirectionLeft) { railReturnRequest++; true } else false }) { PlaylistsPane(playlists, activeIdx, onSelectPlaylist, onDeletePlaylist, onAddPlaylist) }
-                        section == "settings" -> Box(Modifier.fillMaxSize().onPreviewKeyEvent { if (it.type == KeyEventType.KeyDown && it.key == Key.DirectionLeft) { railReturnRequest++; true } else false }) { SettingsPane(prefs, onModeChanged = onRetry) }
-                        else -> Column(
-                            Modifier.fillMaxSize(),
-                            verticalArrangement = Arrangement.Center,
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Text("Pick a section on the left.", color = Muted, fontSize = 14.sp)
-                        }
-                    }
-                }
-                // The SAME stream you were watching, showing in the corner while
-                // you browse. Highlight it and press OK to go back full screen —
-                // nothing reloads, because it's one continuous stream.
-                if (section != "search" && mini != null && Playback.player != null && Recorder.activeName.value == null) {
-                    val mp = mini.queue.getOrNull(Playback.currentIdxC.intValue)
-                        ?: mini.queue.getOrNull(mini.index)
-                    if (mp != null) {
-                        Column(
-                            Modifier
-                                .width(236.dp)
-                                .fillMaxHeight()
-                                .padding(start = 4.dp, end = 10.dp, top = 6.dp)
-                        ) {
+                Column(Modifier.weight(1f)) {
+                    if (section != "search" && mini != null && Playback.player != null && Recorder.activeName.value == null) {
+                        val mp = mini.queue.getOrNull(Playback.currentIdxC.intValue) ?: mini.queue.getOrNull(mini.index)
+                        if (mp != null) Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment=Alignment.CenterVertically) {
                             Box(
                                 Modifier
-                                    .fillMaxWidth()
+                                    .width(236.dp)
+                                    .focusRequester(previewFocus)
                                     .tvFocus(RoundedCornerShape(10.dp))
                                     .clickable { onResumeMini() }
                             ) {
@@ -1397,12 +1332,28 @@ fun HomeScreen(
                                     )
                                 }
                             }
+                            Column(Modifier.weight(1f).padding(start=12.dp)) {
                             Spacer(Modifier.height(8.dp))
                             Text(
                                 mp.name,
                                 color = Ink, fontSize = 14.sp, fontWeight = FontWeight.Bold,
                                 maxLines = 2, overflow = TextOverflow.Ellipsis
                             )
+                            val revision = EpgStore.revision.intValue
+                            var previewNow by remember { mutableLongStateOf(System.currentTimeMillis()) }
+                            LaunchedEffect(mp.url) {
+                                while (true) {
+                                    previewNow = System.currentTimeMillis()
+                                    kotlinx.coroutines.delay(30_000)
+                                }
+                            }
+                            val nowProgram = remember(mp.url, revision, previewNow) {
+                                EpgStore.guide(mp.guideKey ?: mp.epgId, mp.name).firstOrNull { previewNow in it.startMs until it.endMs }
+                            }
+                            nowProgram?.let { program ->
+                                Text(program.title, color=ProgramCyan, fontSize=13.sp, maxLines=1, overflow=TextOverflow.Ellipsis)
+                                Text(program.desc, color=Muted, fontSize=11.sp, maxLines=2, overflow=TextOverflow.Ellipsis)
+                            }
                             Text("Press OK on the picture for full screen.", color = Muted, fontSize = 10.sp)
                             Spacer(Modifier.height(6.dp))
                             Row(
@@ -1417,8 +1368,71 @@ fun HomeScreen(
                                 Spacer(Modifier.width(6.dp))
                                 Text("Stop playing", color = Muted, fontSize = 11.sp)
                             }
+                            }
                         }
                     }
+                    Box(Modifier.weight(1f)) {
+                    // ZAKO_V425_FOCUS_FIX: panes own Left at their true boundary.
+                    if (catalogLoading && (section == "movies" || section == "series")) {
+                        Row(
+                            Modifier
+                                .align(Alignment.TopCenter)
+                                .zIndex(10f)
+                                .background(Color(0xDD171922), RoundedCornerShape(10.dp))
+                                .padding(horizontal = 14.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = Accent)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Loading on-demand catalog…", color = Ink, fontSize = 12.sp)
+                        }
+                    }
+                    when {
+                        data == null && loadError == null &&
+                            (section == "live" || section == "movies" || section == "series" || section == "search") ->
+                            LoadingBox("Loading your playlist…")
+                        data == null && loadError != null &&
+                            (section == "live" || section == "movies" || section == "series" || section == "search") ->
+                            ErrorBox(
+                                err = (loadError ?: "No internet connection") +
+                                    "\n\nDownloads and saved recordings still work. Choose them from the left menu.",
+                                onRetry = onRetry,
+                                title = "Live service unavailable"
+                            )
+                        !catalogLoading && catalogError != null &&
+                            (section == "movies" || section == "series") &&
+                            safeData.movies.isEmpty() && safeData.series.isEmpty() ->
+                            ErrorBox(
+                                err = catalogError ?: "On-demand catalog request failed",
+                                onRetry = onRetryCatalog,
+                                title = "Couldn't load Movies & Series"
+                            )
+                        section == "live" -> LivePane(prefs, activeIdx, safeData, liveCat, onPlayLive,
+                            onLeftToRail = { railReturnRequest++ }, onRefreshGuide = {
+                                guideRefreshScope.launch { EpgStore.load(source?.xmltvUrl(), force = true) }
+                            }, onUpToPreview = if (mini != null && Recorder.activeName.value == null) {
+                                { runCatching { previewFocus.requestFocus() }; Unit }
+                            } else null, requestInitialFocus = depth == 1)
+                        depth == 1 && section == "movies" -> MoviesPane(source, prefs, safeData, movieCat, onPlay, onLeftToRail = { railReturnRequest++ }, onRefresh=onRefreshMovies, refreshing=catalogLoading, refreshWarning=catalogError)
+                        depth == 1 && section == "series" -> SeriesPane(source, safeData, seriesCat, onSeries, onLeftToRail = { railReturnRequest++ }, onRefresh=onRefreshSeries, refreshing=catalogLoading, refreshWarning=catalogError)
+                        section == "search" -> SearchTab(
+                            source, prefs, safeData, searchQuery, onSearchQuery, onPlay, onPlayLive, onSeries,
+                            onDemandWarning = if (!catalogLoading) catalogError else null
+                        )
+                        section == "downloads" -> Box(Modifier.fillMaxSize().onPreviewKeyEvent { if (it.type == KeyEventType.KeyDown && it.key == Key.DirectionLeft) { railReturnRequest++; true } else false }) { DownloadsPane(prefs, onPlay) }
+                        section == "recordings" -> Box(Modifier.fillMaxSize().onPreviewKeyEvent { if (it.type == KeyEventType.KeyDown && it.key == Key.DirectionLeft) { railReturnRequest++; true } else false }) { RecordingsPane(prefs, onPlay) }
+                        section == "playlists" -> Box(Modifier.fillMaxSize().onPreviewKeyEvent { if (it.type == KeyEventType.KeyDown && it.key == Key.DirectionLeft) { railReturnRequest++; true } else false }) { PlaylistsPane(playlists, activeIdx, onSelectPlaylist, onDeletePlaylist, onAddPlaylist) }
+                        section == "settings" -> Box(Modifier.fillMaxSize().onPreviewKeyEvent { if (it.type == KeyEventType.KeyDown && it.key == Key.DirectionLeft) { railReturnRequest++; true } else false }) { SettingsPane(prefs, onModeChanged = onRetry) }
+                        else -> Column(
+                            Modifier.fillMaxSize(),
+                            verticalArrangement = Arrangement.Center,
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text("Pick a section on the left.", color = Muted, fontSize = 14.sp)
+                        }
+                    }
+                }
+
                 }
             }
         }
@@ -1451,6 +1465,7 @@ private fun HomeRail(
     returnRequest: Int,
     onCat: (String) -> Unit
 ) {
+    var railHasFocus by remember { mutableStateOf(false) }
     val railState = androidx.compose.foundation.lazy.rememberLazyListState()
     val cats = when (section) { "live" -> data.liveCats; "movies" -> data.vodCats; else -> data.seriesCats }
     val extras = when (section) {
@@ -1468,12 +1483,14 @@ private fun HomeRail(
         androidx.compose.runtime.withFrameNanos { }
         runCatching { externalFocus.requestFocus() }
     }
-    LaunchedEffect(depth, section) { if (depth == 0) restoreRailFocus() }
+    LaunchedEffect(depth, section) { restoreRailFocus() }
     LaunchedEffect(returnRequest) { if (returnRequest > 0) restoreRailFocus() }
     LazyColumn(
         state = railState,
         modifier = Modifier
-            .width(126.dp)
+            .width(if (railHasFocus || depth == 0) 220.dp else 142.dp)
+            .onFocusChanged { railHasFocus = it.hasFocus }
+            .focusGroup()
             .fillMaxHeight()
             .background(SurfaceCol)
             .onKeyEvent { ev ->
@@ -1488,7 +1505,11 @@ private fun HomeRail(
             itemsIndexed(RootItems) { pos, p ->
                 RailItem(
                     p.second, section == p.first,
-                    modifier = if (p.first == section) Modifier.focusRequester(externalFocus) else Modifier
+                    modifier = (if (p.first == section) Modifier.focusRequester(externalFocus) else Modifier)
+                        .onPreviewKeyEvent { ev ->
+                            if(ev.type==KeyEventType.KeyDown && ev.key==Key.DirectionRight) { onRoot(p.first); true }
+                            else false
+                        }
                 ) { onRoot(p.first) }
             }
         } else {
@@ -1617,7 +1638,9 @@ fun LivePane(
     selectedCat: String,
     onPlayLive: (List<Playable>, Int) -> Unit,
     onLeftToRail: () -> Unit = {},
-    onRefreshGuide: () -> Unit = {}
+    onRefreshGuide: () -> Unit = {},
+    onUpToPreview: (() -> Unit)? = null,
+    requestInitialFocus: Boolean = true
 ) {
     val context = LocalContext.current
     val favKey = "fav_live_$activeIdx"
@@ -1651,7 +1674,7 @@ fun LivePane(
     }
 
     // ZAKO_V432_LIVE_QUEUE: map this category once, not on every channel click.
-    val playableQueue = remember(filtered, activeIdx) { filtered.map { livePlayable(prefs, it) } }
+    val playableQueue = remember(filtered, activeIdx, showGridGuide) { if (showGridGuide) emptyList() else filtered.map { livePlayable(prefs, it) } }
 
     // Come back to Live TV and the list is scrolled right where you left it.
     val listState = androidx.compose.runtime.saveable.rememberSaveable(
@@ -1755,12 +1778,12 @@ fun LivePane(
             )
         }
         if (showGridGuide && filtered.isNotEmpty()) {
-            LiveGridGuide(
+            key(selectedCat) { LiveGridGuide(
                 prefs = prefs, channels = filtered,
                 favs = favs, onToggleFavorite = { toggleFav(it) },
                 onPlayLive = onPlayLive,
-                onClose = { }
-            )
+                onLeftToRail = onLeftToRail, onUpToPreview = onUpToPreview, requestInitialFocus = requestInitialFocus
+            ) }
         } else if (filtered.isEmpty()) {
             Column(
                 Modifier.fillMaxSize(),
@@ -1928,7 +1951,9 @@ private fun LiveGridGuide(
     favs: Set<String>,
     onToggleFavorite: (String) -> Unit,
     onPlayLive: (List<Playable>, Int) -> Unit,
-    onClose: () -> Unit
+    onLeftToRail: () -> Unit,
+    onUpToPreview: (() -> Unit)?,
+    requestInitialFocus: Boolean
 ) {
     val context = LocalContext.current
     val fmt = remember { SimpleDateFormat("h:mm a", Locale.getDefault()) }
@@ -1942,11 +1967,10 @@ private fun LiveGridGuide(
         if (channels.isNotEmpty()) {
             runCatching { guideListState.scrollToItem(returnIndex.coerceIn(0, channels.lastIndex)) }
             kotlinx.coroutines.delay(120)
-            runCatching { returnFocus.requestFocus() }
+            if (requestInitialFocus && returnUrl != null) runCatching { returnFocus.requestFocus() }
         }
     }
     var manualChannel by remember { mutableStateOf<LiveChannel?>(null) }
-    BackHandler { onClose() }
 
     val guideRevision = EpgStore.revision.intValue
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -1960,9 +1984,8 @@ private fun LiveGridGuide(
     val base = remember { now }
     val windowStart = base + page * 4L * halfHour
 
-    val firstCells = remember(channels) { channels.map { FocusRequester() } }
-    val lastCells = remember(channels) { channels.map { FocusRequester() } }
-    val channelCells = remember(channels) { channels.map { FocusRequester() } }
+    val firstCells = remember(channels) { mutableMapOf<Int, FocusRequester>() }
+    val lastCells = remember(channels) { mutableMapOf<Int, FocusRequester>() }
     var pendingFocus by remember { mutableStateOf<Pair<Int,Boolean>?>(null) }
     var focusRequest by remember { mutableIntStateOf(0) }
     fun rowFullyVisible(row: Int): Boolean {
@@ -1972,7 +1995,7 @@ private fun LiveGridGuide(
     }
     fun moveTo(row: Int, last: Boolean=false, afterPageChange:Boolean=false) {
         if(!afterPageChange && rowFullyVisible(row)) {
-            if(runCatching { (if(last) lastCells[row] else firstCells[row]).requestFocus() }.isSuccess) return
+            if(runCatching { (if(last) lastCells[row] else firstCells[row])?.requestFocus() ?: error("Row not composed") }.isSuccess) return
         }
         pendingFocus=row to last;focusRequest++
     }
@@ -1983,7 +2006,7 @@ private fun LiveGridGuide(
         if(!rowFullyVisible(target.first)) guideListState.scrollToItem(target.first)
         androidx.compose.runtime.withFrameNanos { }
         androidx.compose.runtime.withFrameNanos { }
-        runCatching { (if(target.second) lastCells[target.first] else firstCells[target.first]).requestFocus() }
+        runCatching { (if(target.second) lastCells[target.first] else firstCells[target.first])?.requestFocus() }
         pendingFocus=null
     }
 
@@ -2009,7 +2032,14 @@ private fun LiveGridGuide(
             verticalArrangement = Arrangement.spacedBy(4.dp),
             modifier = Modifier.weight(1f)
         ) {
-            itemsIndexed(channels, key = { _, ch -> ch.id }) { chIndex, ch ->
+            itemsIndexed(channels, key = { index, ch -> "${ch.id}:$index" }) { chIndex, ch ->
+                val first = remember { FocusRequester() }
+                val last = remember { FocusRequester() }
+                val channelFocus = remember { FocusRequester() }
+                DisposableEffect(chIndex, channels) {
+                    firstCells[chIndex]=first; lastCells[chIndex]=last
+                    onDispose { firstCells.remove(chIndex); lastCells.remove(chIndex) }
+                }
                 val schedule = remember(ch.id, windowStart, guideRevision) { EpgStore.guide(ch.epgId, ch.name, windowStart) }
                 val cells = remember(schedule,windowStart) { GuideGeometry.cells(schedule,windowStart,windowStart+GuideNavigation.WINDOW_MS) }
                 val cellFocus = remember(ch.id,cells.size) { cells.map { FocusRequester() } }
@@ -2019,15 +2049,20 @@ private fun LiveGridGuide(
                 ) {
                     Row(
                         Modifier.width(142.dp).fillMaxHeight()
-                            .then(if(ch.url==returnUrl) Modifier.focusRequester(returnFocus) else Modifier)
+                            .then(if(returnUrl!=null && chIndex==returnIndex) Modifier.focusRequester(returnFocus) else Modifier)
                             .border(if(ch.url==returnUrl) 3.dp else 1.dp,if(ch.url==returnUrl) Accent else Color.White.copy(alpha=.45f),RoundedCornerShape(8.dp))
                             .background(ChannelOrange, RoundedCornerShape(8.dp))
-                            .focusRequester(channelCells[chIndex])
+                            .focusRequester(channelFocus)
                             .onPreviewKeyEvent { ev ->
                                 if(ev.type!=KeyEventType.KeyDown) false else when(ev.key) {
+                                    Key.DirectionLeft -> { onLeftToRail(); true }
                                     Key.DirectionRight -> { moveTo(chIndex); true }
                                     Key.DirectionDown -> { moveTo(GuideNavigation.row(chIndex,1,channels.size)); true }
-                                    Key.DirectionUp -> { moveTo(GuideNavigation.row(chIndex,-1,channels.size)); true }
+                                    Key.DirectionUp -> {
+                                        if(chIndex==guideListState.firstVisibleItemIndex && onUpToPreview!=null) onUpToPreview()
+                                        else moveTo(GuideNavigation.row(chIndex,-1,channels.size))
+                                        true
+                                    }
                                     else -> false
                                 }
                             }
@@ -2045,12 +2080,16 @@ private fun LiveGridGuide(
                             Box(Modifier.weight((cell.endMs - cell.startMs).toFloat()).fillMaxHeight()
                                 .padding(start = 2.dp)
                                 .focusRequester(cellFocus[cellIndex])
-                                .then(if(cellIndex==0) Modifier.focusRequester(firstCells[chIndex]) else Modifier)
-                                .then(if(cellIndex==cells.lastIndex) Modifier.focusRequester(lastCells[chIndex]) else Modifier)
+                                .then(if(cellIndex==0) Modifier.focusRequester(first) else Modifier)
+                                .then(if(cellIndex==cells.lastIndex) Modifier.focusRequester(last) else Modifier)
                                 .onPreviewKeyEvent { ev ->
                                     if(ev.type!=KeyEventType.KeyDown) false else when(ev.key) {
                                         Key.DirectionDown -> { moveTo(GuideNavigation.row(chIndex,1,channels.size)); true }
-                                        Key.DirectionUp -> { moveTo(GuideNavigation.row(chIndex,-1,channels.size)); true }
+                                        Key.DirectionUp -> {
+                                            if(chIndex==guideListState.firstVisibleItemIndex && onUpToPreview!=null) onUpToPreview()
+                                            else moveTo(GuideNavigation.row(chIndex,-1,channels.size))
+                                            true
+                                        }
                                         Key.DirectionRight -> {
                                             if(cellIndex<cells.lastIndex) cellFocus[cellIndex+1].requestFocus()
                                             else if(page<GuideNavigation.LAST_PAGE) { page=GuideNavigation.page(page,1); moveTo(chIndex,afterPageChange=true) }
@@ -2059,7 +2098,7 @@ private fun LiveGridGuide(
                                         Key.DirectionLeft -> {
                                             if(cellIndex>0) cellFocus[cellIndex-1].requestFocus()
                                             else if(page>0) { page=GuideNavigation.page(page,-1);moveTo(chIndex,true,afterPageChange=true) }
-                                            else channelCells[chIndex].requestFocus()
+                                            else channelFocus.requestFocus()
                                             true
                                         }
                                         else -> false
@@ -2761,6 +2800,7 @@ object Playback {
     // One coarse check for a video-only stall, including direct/Simple live.
     // Decoder counters track rendered output, not screenshots or screen pixels.
     private val videoHealth = VideoHealthMonitor()
+    private val liveProgress = LiveProgressMonitor()
     private val videoHealthHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var videoHealthRunning = false
     private var videoHealthSession = 0L
@@ -2772,7 +2812,7 @@ object Playback {
     fun attachVideoView(view: PlayerView) {
         videoViews.removeAll { it.get() == null }
         if (videoViews.none { it.get() === view }) videoViews.add(java.lang.ref.WeakReference(view))
-        if (view.player === player && player?.isPlaying == true) startVideoHealthWatchdog()
+        if (view.player === player && player?.playWhenReady == true) startVideoHealthWatchdog()
     }
 
     fun detachVideoView(view: PlayerView) {
@@ -2781,7 +2821,7 @@ object Playback {
         if (videoViews.isEmpty()) {
             stopVideoHealthWatchdog()
             // Audio-only live playback has no rendering surface to supervise.
-            if (player?.let { it.isPlaying && isAudioOnly(it) } == true) startVideoHealthWatchdog()
+            if (player?.let { it.playWhenReady && isAudioOnly(it) } == true) startVideoHealthWatchdog()
         }
     }
 
@@ -2801,6 +2841,7 @@ object Playback {
     }
 
     private fun resetVideoObservation() {
+        liveProgress.sample(android.os.SystemClock.elapsedRealtime(), videoHealthSession, false, 0L, 0L)
         observedVideoCounters = null
         observedVideoView = null
         videoHealth.sample(android.os.SystemClock.elapsedRealtime(), videoHealthSession, false, 0L, 0L)
@@ -2837,12 +2878,17 @@ object Playback {
             // erase failures. Genuinely audio-only streams earn a fresh budget
             // after sustained READY position progress without needing a surface.
             noteAudioPlaybackProgress(now, playingReady && isAudioOnly(p), p.currentPosition)
-            if (recover) {
+            val progressStalled = liveProgress.sample(now, videoHealthSession,
+                view != null && p.playWhenReady && !pausePreparing &&
+                    p.playbackSuppressionReason == Player.PLAYBACK_SUPPRESSION_REASON_NONE &&
+                    (p.playbackState == Player.STATE_READY || p.playbackState == Player.STATE_BUFFERING),
+                p.currentPosition, p.totalBufferedDuration)
+            if (recover || progressStalled) {
                 val myGen = playbackGen
-                StabilityCore.note("video_stall_recover direct=$directLive temporary=${Timeshift.active} mime=${p.videoFormat?.sampleMimeType}")
+                StabilityCore.note("live_stall_recover clock=$progressStalled state=${p.playbackState} buffered=${p.totalBufferedDuration} direct=$directLive temporary=${Timeshift.active} mime=${p.videoFormat?.sampleMimeType}")
                 // Disable the decoder before rebuilding the same source. Do not
                 // recreate the shared player or steal a recording's provider slot.
-                if (myGen == playbackGen && player === p && !backgroundSuspended && p.isPlaying) {
+                if (myGen == playbackGen && player === p && !backgroundSuspended && p.playWhenReady) {
                     val wasPlaying = p.playWhenReady
                     p.stop()
                     if (!recoverTemporaryLive()) {
@@ -3086,6 +3132,9 @@ object Playback {
         p.addListener(object : Player.Listener {
             private var prevIdx = 0
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                StabilityCore.note("live_play_request playing=$playWhenReady reason=$reason state=${p.playbackState}")
+                if (playWhenReady && liveMode && !backgroundSuspended) startVideoHealthWatchdog()
+                else stopVideoHealthWatchdog()
                 if (backgroundSuspended && playWhenReady) {
                     p.pause()
                     return
@@ -3102,6 +3151,8 @@ object Playback {
 
             override fun onPlaybackStateChanged(playbackState: Int) {
                 playStateC.intValue = playbackState
+                if (liveMode) StabilityCore.note("live_state state=$playbackState requested=${p.playWhenReady} suppression=${p.playbackSuppressionReason} pos=${p.currentPosition} buffered=${p.totalBufferedDuration} frames=${p.videoDecoderCounters?.renderedOutputBufferCount}")
+                if (liveMode && p.playWhenReady && !backgroundSuspended) startVideoHealthWatchdog()
                 if (playbackState == Player.STATE_BUFFERING) noteBufferingStarted()
                 if (playbackState == Player.STATE_READY) {
                     // READY can describe an advancing audio clock with a stuck
@@ -3124,6 +3175,14 @@ object Playback {
                 }
             }
 
+            override fun onRenderedFirstFrame() {
+                if (liveMode) StabilityCore.note("live_first_frame pos=${p.currentPosition} buffered=${p.totalBufferedDuration} mime=${p.videoFormat?.sampleMimeType}")
+            }
+
+            override fun onPlaybackSuppressionReasonChanged(playbackSuppressionReason: Int) {
+                if (liveMode) StabilityCore.note("live_suppression reason=$playbackSuppressionReason requested=${p.playWhenReady}")
+            }
+
             override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
                 resetVideoObservation()
                 val fps = p.videoFormat?.frameRate ?: 0f
@@ -3136,7 +3195,7 @@ object Playback {
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
-                if (isPlaying && liveMode && !backgroundSuspended) startVideoHealthWatchdog()
+                if (player?.playWhenReady == true && liveMode && !backgroundSuspended) startVideoHealthWatchdog()
                 else stopVideoHealthWatchdog()
             }
 
@@ -6585,7 +6644,7 @@ fun PlayerScreen(
         if (playState.intValue == Player.STATE_BUFFERING) {
             bufPct = 0
             while (playState.intValue == Player.STATE_BUFFERING) {
-                val targetMs = if (!everReady.value) lockTargetMs else lockTargetMs * 2f
+                val targetMs = lockTargetMs
                 bufPct = ((exo.totalBufferedDuration / targetMs) * 100f).toInt().coerceIn(0, 99)
                 kotlinx.coroutines.delay(600)
             }
@@ -7062,7 +7121,7 @@ fun PlayerScreen(
                 )
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "$bufPct%",
+                    if (bufPct > 0) "Buffering $bufPct%" else "Connecting…",
                     color = Ink, fontSize = 22.sp, fontWeight = FontWeight.Bold
                 )
                 Spacer(Modifier.height(4.dp))
@@ -7075,7 +7134,7 @@ fun PlayerScreen(
                 )
                 if (!everReady.value) {
                     Text(
-                        "Stuck at 0%? This channel may be off the air right now (some only broadcast during games or events).",
+                        "Waiting for stream data and the first picture from your provider.",
                         color = Muted, fontSize = 10.sp
                     )
                 }

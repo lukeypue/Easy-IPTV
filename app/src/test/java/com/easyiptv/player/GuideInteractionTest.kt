@@ -28,7 +28,7 @@ class GuideInteractionTest {
     private val prefs get()=context.getSharedPreferences("easyiptv",Context.MODE_PRIVATE)
     @Before fun setup() { prefs.edit().clear().commit(); EpgStore.clear() }
     @After fun clean() { EpgStore.clear() }
-    private fun render() {
+    private fun render(onLeft: () -> Unit = {}, onUp: (() -> Unit)? = null) {
         val now=System.currentTimeMillis()
         val channels=listOf(LiveChannel("a","Family",null,null,"https://example.invalid/a.ts","a"),LiveChannel("b","Suspense",null,null,"https://example.invalid/b.ts","b"))
         val guide=mapOf("a" to listOf(EpgEntry("All Is Lost","",now-60_000,now+7_200_000)),
@@ -38,7 +38,30 @@ class GuideInteractionTest {
         ui.setContent {
             val inputMode=LocalInputModeManager.current
             SideEffect { inputMode.requestInputMode(InputMode.Keyboard) }
-            LivePane(prefs,0,AppData(emptyList(),channels,emptyList(),emptyList(),emptyList(),emptyList()),"all",{_,_->}) }
+            LivePane(prefs,0,AppData(emptyList(),channels,emptyList(),emptyList(),emptyList(),emptyList()),"all",{_,_->}, onLeftToRail=onLeft, onUpToPreview=onUp) }
+        ui.waitForIdle()
+    }
+    @Test fun leftFromChannelReturnsToCategories() {
+        var returned=false
+        render(onLeft={ returned=true })
+        ui.onNodeWithText("Family").performSemanticsAction(SemanticsActions.RequestFocus) { it() }
+        ui.onNodeWithText("Family").performKeyInput { pressKey(Key.DirectionLeft) }
+        ui.runOnIdle { assertTrue("Left from the channel must reach categories",returned) }
+    }
+    @Test fun upFromFirstProgramReachesPreviewWithoutChangingTime() {
+        var reached=false
+        render(onUp={ reached=true })
+        ui.onNodeWithText("All Is Lost").performSemanticsAction(SemanticsActions.RequestFocus) { it() }
+        ui.onNodeWithText("All Is Lost").performKeyInput { pressKey(Key.DirectionUp) }
+        ui.runOnIdle { assertTrue(reached) }
+        ui.onNodeWithText("All Is Lost").assertExists()
+    }
+    @Test fun allChannelsCanContainRepeatedProviderIds() {
+        val channels=(0..30).map { LiveChannel("same","Channel $it",null,null,"https://example.invalid/$it.ts") }
+        ui.setContent { LivePane(prefs,0,AppData(emptyList(),channels,emptyList(),emptyList(),emptyList(),emptyList()),"all",{_,_->}) }
+        ui.onNodeWithText("Channel 0").assertIsDisplayed()
+        ui.onNodeWithText("Channel 0").performSemanticsAction(SemanticsActions.RequestFocus) { it() }
+        ui.onNodeWithText("Channel 0").performKeyInput { pressKey(Key.DirectionDown) }
         ui.waitForIdle()
     }
     @Test fun downFromWideProgramSelectsTheProgramBesideTheNextChannel() {
