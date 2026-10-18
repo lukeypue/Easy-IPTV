@@ -1248,12 +1248,13 @@ fun HomeScreen(
             modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(Modifier.weight(1f)) {
-                RyzodBrandMark(compact = true)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.width(22.dp).height(3.dp).background(Accent, RoundedCornerShape(3.dp)))
-                    Spacer(Modifier.width(6.dp))
-                    Text(playlistName, fontSize = 11.sp, color = Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(playlistName, fontSize = 11.sp, color = Muted, maxLines = 1,
+                overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 145.dp))
+            Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                if (section == "live") {
+                    GuideRefreshTools(EpgStore.loading.value) {
+                        guideRefreshScope.launch { EpgStore.load(source?.xmltvUrl(), force = true) }
+                    }
                 }
             }
             if (Recorder.activeName.value != null) {
@@ -1282,6 +1283,8 @@ fun HomeScreen(
                 Icon(Icons.Filled.Menu, contentDescription = "Open menu", tint = Ink)
             }
             Text(clock, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Ink)
+            Spacer(Modifier.width(8.dp))
+            RyzodBrandMark(compact = true)
         }
 
         when {
@@ -1317,10 +1320,10 @@ fun HomeScreen(
                 Column(Modifier.weight(1f)) {
                     if (section != "search" && mini != null && Playback.player != null && Recorder.activeName.value == null) {
                         val mp = mini.queue.getOrNull(Playback.currentIdxC.intValue) ?: mini.queue.getOrNull(mini.index)
-                        if (mp != null) Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment=Alignment.CenterVertically) {
+                        if (mp != null) Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp), verticalAlignment=Alignment.CenterVertically) {
                             Box(
                                 Modifier
-                                    .width(236.dp)
+                                    .width(188.dp)
                                     .focusRequester(previewFocus)
                                     .tvFocus(RoundedCornerShape(10.dp))
                                     .clickable { onResumeMini() }
@@ -1454,7 +1457,7 @@ fun HomeScreen(
                                 guideRefreshScope.launch { EpgStore.load(source?.xmltvUrl(), force = true) }
                             }, onUpToPreview = if (mini != null && Recorder.activeName.value == null) {
                                 { runCatching { previewFocus.requestFocus() }; Unit }
-                            } else null, requestInitialFocus = menuLevel == 0, entryRequest = contentRequest + 1)
+                            } else null, requestInitialFocus = menuLevel == 0, entryRequest = contentRequest + 1, showGuideTools = false)
                         depth == 1 && section == "movies" -> MoviesPane(source, prefs, safeData, movieCat, onPlay, onLeftToRail = { menuLevel = 1; railReturnRequest++ }, onRefresh=onRefreshMovies, refreshing=catalogLoading, refreshWarning=catalogError, requestInitialFocus=menuLevel == 0, entryRequest=contentRequest)
                         depth == 1 && section == "series" -> SeriesPane(source, safeData, seriesCat, onSeries, onLeftToRail = { menuLevel = 1; railReturnRequest++ }, onRefresh=onRefreshSeries, refreshing=catalogLoading, refreshWarning=catalogError, requestInitialFocus=menuLevel == 0, entryRequest=contentRequest)
                         section == "search" -> SearchTab(
@@ -1704,6 +1707,49 @@ private fun ErrorBox(err: String, onRetry: () -> Unit, title: String = "Couldn't
     }
 }
 
+@Composable
+private fun GuideRefreshTools(loading: Boolean, onRefresh: () -> Unit) {
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+        TextButton(onClick = onRefresh, enabled = !loading,
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+            modifier = Modifier.height(28.dp).tvFocus(RoundedCornerShape(12.dp))) {
+            Text(if (loading) "UPDATING…" else "↻ UPDATE GUIDE", color = Ink, fontSize = 11.sp)
+        }
+        Text("Guide comes from your provider • Updates may take 1–2 minutes or longer",
+            color = Muted, fontSize = 9.sp, lineHeight = 10.sp, maxLines = 2,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+    }
+}
+
+@Composable
+internal fun LiveBufferHealth(bufferedMs: Long, liveOffsetMs: Long, reserveMs: Int,
+    startupMs: Int, trend: String) {
+    val edgeKnown = liveOffsetMs != C.TIME_UNSET && liveOffsetMs >= 0L
+    val span = (if (edgeKnown) liveOffsetMs else reserveMs.toLong()).coerceAtLeast(1L)
+    val bufferedFraction = (bufferedMs.toFloat() / span).coerceIn(0f, 1f)
+    fun seconds(ms: Long) = String.format(Locale.US, "%.1fs", ms / 1000.0)
+    Column(Modifier.fillMaxWidth().testTag("live-buffer-health").padding(top = 4.dp)) {
+        Row(Modifier.fillMaxWidth()) {
+            Text("PLAY", color = FocusPink, fontSize = 9.sp)
+            Spacer(Modifier.weight(1f))
+            Text(if (edgeKnown) "LIVE" else "REFILL GOAL", color = Muted, fontSize = 9.sp)
+        }
+        Canvas(Modifier.fillMaxWidth().height(9.dp)) {
+            val y = size.height / 2f
+            drawLine(Color.DarkGray, Offset(0f, y), Offset(size.width, y), 5f)
+            drawLine(NeonGreen, Offset(0f, y), Offset(size.width * bufferedFraction, y), 5f)
+            drawCircle(FocusPink, 4f, Offset(0f, y))
+            drawCircle(NeonGreen, 4f, Offset(size.width * bufferedFraction, y))
+            drawCircle(Color.White, 3f, Offset(size.width, y))
+        }
+        Text("Buffer ahead ${seconds(bufferedMs)} • Goal ${reserveMs / 1000}s • Start ${startupMs / 1000}s • $trend",
+            color = Ink, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(if (edgeKnown) "Behind live ${seconds(liveOffsetMs)} • Green = downloaded video, gray = not buffered"
+            else "Live distance unknown for this feed • Green = downloaded video, gray = refill goal",
+            color = Muted, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
 /* ----------------------------- live pane (with built-in guide) ----------------------------- */
 @Composable
 fun LivePane(
@@ -1716,7 +1762,8 @@ fun LivePane(
     onRefreshGuide: () -> Unit = {},
     onUpToPreview: (() -> Unit)? = null,
     requestInitialFocus: Boolean = true,
-    entryRequest: Int = 0
+    entryRequest: Int = 0,
+    showGuideTools: Boolean = true
 ) {
     val context = LocalContext.current
     val favKey = "fav_live_$activeIdx"
@@ -1830,21 +1877,9 @@ fun LivePane(
     }
 
     Column(Modifier.fillMaxSize()) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Text("RYZOD GUIDE", color=ProgramCyan, fontSize=12.sp, fontWeight=FontWeight.ExtraBold)
-            TextButton(onClick = onRefreshGuide, enabled = !guideLoading,
-                modifier = Modifier.tvFocus(RoundedCornerShape(12.dp))) {
-                Text(if (guideLoading) "UPDATING…" else "↻ UPDATE GUIDE", color = Ink, fontSize = 11.sp)
-            }
-        }
-        Text("Guide information comes directly from your provider. Updates may take 1–2 minutes or longer for large guides.",
-            color = Muted, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 12.dp))
-        EpgStore.status.value.takeIf { it.isNotBlank() }?.let { message ->
-            Text(message, color = Muted, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 12.dp))
+        if (showGuideTools) GuideRefreshTools(guideLoading, onRefreshGuide)
+        EpgStore.status.value.takeIf { it.startsWith("Guide update failed:") || it.startsWith("Your provider") }?.let {
+            Text(it, color = Muted, fontSize = 10.sp, maxLines = 2, modifier = Modifier.padding(horizontal = 10.dp))
         }
         if (guideLoading) {
             Text(
@@ -2090,13 +2125,14 @@ private fun LiveGridGuide(
     }
 
     Column(Modifier.fillMaxSize()) {
+        Text(categoryName, color = NeonGreen, fontSize = 28.sp, lineHeight = 29.sp,
+            fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 8.dp).testTag("guide-category-heading"))
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 3.dp),
+            Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 1.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(Modifier.width(142.dp)) {
-                Text(categoryName, color = Ink, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 2,
-                    overflow = TextOverflow.Ellipsis)
                 Text(SimpleDateFormat("EEE M/d", Locale.getDefault()).format(Date(windowStart)), color = Muted, fontSize = 9.sp)
             }
             repeat(4) { slot ->
@@ -2112,7 +2148,7 @@ private fun LiveGridGuide(
         LazyColumn(
             state = guideListState,
             contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
             modifier = Modifier.weight(1f)
         ) {
             itemsIndexed(channels, key = { index, ch -> "${ch.id}:$index" }) { chIndex, ch ->
@@ -2127,7 +2163,7 @@ private fun LiveGridGuide(
                 val cells = remember(schedule,windowStart) { GuideGeometry.cells(schedule,windowStart,windowStart+GuideNavigation.WINDOW_MS) }
                 val cellFocus = remember(ch.id,cells.size) { cells.map { FocusRequester() } }
                 Row(
-                    Modifier.fillMaxWidth().height(58.dp),
+                    Modifier.fillMaxWidth().height(44.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Row(
@@ -2191,14 +2227,14 @@ private fun LiveGridGuide(
                                 .background(if (airing) ProgramCyan.copy(alpha = 0.20f) else Surface2, RoundedCornerShape(4.dp))
                                 .clickable { selected = ch to (entry ?: EpgEntry("Manual Recording",
                                     "No program information from provider.", cell.startMs, cell.endMs)) }
-                                .padding(horizontal = 6.dp, vertical = 5.dp)) {
+                                .padding(horizontal = 6.dp, vertical = 2.dp)) {
                                 if (entry == null) Text("No information", color = Muted, fontSize = 10.sp, maxLines = 1)
                                 else Column {
-                                    Text(entry.title, color = Color(0xFFFFE45C), fontSize = 10.sp,
+                                    Text(entry.title, color = Color(0xFFFFE45C), fontSize = 10.sp, lineHeight = 11.sp,
                                         fontWeight = if (airing) FontWeight.ExtraBold else FontWeight.SemiBold,
                                         maxLines = 2, overflow = TextOverflow.Ellipsis)
                                     Text("${fmt.format(Date(entry.startMs))}–${fmt.format(Date(entry.endMs))}",
-                                        color = Ink, fontSize = 8.sp, maxLines = 1)
+                                        color = Ink, fontSize = 8.sp, lineHeight = 9.sp, maxLines = 1)
                                 }
                             }
                         }
@@ -3100,13 +3136,13 @@ object Playback {
         // Resume loading as soon as any reserve is spent. A wide min/max gap
         // lets loading remain OFF until only the old 10s minimum is left.
         // The existing 32 MiB low-RAM allocator target still takes priority.
-        val loadControl = PlaybackMemoryPolicy.create(
+        val loadControl = LiveAwareLoadControl(PlaybackMemoryPolicy.create(
             lowRam = lowRam,
             minBufferMs = policy.reserveMs,
             maxBufferMs = policy.reserveMs,
             startBufferMs = policy.startMs,
             rebufferMs = policy.rebufferMs
-        )
+        ), lowRam)
         // Some IPTV MPEG-TS streams carry CEA-608 captions without declaring
         // them in PMT metadata. Tell Media3 to expose channel 1 when present so
         // the CC toggle can actually select those captions. This adds no polling.
@@ -3530,6 +3566,7 @@ object Playback {
             "http://127.0.0.1:${TimeshiftServer.port}/live/${System.nanoTime()}?offset=$dvrSourceOffsetBytes&generation=${Timeshift.generation()}"
         )
         val item = MediaItem.Builder()
+            .setTag(LIVE_BUFFER_TAG)
             .setUri(uri)
             .setMediaMetadata(MediaMetadata.Builder().setTitle(ch.name).build())
             .build()
@@ -3704,6 +3741,7 @@ object Playback {
         p.clearMediaItems()
         val policy = StreamBufferPolicy.from(prefsRef ?: return)
         val item = MediaItem.Builder()
+            .setTag(LIVE_BUFFER_TAG)
             .setLiveConfiguration(MediaItem.LiveConfiguration.Builder()
                 .setTargetOffsetMs(policy.rebufferMs.toLong() * 2)
                 .setMinPlaybackSpeed(1.0f).setMaxPlaybackSpeed(1.0f).build())
@@ -4469,6 +4507,7 @@ fun ManagedDvrSchedulePane(
     }
 }
 
+@kotlin.OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
     var bufferSec by remember { mutableIntStateOf(prefs.getInt("buffer_sec", 30)) }
@@ -4492,7 +4531,7 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         Text("Live TV", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
         Text(
-            "Live TV plays directly. Press Pause to start temporary storage, then Play to continue from where you paused. Up to 30 minutes can be retained, depending on free storage. Changing channels or choosing LIVE clears the pause history. Use REC to save a show in Recordings.",
+            "Live TV plays directly. Press Pause to start temporary storage, then Play to continue from where you paused. Up to 30 minutes can be retained, depending on free storage. Changing channels or choosing End Pause clears the pause history. Use REC to save a show in Recordings.",
             fontSize = 12.sp, color = Muted
         )
         Spacer(Modifier.height(20.dp))
@@ -4610,7 +4649,7 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         Text("Stream buffer", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
         Text(
-            "Forward loading reserve. RYZOD keeps refilling while you watch. Recommended: 30 seconds; 60 allows more reserve when your provider and device memory permit it. This is separate from the delay before the picture starts.",
+            "Refill goal while watching, separate from the startup cushion below. Use 60 seconds with a 20–30 second cushion. Off removes deliberate startup/recovery waits; the decoder still buffers some data. Higher goals cannot fix a feed that delivers video too slowly.",
             fontSize = 12.sp, color = Muted
         )
         Spacer(Modifier.height(10.dp))
@@ -4620,7 +4659,8 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
             prefs.edit().putInt("buffer_sec", sec).apply()
             onModeChanged()
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Chip("Off (0s)", bufferSec == 0) { setBuffer(0) }
             Chip("Small (10s)", bufferSec == 10) { setBuffer(10) }
             Chip("Normal (30s)", bufferSec == 30) { setBuffer(30) }
             Chip("Big (60s)", bufferSec == 60) { setBuffer(60) }
@@ -4632,7 +4672,7 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         Text("Channel lock-in cushion", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
         Text(
-            "How much video RYZOD collects before showing a live channel. Bigger cushion = steadier picture on weak channels, but changing channels takes longer. If certain channels keep re-buffering, bump this up.",
+            "Video collected before live playback starts. Try 20–30 seconds for weak channels; changing channels takes longer. Zero adds no deliberate startup wait. Provider live windows and device memory may limit the actual cushion. Watch Buffer health in the mini guide.",
             fontSize = 12.sp, color = Muted
         )
         Spacer(Modifier.height(10.dp))
@@ -4643,11 +4683,17 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
             prefs.edit().putInt("live_start_ms", sec * 1000).apply()
             onModeChanged()
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Chip("Fast (3s)", lockSec == 3) { setLock(3) }
             Chip("Normal (4s)", lockSec == 4) { setLock(4) }
             Chip("Steady (6s)", lockSec == 6) { setLock(6) }
             Chip("Max (10s)", lockSec == 10) { setLock(10) }
+        }
+
+        androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Chip("Immediate (0s)", lockSec == 0) { setLock(0) }
+            Chip("20s cushion", lockSec == 20) { setLock(20) }
+            Chip("30s cushion", lockSec == 30) { setLock(30) }
         }
 
         // ---- Live recovery behavior ----
@@ -4655,11 +4701,11 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         Spacer(Modifier.height(4.dp))
         var steadyRecovery by remember { mutableStateOf(prefs.getBoolean("live_steady_recovery", false)) }
         Text(
-            "Both modes play at normal speed. Natural rebuilds at least 8 seconds after running out. Steady waits for a larger reserve of 15–30 seconds before resuming. Your lock-in setting can increase these waits; device memory and provider availability can limit the reserve.",
+            "Both modes play at normal speed and use the startup cushion you select. After running out, Natural targets 8–40 seconds; Steady targets 15–50 seconds depending on the cushion. Off (0s) removes both waits. Device memory and provider availability can limit the actual reserve.",
             fontSize = 12.sp, color = Muted
         )
         Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Chip("Natural (recommended)", !steadyRecovery) {
                 if (!steadyRecovery) return@Chip
                 steadyRecovery = false
@@ -6726,7 +6772,7 @@ fun PlayerScreen(
         if (playState.intValue == Player.STATE_BUFFERING) {
             bufPct = 0
             while (playState.intValue == Player.STATE_BUFFERING) {
-                val targetMs = (if (Playback.everReadyC.value) bufferPolicy.rebufferMs else bufferPolicy.startMs).toFloat()
+                val targetMs = (if (!current.isLive) 4_000 else if (Playback.everReadyC.value) bufferPolicy.rebufferMs else bufferPolicy.startMs).coerceAtLeast(1).toFloat()
                 bufPct = ((exo.totalBufferedDuration / targetMs) * 100f).toInt().coerceIn(0, 99)
                 kotlinx.coroutines.delay(600)
             }
@@ -7097,7 +7143,7 @@ fun PlayerScreen(
                     touchDvrTick = System.currentTimeMillis()
                     if (!Playback.seekDvrBy(30_000L)) toast(context, "Fast forward is available within your pause history.")
                 }
-                MiniGuideControl("LIVE", activeColor = ProgramCyan) {
+                if (Timeshift.active) MiniGuideControl("END PAUSE", activeColor = ProgramCyan) {
                     touchDvrTick = System.currentTimeMillis()
                     if (!Playback.returnToLive()) toast(context, "Already watching live.")
                 }
@@ -7568,6 +7614,10 @@ private fun MiniGuide(
         )
     }
     var playerBufferMs by remember { mutableLongStateOf(0L) }
+    var liveOffsetMs by remember { mutableLongStateOf(C.TIME_UNSET) }
+    var bufferTrend by remember { mutableStateOf("Measuring incoming video") }
+    var previousBufferMs by remember { mutableLongStateOf(-1L) }
+    val healthPolicy = remember(prefs) { StreamBufferPolicy.from(prefs) }
     var playerPosMs by remember { mutableLongStateOf(0L) }
     var dvrWindowMs by remember { mutableLongStateOf(0L) }
     var dvrBytes by remember { mutableLongStateOf(0L) }
@@ -7588,7 +7638,18 @@ private fun MiniGuide(
 
     LaunchedEffect(Unit) {
         while (true) {
-            playerBufferMs = player?.totalBufferedDuration ?: 0L
+            val nextBuffer = (player?.totalBufferedDuration ?: 0L).coerceAtLeast(0L)
+            bufferTrend = when {
+                player?.playWhenReady != true -> "Paused"
+                player?.playbackState == Player.STATE_BUFFERING -> "Collecting video"
+                previousBufferMs < 0 -> "Measuring incoming video"
+                nextBuffer < previousBufferMs - 250 -> "Reserve shrinking"
+                nextBuffer > previousBufferMs + 250 -> "Reserve refilling"
+                else -> "Reserve steady"
+            }
+            previousBufferMs = nextBuffer
+            playerBufferMs = nextBuffer
+            liveOffsetMs = player?.currentLiveOffset ?: C.TIME_UNSET
             playerPosMs = Playback.dvrAbsolutePositionMs()
             dvrWindowMs = Timeshift.windowMs()
             dvrBytes = Timeshift.bytesWritten
@@ -7613,7 +7674,7 @@ private fun MiniGuide(
     val playFocus = remember { FocusRequester() }
     val recFocus = remember { FocusRequester() }
     val ccFocus = remember { FocusRequester() }
-    val modeFocus = remember { FocusRequester() }
+    val pauseExitFocus = remember { FocusRequester() }
     val sizeFocus = remember { FocusRequester() }
     val infoFocus = remember { FocusRequester() }
     val sbsFocus = remember { FocusRequester() }
@@ -7787,22 +7848,20 @@ private fun MiniGuide(
             MiniGuideControl(
                 if (ccEnabled) "CC ON" else "CC",
                 modifier = Modifier.weight(0.72f).focusRequester(ccFocus).focusProperties {
-                    left = recFocus; right = modeFocus; down = timelineFocus
+                    left = recFocus; right = if (Timeshift.active) pauseExitFocus else sizeFocus; down = timelineFocus
                 }
             ) { touch(); onToggleCc() }
 
-            MiniGuideControl(
-                "LIVE",
-                modifier = Modifier.weight(1f).focusRequester(modeFocus).focusProperties {
+            if (Timeshift.active) MiniGuideControl(
+                "END PAUSE", modifier = Modifier.weight(1f).focusRequester(pauseExitFocus).focusProperties {
                     left = ccFocus; right = sizeFocus; down = timelineFocus
-                },
-                activeColor = if (Playback.directLive) Accent else Ink
+                }, activeColor = ProgramCyan
             ) { touch(); onReturnToLive() }
 
             MiniGuideControl(
                 "SIZE",
                 modifier = Modifier.weight(0.72f).focusRequester(sizeFocus).focusProperties {
-                    left = modeFocus; right = infoFocus; down = timelineFocus
+                    left = if (Timeshift.active) pauseExitFocus else ccFocus; right = infoFocus; down = timelineFocus
                 }
             ) { touch(); onResize() }
 
@@ -7934,6 +7993,8 @@ private fun MiniGuide(
             }
         }
 
+        LiveBufferHealth(playerBufferMs, liveOffsetMs, healthPolicy.reserveMs,
+            healthPolicy.startMs, bufferTrend)
         if (queue.size > 1) {
             Spacer(Modifier.height(4.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {

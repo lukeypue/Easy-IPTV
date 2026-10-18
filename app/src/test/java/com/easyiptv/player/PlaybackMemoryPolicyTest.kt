@@ -30,6 +30,39 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28])
 class PlaybackMemoryPolicyTest {
+    @Test fun longLiveCushionMustNotDelayMoviesOrSavedFiles() {
+        val ctx=androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val prefs=ctx.getSharedPreferences("vod-cushion",android.content.Context.MODE_PRIVATE)
+        prefs.edit().clear().putInt("live_start_ms",30_000).commit()
+        try {
+            val ensure=Playback.javaClass.getDeclaredMethod("ensurePlayer",android.content.Context::class.java,android.content.SharedPreferences::class.java).apply {isAccessible=true}
+            val p=ensure.invoke(Playback,ctx,prefs)
+            val internal=p.javaClass.getDeclaredField("internalPlayer").apply {isAccessible=true}.get(p)
+            val control=internal.javaClass.getDeclaredField("loadControl").apply {isAccessible=true}.get(internal)
+            withPlayer(control as LoadControl,"http://127.0.0.1/movie.mp4") { f ->
+                assertTrue("Live 30s choice must not impose a 30s movie wait",f.startPlayback(4_000_000L))
+                assertTrue("Live recovery must not delay a movie",f.startPlayback(4_000_000L,rebuffering=true))
+            }
+        } finally { Playback.releaseAll() }
+    }
+    @Test fun configuredThirtySecondLiveWaitAndFiniteHlsWindowRemainSafe() {
+        configuredControl(false,30_000,60) { control ->
+            withPlayer(control) { f ->
+                assertFalse(f.startPlayback(29_999_999L))
+                assertTrue(f.startPlayback(30_000_000L))
+                assertFalse(f.startPlayback(4_999_999L,targetLiveOffsetUs=10_000_000L))
+                assertTrue("Short provider window must not deadlock on an unavailable 30s",f.startPlayback(5_000_000L,targetLiveOffsetUs=10_000_000L))
+            }
+        }
+    }
+    @Test fun configuredZeroWaitStartsWithoutAnArtificialLiveCushion() {
+        configuredControl(true,30_000,0) { control ->
+            withPlayer(control) { f ->
+                assertTrue(f.startPlayback(0L))
+                assertTrue(f.startPlayback(0L,rebuffering=true))
+            }
+        }
+    }
     @Test fun liveLoadingRefillsBeforeTheTenSecondCushionDrains() {
         configuredControl(false) { control ->
             withPlayer(control) { f ->
@@ -51,10 +84,10 @@ class PlaybackMemoryPolicyTest {
         }
     }
 
-    private fun configuredControl(steady: Boolean, block: (DefaultLoadControl) -> Unit) {
+    private fun configuredControl(steady: Boolean, lockMs: Int = 10_000, bufferSec: Int = 10, block: (LoadControl) -> Unit) {
         val ctx=androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
         val prefs=ctx.getSharedPreferences("configured-buffer",android.content.Context.MODE_PRIVATE)
-        prefs.edit().clear().putInt("buffer_sec",10).putInt("live_start_ms",10_000)
+        prefs.edit().clear().putInt("buffer_sec",bufferSec).putInt("live_start_ms",lockMs)
             .putBoolean("live_steady_recovery",steady).commit()
         try {
             val method=Playback.javaClass.getDeclaredMethod("ensurePlayer",android.content.Context::class.java,android.content.SharedPreferences::class.java)
@@ -62,7 +95,7 @@ class PlaybackMemoryPolicyTest {
             val p=method.invoke(Playback,ctx,prefs)
             val internal=p.javaClass.getDeclaredField("internalPlayer").apply {isAccessible=true}.get(p)
             val control=internal.javaClass.getDeclaredField("loadControl").apply {isAccessible=true}.get(internal)
-            block(control as DefaultLoadControl)
+            block(control as LoadControl)
         } finally {Playback.releaseAll()}
     }
 
@@ -86,7 +119,7 @@ class PlaybackMemoryPolicyTest {
 
     @Test
     fun reachingTheByteTargetAllowsStartAndRebufferWithoutWaitingForMoreBytes() {
-        withPlayer(PlaybackMemoryPolicy.create(true, 60_000, 60_000, 12_000, 20_000)) { f ->
+        withPlayer(PlaybackMemoryPolicy.create(true, 60_000, 60_000, 30_000, 50_000)) { f ->
             assertFalse(f.startPlayback(2_000_000L))
             assertFalse(f.startPlayback(2_000_000L, rebuffering = true))
             f.allocateBytes(32 * 1024 * 1024)
@@ -124,15 +157,18 @@ class PlaybackMemoryPolicyTest {
             intArrayOf(30_000, 60_000, 4_000, 4_000),
             intArrayOf(30_000, 60_000, 6_000, 12_000),
             intArrayOf(10_000, 30_000, 10_000, 10_000),
-            intArrayOf(60_000, 60_000, 12_000, 20_000)
+            intArrayOf(60_000, 60_000, 12_000, 20_000),
+            intArrayOf(60_000, 60_000, 20_000, 40_000),
+            intArrayOf(60_000, 60_000, 30_000, 50_000),
+            intArrayOf(5_000, 5_000, 0, 0)
         )
         for (lowRam in listOf(true, false)) {
             for (uri in listOf("http://127.0.0.1/live.ts", "file:///recording.ts")) {
                 for ((minMs, maxMs, startMs, rebufferMs) in durations) {
                     withPlayer(PlaybackMemoryPolicy.create(lowRam, minMs, maxMs, startMs, rebufferMs), uri) { f ->
-                        assertFalse(f.startPlayback(startMs * 1000L - 1))
+                        if (startMs > 0) assertFalse(f.startPlayback(startMs * 1000L - 1))
                         assertTrue(f.startPlayback(startMs * 1000L))
-                        assertFalse(f.startPlayback(rebufferMs * 1000L - 1, rebuffering = true))
+                        if (rebufferMs > 0) assertFalse(f.startPlayback(rebufferMs * 1000L - 1, rebuffering = true))
                         assertTrue(f.startPlayback(rebufferMs * 1000L, rebuffering = true))
                         assertTrue(f.continueLoading(0L))
                         assertTrue(f.continueLoading(maxMs * 1000L - 1))
@@ -158,7 +194,7 @@ class PlaybackMemoryPolicyTest {
     }
 
     private fun withPlayer(
-        control: DefaultLoadControl,
+        control: LoadControl,
         uri: String = "http://127.0.0.1/live.ts",
         mimeType: String = MimeTypes.VIDEO_H264,
         block: (PlayerFixture) -> Unit
@@ -171,10 +207,10 @@ class PlaybackMemoryPolicyTest {
         }
     }
 
-    private class PlayerFixture(val control: DefaultLoadControl, uri: String, mimeType: String) {
+    private class PlayerFixture(val control: LoadControl, uri: String, mimeType: String) {
         val playerId = PlayerId("memory-policy-test")
         private val timeline = SinglePeriodTimeline(
-            120_000_000L, true, true, false, null, MediaItem.fromUri(uri)
+            120_000_000L, true, true, false, null, MediaItem.Builder().setUri(uri).setTag(if(uri.endsWith("live.ts")) LIVE_BUFFER_TAG else null).build()
         )
         private val periodId = MediaSource.MediaPeriodId(timeline.getUidOfPeriod(0))
         val allocator = control.getAllocator(playerId)
@@ -197,11 +233,11 @@ class PlaybackMemoryPolicyTest {
 
         fun continueLoading(bufferedUs: Long) = control.shouldContinueLoading(parameters(bufferedUs))
 
-        fun startPlayback(bufferedUs: Long, rebuffering: Boolean = false) =
-            control.shouldStartPlayback(parameters(bufferedUs, rebuffering))
+        fun startPlayback(bufferedUs: Long, rebuffering: Boolean = false, targetLiveOffsetUs: Long = C.TIME_UNSET) =
+            control.shouldStartPlayback(parameters(bufferedUs, rebuffering, targetLiveOffsetUs))
 
-        private fun parameters(bufferedUs: Long, rebuffering: Boolean = false) = LoadControl.Parameters(
-            playerId, timeline, periodId, 0L, bufferedUs, 1f, true, rebuffering, C.TIME_UNSET, C.TIME_UNSET
+        private fun parameters(bufferedUs: Long, rebuffering: Boolean = false, targetLiveOffsetUs: Long = C.TIME_UNSET) = LoadControl.Parameters(
+            playerId, timeline, periodId, 0L, bufferedUs, 1f, true, rebuffering, targetLiveOffsetUs, C.TIME_UNSET
         )
 
         fun close() {

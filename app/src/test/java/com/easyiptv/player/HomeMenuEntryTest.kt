@@ -21,11 +21,13 @@ import org.robolectric.annotation.Config
 @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
 class HomeMenuEntryTest {
     @get:Rule val ui=createAndroidComposeRule<androidx.activity.ComponentActivity>()
-    private fun render(startSection: String = "live", startDepth: Int = 1) {
+    private fun render(startSection: String = "live", startDepth: Int = 1, channelCount: Int = 1, withPreview: Boolean = false) {
         val ctx=ApplicationProvider.getApplicationContext<Context>()
         val prefs=ctx.getSharedPreferences("home-entry",Context.MODE_PRIVATE)
         prefs.edit().clear().commit()
-        val channels=listOf(LiveChannel("one","Test channel",null,"news","https://example.invalid/live.ts"))
+        val channels=(0 until channelCount).map { i -> LiveChannel("ch$i",if(i==0) "Test channel" else "Channel $i",null,"news","http://127.0.0.1:9/live$i.ts") }
+        val previewQueue=channels.map { Playable(it.name,it.url,true) }
+        if(withPreview) Playback.open(ctx,prefs,previewQueue,0,null,false)
         val data=AppData(listOf(Category("news","News and information")),channels,
             emptyList(),listOf(Movie("m","Test movie",null,null,"https://example.invalid/movie.mp4")),
             emptyList(),listOf(SeriesItem("s","Test series",null,null)))
@@ -41,7 +43,7 @@ class HomeMenuEntryTest {
             var query by remember { mutableStateOf("") }
             HomeScreen(prefs=prefs,playlistName="Test",source=source,data=data,loadError=null,
                 catalogLoading=false,catalogError=null,onRetryCatalog={},onRefreshMovies={},onRefreshSeries={},
-                activeIdx=0,section=section,depth=depth,mini=null,onResumeMini={},onCloseMini={},
+                activeIdx=0,section=section,depth=depth,mini=if(withPreview) MiniState(previewQueue,0,0L) else null,onResumeMini={},onCloseMini={},
                 onRoot={section=it;depth=if(it in listOf("live","movies","series")) 1 else 0},
                 onBackToRoot={depth=0},liveCat=cat,onLiveCat={cat=it},movieCat="all",onMovieCat={},
                 seriesCat="all",onSeriesCat={},searchQuery=query,onSearchQuery={query=it},playlists=emptyList(),
@@ -60,6 +62,19 @@ class HomeMenuEntryTest {
         category().performKeyInput {pressKey(Key.DirectionLeft)}
     }
     private fun category() = ui.onNode(hasText("All channels") and hasAnyAncestor(hasTestTag("home-rail")))
+    @Test fun compactGuideShowsSixFullRowsWithPreviewAndKeepsToolbarAboveGrid() {
+        try {
+            render(channelCount=12,withPreview=true)
+            ui.onNodeWithTag("guide-category-heading").assertIsDisplayed()
+            ui.onNodeWithText("Channel 5").assertIsDisplayed()
+            val logo=ui.onNodeWithContentDescription("RYZOD Media Player").fetchSemanticsNode().boundsInRoot
+            val refresh=ui.onNodeWithText("↻ UPDATE GUIDE").fetchSemanticsNode().boundsInRoot
+            val heading=ui.onNodeWithTag("guide-category-heading").fetchSemanticsNode().boundsInRoot
+            org.junit.Assert.assertTrue("Brand must be right of centered refresh",logo.left>refresh.right)
+            org.junit.Assert.assertTrue("Refresh belongs above the guide",refresh.bottom<heading.top)
+            TestScreenshots.save("ryzod479-guide.png")
+        } finally {ui.runOnIdle {Playback.releaseAll()}}
+    }
     @Test fun guideStartsWithChannelsAndCategoryHeadingOnly() {
         render()
         ui.onNodeWithText("News and information").assertDoesNotExist()

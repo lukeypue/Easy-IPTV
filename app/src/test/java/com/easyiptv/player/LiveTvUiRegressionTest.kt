@@ -26,6 +26,8 @@ class LiveTvUiRegressionTest {
                 assertTrue(PlayerKeys.priority?.invoke(KeyEvent.KEYCODE_DPAD_CENTER)==true)
             }
             ui.onNodeWithText("❚❚ PAUSE").assertExists()
+            ui.onNode(hasText("LIVE") and hasClickAction(),useUnmergedTree=true).assertDoesNotExist()
+            ui.onNodeWithTag("live-buffer-health").assertExists()
             ui.runOnIdle {
                 assertTrue(Playback.player!!.playWhenReady)
                 assertFalse(Timeshift.active)
