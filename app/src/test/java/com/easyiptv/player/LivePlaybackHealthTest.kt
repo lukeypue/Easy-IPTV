@@ -21,6 +21,10 @@ class LivePlaybackHealthTest {
             assertEquals("Direct playback must not invent a provider .ts endpoint", uri,
                 player.currentMediaItem?.localConfiguration?.uri.toString())
             assertFalse("Ordinary live viewing must not create disk history", Timeshift.active)
+            val live = player.currentMediaItem!!.liveConfiguration!!
+            assertEquals("HLS must not speed up and consume its reserve", 1.0f, live.minPlaybackSpeed, 0f)
+            assertEquals(1.0f, live.maxPlaybackSpeed, 0f)
+            assertEquals(StreamBufferPolicy.from(prefs).rebufferMs.toLong() * 2, live.targetOffsetMs)
         } finally { Playback.releaseAll() }
     }
 

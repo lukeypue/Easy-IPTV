@@ -30,6 +30,42 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28])
 class PlaybackMemoryPolicyTest {
+    @Test fun liveLoadingRefillsBeforeTheTenSecondCushionDrains() {
+        configuredControl(false) { control ->
+            withPlayer(control) { f ->
+                assertFalse(f.continueLoading(60_000_000L))
+                assertTrue("Resume loading well before the 10s startup reserve is spent", f.continueLoading(20_000_000L))
+            }
+        }
+    }
+
+    @Test fun steadyActuallyRebuildsMoreReserveThanNaturalAtTenSeconds() {
+        configuredControl(false) { control ->
+            withPlayer(control) { f -> assertTrue(f.startPlayback(20_000_000L, rebuffering=true)) }
+        }
+        configuredControl(true) { control ->
+            withPlayer(control) { f ->
+                assertFalse("Steady must not collapse to Natural's 10s rebuffer threshold", f.startPlayback(20_000_000L, rebuffering=true))
+                assertTrue(f.startPlayback(30_000_000L, rebuffering=true))
+            }
+        }
+    }
+
+    private fun configuredControl(steady: Boolean, block: (DefaultLoadControl) -> Unit) {
+        val ctx=androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val prefs=ctx.getSharedPreferences("configured-buffer",android.content.Context.MODE_PRIVATE)
+        prefs.edit().clear().putInt("buffer_sec",10).putInt("live_start_ms",10_000)
+            .putBoolean("live_steady_recovery",steady).commit()
+        try {
+            val method=Playback.javaClass.getDeclaredMethod("ensurePlayer",android.content.Context::class.java,android.content.SharedPreferences::class.java)
+            method.isAccessible=true
+            val p=method.invoke(Playback,ctx,prefs)
+            val internal=p.javaClass.getDeclaredField("internalPlayer").apply {isAccessible=true}.get(p)
+            val control=internal.javaClass.getDeclaredField("loadControl").apply {isAccessible=true}.get(internal)
+            block(control as DefaultLoadControl)
+        } finally {Playback.releaseAll()}
+    }
+
     @Test
     fun lowRamStopsAt32MiBEvenBelowTheTimeMinimumThenResumesAfterRelease() {
         for (uri in listOf("http://127.0.0.1/live.ts", "file:///recording.ts")) {

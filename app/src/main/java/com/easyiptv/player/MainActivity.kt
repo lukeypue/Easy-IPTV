@@ -72,6 +72,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Stop
@@ -124,6 +125,7 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.nativeKeyEvent
 import androidx.compose.ui.layout.ContentScale
@@ -1171,17 +1173,33 @@ fun HomeScreen(
     onSeries: (SeriesItem) -> Unit
 ) {
     val guideRefreshScope = rememberCoroutineScope()
+    // The guide, provider categories and app menu are three distinct levels.
+    // A selected section is not proof that focus entered its content.
+    val hasCategories = section in listOf("live", "movies", "series")
+    var menuLevel by remember { mutableIntStateOf(if (depth == 0 && hasCategories) 2 else 0) }
+    var contentRequest by remember { mutableIntStateOf(if (hasCategories) 0 else 1) }
+    val contentFocus = remember { FocusRequester() }
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
     // Release the decoder/network even when recording hides the corner view.
     // The existing full-stop callback also clears the retained mini-TV session.
     LaunchedEffect(section) { if (section == "search") onCloseMini() }
     // Remote's Back button climbs out one level instead of leaving the app.
-    BackHandler(enabled = depth == 1) { onBackToRoot() }
+    BackHandler(enabled = depth == 1) { menuLevel = 2; onBackToRoot() }
 
     // At the main menu, Back asks before actually closing the app —
     // no more accidental exits from one extra button press.
     val activity = LocalContext.current as? android.app.Activity
     var showExit by remember { mutableStateOf(false) }
-    BackHandler(enabled = depth == 0) { showExit = true }
+    BackHandler(enabled = depth == 0) {
+        if (menuLevel == 2) showExit = true else menuLevel = 2
+    }
+    LaunchedEffect(contentRequest) {
+        if (contentRequest > 0 && section != "live") {
+            androidx.compose.runtime.withFrameNanos { }
+            androidx.compose.runtime.withFrameNanos { }
+            runCatching { contentFocus.requestFocus() }
+        }
+    }
     val exitStayFocus = remember { FocusRequester() }
     LaunchedEffect(showExit) {
         if (showExit) {
@@ -1257,6 +1275,12 @@ fun HomeScreen(
                     modifier = Modifier.padding(end = 10.dp)
                 )
             }
+            IconButton(onClick = {
+                menuLevel = if (menuLevel == 0 && hasCategories) 1 else 2
+                railReturnRequest++
+            }, modifier = Modifier.tvFocus(RoundedCornerShape(12.dp))) {
+                Icon(Icons.Filled.Menu, contentDescription = "Open menu", tint = Ink)
+            }
             Text(clock, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Ink)
         }
 
@@ -1264,15 +1288,20 @@ fun HomeScreen(
             false && data == null && loadError == null -> Box(Modifier.weight(1f)) { LoadingBox("Loading your playlist…") }
             false && loadError != null -> Box(Modifier.weight(1f)) { ErrorBox(loadError ?: "Provider refresh unavailable", onRetry) }
             else -> Row(Modifier.weight(1f)) {
-                HomeRail(
+                if (menuLevel > 0) HomeRail(
                     data = safeData,
                     section = section,
-                    depth = depth,
+                    depth = if (menuLevel == 2) 0 else 1,
                     liveCat = liveCat,
                     movieCat = movieCat,
                     seriesCat = seriesCat,
-                    onRoot = onRoot,
-                    onBackToRoot = onBackToRoot,
+                    onRoot = { id ->
+                        val categories = id in listOf("live", "movies", "series")
+                        menuLevel = if (categories) 1 else 0
+                        onRoot(id)
+                        if (!categories) contentRequest++
+                    },
+                    onBackToRoot = { menuLevel = 2; onBackToRoot() },
                     externalFocus = railFocus,
                     returnRequest = railReturnRequest,
                     onCat = { id ->
@@ -1281,6 +1310,8 @@ fun HomeScreen(
                             "movies" -> onMovieCat(id)
                             else -> onSeriesCat(id)
                         }
+                        menuLevel = 0
+                        contentRequest++
                     }
                 )
                 Column(Modifier.weight(1f)) {
@@ -1371,7 +1402,18 @@ fun HomeScreen(
                             }
                         }
                     }
-                    Box(Modifier.weight(1f)) {
+                    Box(Modifier.weight(1f)
+                        .testTag("home-content")
+                        .focusRequester(contentFocus).focusGroup()
+                        .onKeyEvent { ev ->
+                            if (ev.type == KeyEventType.KeyDown && ev.key == Key.DirectionLeft) {
+                                if (!focusManager.moveFocus(androidx.compose.ui.focus.FocusDirection.Left)) {
+                                    menuLevel = if (hasCategories) 1 else 2
+                                    railReturnRequest++
+                                }
+                                true
+                            } else false
+                        }) {
                     // ZAKO_V425_FOCUS_FIX: panes own Left at their true boundary.
                     if (catalogLoading && (section == "movies" || section == "series")) {
                         Row(
@@ -1408,21 +1450,21 @@ fun HomeScreen(
                                 title = "Couldn't load Movies & Series"
                             )
                         section == "live" -> LivePane(prefs, activeIdx, safeData, liveCat, onPlayLive,
-                            onLeftToRail = { railReturnRequest++ }, onRefreshGuide = {
+                            onLeftToRail = { menuLevel = 1; railReturnRequest++ }, onRefreshGuide = {
                                 guideRefreshScope.launch { EpgStore.load(source?.xmltvUrl(), force = true) }
                             }, onUpToPreview = if (mini != null && Recorder.activeName.value == null) {
                                 { runCatching { previewFocus.requestFocus() }; Unit }
-                            } else null, requestInitialFocus = depth == 1)
-                        depth == 1 && section == "movies" -> MoviesPane(source, prefs, safeData, movieCat, onPlay, onLeftToRail = { railReturnRequest++ }, onRefresh=onRefreshMovies, refreshing=catalogLoading, refreshWarning=catalogError)
-                        depth == 1 && section == "series" -> SeriesPane(source, safeData, seriesCat, onSeries, onLeftToRail = { railReturnRequest++ }, onRefresh=onRefreshSeries, refreshing=catalogLoading, refreshWarning=catalogError)
+                            } else null, requestInitialFocus = menuLevel == 0, entryRequest = contentRequest + 1)
+                        depth == 1 && section == "movies" -> MoviesPane(source, prefs, safeData, movieCat, onPlay, onLeftToRail = { menuLevel = 1; railReturnRequest++ }, onRefresh=onRefreshMovies, refreshing=catalogLoading, refreshWarning=catalogError, requestInitialFocus=menuLevel == 0, entryRequest=contentRequest)
+                        depth == 1 && section == "series" -> SeriesPane(source, safeData, seriesCat, onSeries, onLeftToRail = { menuLevel = 1; railReturnRequest++ }, onRefresh=onRefreshSeries, refreshing=catalogLoading, refreshWarning=catalogError, requestInitialFocus=menuLevel == 0, entryRequest=contentRequest)
                         section == "search" -> SearchTab(
                             source, prefs, safeData, searchQuery, onSearchQuery, onPlay, onPlayLive, onSeries,
                             onDemandWarning = if (!catalogLoading) catalogError else null
                         )
-                        section == "downloads" -> Box(Modifier.fillMaxSize().onPreviewKeyEvent { if (it.type == KeyEventType.KeyDown && it.key == Key.DirectionLeft) { railReturnRequest++; true } else false }) { DownloadsPane(prefs, onPlay) }
-                        section == "recordings" -> Box(Modifier.fillMaxSize().onPreviewKeyEvent { if (it.type == KeyEventType.KeyDown && it.key == Key.DirectionLeft) { railReturnRequest++; true } else false }) { RecordingsPane(prefs, onPlay) }
-                        section == "playlists" -> Box(Modifier.fillMaxSize().onPreviewKeyEvent { if (it.type == KeyEventType.KeyDown && it.key == Key.DirectionLeft) { railReturnRequest++; true } else false }) { PlaylistsPane(playlists, activeIdx, onSelectPlaylist, onDeletePlaylist, onAddPlaylist) }
-                        section == "settings" -> Box(Modifier.fillMaxSize().onPreviewKeyEvent { if (it.type == KeyEventType.KeyDown && it.key == Key.DirectionLeft) { railReturnRequest++; true } else false }) { SettingsPane(prefs, onModeChanged = onRetry) }
+                        section == "downloads" -> DownloadsPane(prefs, onPlay, requestInitialFocus = menuLevel == 0, onLeftToRail = { menuLevel = 2; railReturnRequest++ })
+                        section == "recordings" -> RecordingsPane(prefs, onPlay, requestInitialFocus = menuLevel == 0, onLeftToRail = { menuLevel = 2; railReturnRequest++ })
+                        section == "playlists" -> PlaylistsPane(playlists, activeIdx, onSelectPlaylist, onDeletePlaylist, onAddPlaylist)
+                        section == "settings" -> SettingsPane(prefs, onModeChanged = onCloseMini)
                         else -> Column(
                             Modifier.fillMaxSize(),
                             verticalArrangement = Arrangement.Center,
@@ -1465,7 +1507,6 @@ private fun HomeRail(
     returnRequest: Int,
     onCat: (String) -> Unit
 ) {
-    var railHasFocus by remember { mutableStateOf(false) }
     val railState = androidx.compose.foundation.lazy.rememberLazyListState()
     val cats = when (section) { "live" -> data.liveCats; "movies" -> data.vodCats; else -> data.seriesCats }
     val extras = when (section) {
@@ -1488,8 +1529,8 @@ private fun HomeRail(
     LazyColumn(
         state = railState,
         modifier = Modifier
-            .width(if (railHasFocus || depth == 0) 220.dp else 142.dp)
-            .onFocusChanged { railHasFocus = it.hasFocus }
+            .width(236.dp)
+            .testTag("home-rail")
             .focusGroup()
             .fillMaxHeight()
             .background(SurfaceCol)
@@ -1517,13 +1558,21 @@ private fun HomeRail(
             itemsIndexed(extras) { ix, p ->
                 RailItem(
                     p.second, selected == p.first,
-                    modifier = if (selectedIndex == ix) Modifier.focusRequester(externalFocus) else Modifier
+                    modifier = (if (selectedIndex == ix) Modifier.focusRequester(externalFocus) else Modifier)
+                        .onPreviewKeyEvent { ev ->
+                            if (ev.type == KeyEventType.KeyDown && ev.key == Key.DirectionRight) { onCat(p.first); true }
+                            else false
+                        }
                 ) { onCat(p.first) }
             }
             itemsIndexed(cats) { ix, c ->
                 RailItem(
                     c.name, selected == c.id,
-                    modifier = if (selectedIndex == extras.size + ix) Modifier.focusRequester(externalFocus) else Modifier
+                    modifier = (if (selectedIndex == extras.size + ix) Modifier.focusRequester(externalFocus) else Modifier)
+                        .onPreviewKeyEvent { ev ->
+                            if (ev.type == KeyEventType.KeyDown && ev.key == Key.DirectionRight) { onCat(c.id); true }
+                            else false
+                        }
                 ) { onCat(c.id) }
             }
         }
@@ -1565,6 +1614,32 @@ private fun RailItem(label: String, active: Boolean, modifier: Modifier = Modifi
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(end = 6.dp)
         )
+    }
+}
+
+@Composable
+private fun EmptyBrowseState(title: String, detail: String, requestFocus: Boolean, onLeft: () -> Unit) {
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(requestFocus) {
+        if (requestFocus) {
+            androidx.compose.runtime.withFrameNanos { }
+            androidx.compose.runtime.withFrameNanos { }
+            runCatching { focus.requestFocus() }
+        }
+    }
+    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp)
+            .testTag("empty-browse-state").focusRequester(focus)
+            .tvFocus(RoundedCornerShape(12.dp))
+            .onPreviewKeyEvent { ev ->
+                if (ev.type == KeyEventType.KeyDown && ev.key == Key.DirectionLeft) { onLeft(); true }
+                else false
+            }.focusable().padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(title, color = Muted, fontSize = 14.sp)
+            Spacer(Modifier.height(6.dp))
+            Text(detail, color = Muted, fontSize = 12.sp)
+        }
     }
 }
 
@@ -1640,7 +1715,8 @@ fun LivePane(
     onLeftToRail: () -> Unit = {},
     onRefreshGuide: () -> Unit = {},
     onUpToPreview: (() -> Unit)? = null,
-    requestInitialFocus: Boolean = true
+    requestInitialFocus: Boolean = true,
+    entryRequest: Int = 0
 ) {
     val context = LocalContext.current
     val favKey = "fav_live_$activeIdx"
@@ -1782,19 +1858,19 @@ fun LivePane(
                 prefs = prefs, channels = filtered,
                 favs = favs, onToggleFavorite = { toggleFav(it) },
                 onPlayLive = onPlayLive,
-                onLeftToRail = onLeftToRail, onUpToPreview = onUpToPreview, requestInitialFocus = requestInitialFocus
+                onLeftToRail = onLeftToRail, onUpToPreview = onUpToPreview, requestInitialFocus = requestInitialFocus,
+                entryRequest = entryRequest, categoryName = when (selectedCat) {
+                    "all" -> "All channels"
+                    "fav" -> "★ Favorites"
+                    else -> data.liveCats.firstOrNull { it.id == selectedCat }?.name ?: "Channels"
+                }
             ) }
         } else if (filtered.isEmpty()) {
-            Column(
-                Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text(
-                    if (selectedCat == "fav") "No favorites yet — tap a star." else "No channels here.",
-                    color = Muted, fontSize = 14.sp
-                )
-            }
+            EmptyBrowseState(
+                title = if (selectedCat == "fav") "No favorites yet — tap a star." else "No channels here.",
+                detail = "Press Left to choose a category.",
+                requestFocus = requestInitialFocus, onLeft = onLeftToRail
+            )
         } else {
             LazyColumn(
                 state = listState,
@@ -1953,7 +2029,9 @@ private fun LiveGridGuide(
     onPlayLive: (List<Playable>, Int) -> Unit,
     onLeftToRail: () -> Unit,
     onUpToPreview: (() -> Unit)?,
-    requestInitialFocus: Boolean
+    requestInitialFocus: Boolean,
+    entryRequest: Int,
+    categoryName: String
 ) {
     val context = LocalContext.current
     val fmt = remember { SimpleDateFormat("h:mm a", Locale.getDefault()) }
@@ -1963,11 +2041,12 @@ private fun LiveGridGuide(
     val returnIndex = channels.indexOfFirst { it.url == returnUrl }.coerceAtLeast(0)
     val returnFocus = remember(returnUrl, channels.size) { FocusRequester() }
     val guideListState = androidx.compose.foundation.lazy.rememberLazyListState()
-    LaunchedEffect(returnUrl, channels.size) {
+    LaunchedEffect(returnUrl, channels.size, entryRequest, requestInitialFocus) {
         if (channels.isNotEmpty()) {
             runCatching { guideListState.scrollToItem(returnIndex.coerceIn(0, channels.lastIndex)) }
-            kotlinx.coroutines.delay(120)
-            if (requestInitialFocus && returnUrl != null) runCatching { returnFocus.requestFocus() }
+            androidx.compose.runtime.withFrameNanos { }
+            androidx.compose.runtime.withFrameNanos { }
+            if (requestInitialFocus && (returnUrl != null || entryRequest > 0)) runCatching { returnFocus.requestFocus() }
         }
     }
     var manualChannel by remember { mutableStateOf<LiveChannel?>(null) }
@@ -2015,7 +2094,11 @@ private fun LiveGridGuide(
             Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 3.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(SimpleDateFormat("EEE M/d",Locale.getDefault()).format(Date(windowStart)), color = Ink, fontSize = 10.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(142.dp))
+            Column(Modifier.width(142.dp)) {
+                Text(categoryName, color = Ink, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 2,
+                    overflow = TextOverflow.Ellipsis)
+                Text(SimpleDateFormat("EEE M/d", Locale.getDefault()).format(Date(windowStart)), color = Muted, fontSize = 9.sp)
+            }
             repeat(4) { slot ->
                 Text(
                     fmt.format(Date(windowStart + slot * halfHour)),
@@ -2049,7 +2132,7 @@ private fun LiveGridGuide(
                 ) {
                     Row(
                         Modifier.width(142.dp).fillMaxHeight()
-                            .then(if(returnUrl!=null && chIndex==returnIndex) Modifier.focusRequester(returnFocus) else Modifier)
+                            .then(if(chIndex==returnIndex) Modifier.focusRequester(returnFocus) else Modifier)
                             .border(if(ch.url==returnUrl) 3.dp else 1.dp,if(ch.url==returnUrl) Accent else Color.White.copy(alpha=.45f),RoundedCornerShape(8.dp))
                             .background(ChannelOrange, RoundedCornerShape(8.dp))
                             .focusRequester(channelFocus)
@@ -3007,47 +3090,22 @@ object Playback {
         prefsRef = prefs
         player?.let { return it }
         simpleRaw = true
-        val bufferSec = prefs.getInt("buffer_sec", 30)
-        // How much video to collect before showing the picture (and 2x that
-        // after a stall). Bigger = slower channel changes but steadier playback
-        // on weak channels. Settings › "Channel lock-in cushion".
-        // SIMPLE MODE removes DVR/recording/governor overhead, but it is meant
-        // to HELP a troublesome channel — not race to picture with only 1.5 s.
-        // Keep the user's normal lock-in cushion so the raw provider path still
-        // has a few seconds of protection before playback begins.
-        val lockMs = prefs.getInt("live_start_ms", 4_000).coerceIn(2_000, 12_000)
+        val policy = StreamBufferPolicy.from(prefs)
         val renderersFactory = DefaultRenderersFactory(context)
-            // Keep the bundled FFmpeg decoder AVAILABLE as fallback, but let Fire TV
-            // hardware/native audio decode first to save CPU during live playback.
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
             .setEnableDecoderFallback(true)
-        // LIVE TV REALITY: providers send live video at exactly real-time speed,
-        // so a live buffer can never stockpile much — the only cushion you get
-        // is what you collect BEFORE playing. Start with ~4s in the tank, and
-        // after any stall rebuild ~8s before resuming, so every stall comes back
-        // more protected than before. (The old 1.5s "fast start" drained on the
-        // first network dip and caused a stall loop.)
-        val steadyRecovery = prefs.getBoolean("live_steady_recovery", false)
-        // ZAKO_V439_SAFE_BUFFER_INVARIANTS: Media3 requires both playback thresholds
-        // to be <= minBufferMs. Steady may request a deeper recovery cushion, but
-        // the value passed into DefaultLoadControl is clamped before player creation.
-        val minBufferMs = (bufferSec * 1000).coerceAtMost(60_000)
-        val requestedStartMs = if (steadyRecovery) maxOf(lockMs, 6_000) else lockMs
-        val requestedRebufferMs = if (steadyRecovery) maxOf(lockMs * 3, 12_000).coerceAtMost(20_000) else lockMs
-        val safeStartMs = minOf(requestedStartMs, minBufferMs)
-        val safeRebufferMs = minOf(requestedRebufferMs, minBufferMs)
-        StabilityCore.note("v439_buffer_policy steady=$steadyRecovery min=$minBufferMs start=$safeStartMs rebuffer=$safeRebufferMs")
-        // ZAKO_V433_BUFFER_CAP: keep the proven startup/rebuffer cushion, but stop
-        // VOD or DVR-behind-live from reserving a 60-90s unbounded sample buffer.
         val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
         val lowRam = am?.isLowRamDevice == true || (am?.memoryClass ?: 512) <= 256
-        val maxBufferMs = (bufferSec * 1000 * 3).coerceIn(30_000, 60_000)
+        StabilityCore.note("buffer_policy reserve=${policy.reserveMs} start=${policy.startMs} rebuffer=${policy.rebufferMs} lowRam=$lowRam")
+        // Resume loading as soon as any reserve is spent. A wide min/max gap
+        // lets loading remain OFF until only the old 10s minimum is left.
+        // The existing 32 MiB low-RAM allocator target still takes priority.
         val loadControl = PlaybackMemoryPolicy.create(
             lowRam = lowRam,
-            minBufferMs = minBufferMs,
-            maxBufferMs = maxBufferMs,
-            startBufferMs = safeStartMs,
-            rebufferMs = safeRebufferMs
+            minBufferMs = policy.reserveMs,
+            maxBufferMs = policy.reserveMs,
+            startBufferMs = policy.startMs,
+            rebufferMs = policy.rebufferMs
         )
         // Some IPTV MPEG-TS streams carry CEA-608 captions without declaring
         // them in PMT metadata. Tell Media3 to expose channel 1 when present so
@@ -3287,12 +3345,8 @@ object Playback {
     }
 
     // -----------------------------------------------------------------------
-    // THE CATCH-UP GOVERNOR — the fix for "it keeps catching up to the buffer."
-    // Live video arrives at exactly 1.0x real-time. If we also PLAY at exactly
-    // 1.0x, the cushion can only ever shrink — every network dip stalls it.
-    // So: whenever the cushion gets thin, play at 0.95x (5% slower — nobody can
-    // see or hear it) so the cushion refills WHILE you watch. Once it's healthy
-    // again, back to full speed. Playback can never "catch up to the buffer."
+    // Temporary-DVR stall supervision. Playback stays at normal speed;
+    // forward reserve comes from Media3 load control, not speed manipulation.
     // -----------------------------------------------------------------------
     private val governor = android.os.Handler(android.os.Looper.getMainLooper())
     private var governorRunning = false
@@ -3648,7 +3702,11 @@ object Playback {
         directLive = true
         p.stop()
         p.clearMediaItems()
+        val policy = StreamBufferPolicy.from(prefsRef ?: return)
         val item = MediaItem.Builder()
+            .setLiveConfiguration(MediaItem.LiveConfiguration.Builder()
+                .setTargetOffsetMs(policy.rebufferMs.toLong() * 2)
+                .setMinPlaybackSpeed(1.0f).setMaxPlaybackSpeed(1.0f).build())
             // Direct playback honors the supplied transport. A playlist URL is
             // not proof that an equivalent raw .ts endpoint exists.
             .setUri(Uri.parse(ch.url))
@@ -3960,7 +4018,9 @@ fun MoviesPane(
     onLeftToRail: () -> Unit = {},
     onRefresh: () -> Unit = {},
     refreshing: Boolean = false,
-    refreshWarning: String? = null
+    refreshWarning: String? = null,
+    requestInitialFocus: Boolean = true,
+    entryRequest: Int = 0
 ) {
     var paneHasFocus by remember { mutableStateOf(false) }
     BackHandler(enabled = paneHasFocus) { onLeftToRail() }
@@ -4014,7 +4074,8 @@ fun MoviesPane(
             }
     }
 
-    LaunchedEffect(selectedCat, filtered.size, restoreUrl) {
+    LaunchedEffect(selectedCat, filtered.size, restoreUrl, requestInitialFocus, entryRequest) {
+        if (!requestInitialFocus) return@LaunchedEffect
         if (BrowseFocusMemory.movieCategory != selectedCat) {
             BrowseFocusMemory.movieCategory = selectedCat
             BrowseFocusMemory.movieUrl = null
@@ -4090,7 +4151,9 @@ fun SeriesPane(
     onLeftToRail: () -> Unit = {},
     onRefresh: () -> Unit = {},
     refreshing: Boolean = false,
-    refreshWarning: String? = null
+    refreshWarning: String? = null,
+    requestInitialFocus: Boolean = true,
+    entryRequest: Int = 0
 ) {
     var paneHasFocus by remember { mutableStateOf(false) }
     BackHandler(enabled = paneHasFocus) { onLeftToRail() }
@@ -4141,7 +4204,8 @@ fun SeriesPane(
             }
     }
 
-    LaunchedEffect(selectedCat, filtered.size, restoreId) {
+    LaunchedEffect(selectedCat, filtered.size, restoreId, requestInitialFocus, entryRequest) {
+        if (!requestInitialFocus) return@LaunchedEffect
         if (BrowseFocusMemory.seriesCategory != selectedCat) {
             BrowseFocusMemory.seriesCategory = selectedCat
             BrowseFocusMemory.seriesId = null
@@ -4408,7 +4472,6 @@ fun ManagedDvrSchedulePane(
 @Composable
 fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
     var bufferSec by remember { mutableIntStateOf(prefs.getInt("buffer_sec", 30)) }
-    var autoLast by remember { mutableStateOf(prefs.getBoolean("autoplay_last", false)) }
     val ctx = LocalContext.current
     var updateStatus by remember { mutableStateOf("") }
     var updateUrl by remember { mutableStateOf<String?>(null) }
@@ -4547,15 +4610,23 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         Text("Stream buffer", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
         Text(
-            "The app stores video ahead of what you're watching so a shaky connection doesn't cause stutter. Bigger = smoother on bad internet. Recommended: 30 seconds.",
+            "Forward loading reserve. RYZOD keeps refilling while you watch. Recommended: 30 seconds; 60 allows more reserve when your provider and device memory permit it. This is separate from the delay before the picture starts.",
             fontSize = 12.sp, color = Muted
         )
         Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Chip("Small (10s)", bufferSec == 10) { bufferSec = 10; prefs.edit().putInt("buffer_sec", 10).apply() }
-            Chip("Normal (30s)", bufferSec == 30) { bufferSec = 30; prefs.edit().putInt("buffer_sec", 30).apply() }
-            Chip("Big (60s)", bufferSec == 60) { bufferSec = 60; prefs.edit().putInt("buffer_sec", 60).apply() }
+        fun setBuffer(sec: Int) {
+            if (bufferSec == sec) return
+            bufferSec = sec
+            prefs.edit().putInt("buffer_sec", sec).apply()
+            onModeChanged()
         }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Chip("Small (10s)", bufferSec == 10) { setBuffer(10) }
+            Chip("Normal (30s)", bufferSec == 30) { setBuffer(30) }
+            Chip("Big (60s)", bufferSec == 60) { setBuffer(60) }
+        }
+        Text("Changing buffer or recovery settings stops the preview and applies to the next channel you open.",
+            fontSize = 10.sp, color = Muted, modifier = Modifier.padding(top = 4.dp))
 
         Spacer(Modifier.height(20.dp))
         Text("Channel lock-in cushion", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
@@ -4567,9 +4638,10 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         Spacer(Modifier.height(10.dp))
         var lockSec by remember { mutableIntStateOf(prefs.getInt("live_start_ms", 4000) / 1000) }
         fun setLock(sec: Int) {
+            if (lockSec == sec) return
             lockSec = sec
             prefs.edit().putInt("live_start_ms", sec * 1000).apply()
-            Playback.releaseAll()   // applies to the very next channel you play
+            onModeChanged()
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Chip("Fast (3s)", lockSec == 3) { setLock(3) }
@@ -4583,20 +4655,22 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         Spacer(Modifier.height(4.dp))
         var steadyRecovery by remember { mutableStateOf(prefs.getBoolean("live_steady_recovery", false)) }
         Text(
-            "Natural is lightest: buffer when tuning, then play at normal 1.0× and resume normally after a brief stall. Steady adds the gentle cushion refill + stall recovery for especially bursty channels.",
+            "Both modes play at normal speed. Natural rebuilds at least 8 seconds after running out. Steady waits for a larger reserve of 15–30 seconds before resuming. Your lock-in setting can increase these waits; device memory and provider availability can limit the reserve.",
             fontSize = 12.sp, color = Muted
         )
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Chip("Natural (recommended)", !steadyRecovery) {
+                if (!steadyRecovery) return@Chip
                 steadyRecovery = false
                 prefs.edit().putBoolean("live_steady_recovery", false).apply()
-                Playback.releaseAll(); onModeChanged()
+                onModeChanged()
             }
             Chip("Steady weak-channel", steadyRecovery) {
+                if (steadyRecovery) return@Chip
                 steadyRecovery = true
                 prefs.edit().putBoolean("live_steady_recovery", true).apply()
-                Playback.releaseAll(); onModeChanged()
+                onModeChanged()
             }
         }
 
@@ -5597,6 +5671,11 @@ private fun ConfirmSavedItemDelete(title: String, kind: String, onCancel: () -> 
 /* ----------------------------- downloads ----------------------------- */
 @Composable
 fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
+    DownloadsPane(prefs, onPlay, requestInitialFocus = true)
+}
+
+@Composable
+fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit, requestInitialFocus: Boolean, onLeftToRail: () -> Unit = {}) {
     val context = LocalContext.current
     var items by remember { mutableStateOf(DownloadStore.load(prefs)) }
     // id -> (bytes so far, total bytes). Refreshed every second while anything is downloading.
@@ -5671,15 +5750,8 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
         )
         if (items.isEmpty()) {
-            Column(
-                Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text("Nothing downloaded yet.", color = Muted, fontSize = 14.sp)
-                Spacer(Modifier.height(6.dp))
-                Text("Tap the ⬇ icon next to any movie or episode.", color = Muted, fontSize = 12.sp)
-            }
+            EmptyBrowseState("Nothing downloaded yet.", "Tap the ⬇ icon next to any movie or episode. Press Left for the main menu.",
+                requestFocus = requestInitialFocus, onLeft = onLeftToRail)
         } else {
             LazyColumn(
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
@@ -5817,12 +5889,29 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
 /* ----------------------------- recordings ----------------------------- */
 @Composable
 fun RecordingsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
+    RecordingsPane(prefs, onPlay, requestInitialFocus = true)
+}
+
+@Composable
+fun RecordingsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit, requestInitialFocus: Boolean,
+    onLeftToRail: () -> Unit = {}, loadFiles: (suspend () -> List<File>)? = null) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var files by remember { mutableStateOf<List<File>>(emptyList()) }
-    suspend fun scanRecordings(): List<File> = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-        Recorder.recordingsDir(context).listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList()
+    val recordingsFocus = remember { FocusRequester() }
+    // The first IO scan can replace an already-focused empty state. Restore
+    // only on empty/nonempty transitions or explicit entry, never on polling.
+    LaunchedEffect(files.isNotEmpty(), requestInitialFocus) {
+        if (files.isNotEmpty() && requestInitialFocus) {
+            androidx.compose.runtime.withFrameNanos { }
+            androidx.compose.runtime.withFrameNanos { }
+            runCatching { recordingsFocus.requestFocus() }
+        }
     }
+    suspend fun scanRecordings(): List<File> = loadFiles?.invoke()
+        ?: kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            Recorder.recordingsDir(context).listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList()
+        }
     var scheds by remember { mutableStateOf(ScheduleStore.load(prefs)) }
     val schedFmt = remember { SimpleDateFormat("EEE, MMM d  h:mm a", Locale.getDefault()) }
     val activeRecording = Recorder.activeName.value
@@ -5839,7 +5928,7 @@ fun RecordingsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
         }
     }
 
-    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().focusRequester(recordingsFocus).focusGroup()) {
         Text(
             if (ProviderStreams.max(prefs) == 1)
                 "Provider streams: 1 • Recording the channel you are watching shares that stream. Recording a different channel takes over Live TV."
@@ -5926,15 +6015,8 @@ fun RecordingsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit) {
             }
         }
         if (files.isEmpty()) {
-            Column(
-                Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text("No recordings yet.", color = Muted, fontSize = 14.sp)
-                Spacer(Modifier.height(6.dp))
-                Text("While watching live TV, tap the red ● record button.", color = Muted, fontSize = 12.sp)
-            }
+            EmptyBrowseState("No recordings yet.", "While watching live TV, tap the red ● record button. Press Left for the main menu.",
+                requestFocus = requestInitialFocus && scheds.isEmpty() && active == null, onLeft = onLeftToRail)
         } else {
             LazyColumn(
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
@@ -6636,7 +6718,7 @@ fun PlayerScreen(
     // wait when they can SEE progress, and a channel frozen at 0% tells them
     // it's off the air (game-day channels, etc.) without any guesswork.
     var bufPct by remember { mutableIntStateOf(0) }
-    val lockTargetMs = remember { prefs.getInt("live_start_ms", 4_000).coerceIn(2_000, 12_000).toFloat() }
+    val bufferPolicy = remember { StreamBufferPolicy.from(prefs) }
     LaunchedEffect(playState.intValue) {
         // Only spins while actually buffering; the effect re-runs (and this
         // loop exits) the moment the state changes to READY. 600ms is plenty
@@ -6644,7 +6726,7 @@ fun PlayerScreen(
         if (playState.intValue == Player.STATE_BUFFERING) {
             bufPct = 0
             while (playState.intValue == Player.STATE_BUFFERING) {
-                val targetMs = lockTargetMs
+                val targetMs = (if (Playback.everReadyC.value) bufferPolicy.rebufferMs else bufferPolicy.startMs).toFloat()
                 bufPct = ((exo.totalBufferedDuration / targetMs) * 100f).toInt().coerceIn(0, 99)
                 kotlinx.coroutines.delay(600)
             }

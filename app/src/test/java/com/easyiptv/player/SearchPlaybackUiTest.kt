@@ -36,6 +36,7 @@ class SearchPlaybackUiTest {
                     onAddPlaylist={},onRetry={},onPlay={},onPlayLive={_,_->},onSeries={})
             }
             ui.runOnIdle {assertNotNull(Playback.player)}
+            ui.runOnIdle {ui.activity.onBackPressedDispatcher.onBackPressed()}
             ui.onNodeWithText("Search",useUnmergedTree=true).performClick()
             ui.runOnIdle {
                 assertNull("Search must release the decoder, not merely hide or pause it",Playback.player)
@@ -45,6 +46,7 @@ class SearchPlaybackUiTest {
                 assertNull(mini.value)
             }
             ui.onNodeWithText("Stop playing").assertDoesNotExist()
+            ui.runOnIdle {ui.activity.onBackPressedDispatcher.onBackPressed()}
             ui.onNodeWithText("Settings",useUnmergedTree=true).performClick()
             ui.runOnIdle {assertNull("Leaving Search must not auto-open the old feed",Playback.player)}
         } finally {ui.runOnIdle {Playback.releaseAll()}}
