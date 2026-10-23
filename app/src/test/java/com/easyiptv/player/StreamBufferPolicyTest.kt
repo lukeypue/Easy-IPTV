@@ -14,7 +14,7 @@ class StreamBufferPolicyTest {
     @Test fun everySettingCombinationLeavesRoomToRefillAndKeepsSteadyDistinct() {
         val ctx=ApplicationProvider.getApplicationContext<Context>()
         val prefs=ctx.getSharedPreferences("buffer-combinations",Context.MODE_PRIVATE)
-        for(size in listOf(10,30,60)) for(lock in listOf(0,3_000,4_000,6_000,10_000,20_000,30_000)) {
+        for(size in listOf(10,20,30,60)) for(lock in listOf(0,3_000,4_000,6_000,10_000,20_000,30_000)) {
             fun policy(steady:Boolean):StreamBufferPolicy {
                 prefs.edit().clear().putInt("buffer_sec",size).putInt("live_start_ms",lock)
                     .putBoolean("live_steady_recovery",steady).commit()

@@ -3324,10 +3324,11 @@ object Playback {
                         vodUaFallbackUsed = true
                         val idx = p.currentMediaItemIndex.coerceAtLeast(0)
                         val pos = p.currentPosition.coerceAtLeast(0L)
+                        val requestedPlayback = p.playWhenReady
                         val sources = queue.map { pl -> browserVodMediaSources!!.createMediaSource(mediaItemFor(pl, false)) }
                         p.setMediaSources(sources, idx.coerceAtMost((sources.size - 1).coerceAtLeast(0)), pos)
                         p.prepare()
-                        p.playWhenReady = true
+                        p.playWhenReady = requestedPlayback
                         return
                     }
                 }
@@ -3343,7 +3344,7 @@ object Playback {
                 // look exactly like random buffering. Stale retries do nothing.
                 val myGen = playbackGen
                 android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                    if (myGen != playbackGen || backgroundSuspended) return@postDelayed
+                    if (myGen != playbackGen || backgroundSuspended || player !== p) return@postDelayed
                     runCatching {
                         if (liveMode) {
                             // Timeshift trouble? After 3 strikes, flip to direct
@@ -3353,8 +3354,9 @@ object Playback {
                                 zapTo(currentIdxC.intValue, preserveDirect = true)
                             }
                         } else {
+                            // prepare preserves playWhenReady, including a Pause
+                            // pressed while this retry was waiting.
                             p.prepare()
-                            p.play()
                         }
                     }
                 }, wait)
@@ -3778,6 +3780,10 @@ object Playback {
     ): ExoPlayer {
         val p = ensurePlayer(context, prefs)
         if (attachOnly && queue.isNotEmpty()) return p
+        // A new selection owns a new session, including movies and saved files.
+        // Old delayed retries must never prepare or resume this replacement queue.
+        playbackGen++
+        retriesP = 0
         // A newly selected show requests playback once its visible surface is ready.
         backgroundResumePlaying = true
         // Leaving a successfully watched live channel should make it immediately
@@ -4649,7 +4655,7 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         Text("Stream buffer", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
         Text(
-            "Refill goal while watching, separate from the startup cushion below. Use 60 seconds with a 20–30 second cushion. Off removes deliberate startup/recovery waits; the decoder still buffers some data. Higher goals cannot fix a feed that delivers video too slowly.",
+            "Refill goal while watching, separate from the startup cushion below. Use 60 seconds with a 20–30 second cushion. Real time removes deliberate startup/recovery waits; the decoder still buffers some data. Higher goals cannot fix a feed that delivers video too slowly.",
             fontSize = 12.sp, color = Muted
         )
         Spacer(Modifier.height(10.dp))
@@ -4660,8 +4666,9 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
             onModeChanged()
         }
         androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Chip("Off (0s)", bufferSec == 0) { setBuffer(0) }
+            Chip("Real time (0s)", bufferSec == 0) { setBuffer(0) }
             Chip("Small (10s)", bufferSec == 10) { setBuffer(10) }
+            Chip("20s refill", bufferSec == 20) { setBuffer(20) }
             Chip("Normal (30s)", bufferSec == 30) { setBuffer(30) }
             Chip("Big (60s)", bufferSec == 60) { setBuffer(60) }
         }
@@ -4686,8 +4693,8 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Chip("Fast (3s)", lockSec == 3) { setLock(3) }
             Chip("Normal (4s)", lockSec == 4) { setLock(4) }
-            Chip("Steady (6s)", lockSec == 6) { setLock(6) }
-            Chip("Max (10s)", lockSec == 10) { setLock(10) }
+            Chip("6s cushion", lockSec == 6) { setLock(6) }
+            Chip("10s cushion", lockSec == 10) { setLock(10) }
         }
 
         androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -4701,7 +4708,7 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         Spacer(Modifier.height(4.dp))
         var steadyRecovery by remember { mutableStateOf(prefs.getBoolean("live_steady_recovery", false)) }
         Text(
-            "Both modes play at normal speed and use the startup cushion you select. After running out, Natural targets 8–40 seconds; Steady targets 15–50 seconds depending on the cushion. Off (0s) removes both waits. Device memory and provider availability can limit the actual reserve.",
+            "Both modes play at normal speed and use the startup cushion you select. After running out, Natural targets 8–40 seconds; Steady targets 15–50 seconds depending on the cushion. Real time (0s) removes both waits. Device memory and provider availability can limit the actual reserve.",
             fontSize = 12.sp, color = Muted
         )
         Spacer(Modifier.height(8.dp))
@@ -4719,6 +4726,15 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
                 onModeChanged()
             }
         }
+
+        val effectiveBuffer = remember(bufferSec, lockSec, steadyRecovery) { StreamBufferPolicy.from(prefs) }
+        Text(
+            if (bufferSec == 0) "Real time: no added startup or recovery wait. Other cushion choices are inactive."
+            else "Effective live targets: start ${effectiveBuffer.startMs / 1000}s · recovery ${effectiveBuffer.rebufferMs / 1000}s · refill ${effectiveBuffer.reserveMs / 1000}s",
+            fontSize = 12.sp, color = NeonGreen, modifier = Modifier.padding(top = 8.dp)
+        )
+        Text("Targets are not measured buffer. Buffer health in the mini guide shows video actually available ahead. Direct live playback is used in every mode; temporary disk history starts only on Pause.",
+            fontSize = 10.sp, color = Muted, modifier = Modifier.padding(top = 4.dp))
 
         Spacer(Modifier.height(20.dp))
         Text("Auto frame rate (AFR)", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)

@@ -16,13 +16,25 @@ import org.robolectric.annotation.Config
 @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
 class BufferSettingsUiTest {
     @get:Rule val ui=createComposeRule()
+    @Test fun twentySecondRefillAndRealTimeOverrideAreVisible() {
+        val ctx=ApplicationProvider.getApplicationContext<Context>()
+        val prefs=ctx.getSharedPreferences("buffer-clarity",Context.MODE_PRIVATE)
+        prefs.edit().clear().putInt("live_start_ms",20_000).commit()
+        ui.setContent {SettingsPane(prefs) {}}
+        ui.onNodeWithText("20s refill").performScrollTo().performClick()
+        ui.runOnIdle {assertEquals(20,prefs.getInt("buffer_sec",0))}
+        ui.onNodeWithText("Effective live targets: start 20s · recovery 40s · refill 60s").performScrollTo().assertIsDisplayed()
+        ui.onNodeWithText("Real time (0s)").performScrollTo().performClick()
+        ui.onNodeWithText("Real time: no added startup or recovery wait. Other cushion choices are inactive.").performScrollTo().assertIsDisplayed()
+        ui.runOnIdle {assertEquals(20_000,prefs.getInt("live_start_ms",0));assertEquals(0,prefs.getInt("buffer_sec",-1))}
+    }
     @Test @Config(qualifiers="w360dp-h800dp-port")
     fun bufferChoicesFitOnAPhoneWithoutClippingToTheRight() {
         val ctx=ApplicationProvider.getApplicationContext<Context>()
         val prefs=ctx.getSharedPreferences("phone-buffer-settings",Context.MODE_PRIVATE)
         prefs.edit().clear().commit()
         ui.setContent {SettingsPane(prefs) {}}
-        for (label in listOf("Big (60s)","Max (10s)","30s cushion","Steady weak-channel")) {
+        for (label in listOf("Big (60s)","10s cushion","30s cushion","Steady weak-channel")) {
             val node=ui.onNodeWithText(label)
             node.performScrollTo().assertIsDisplayed()
             val rect=node.fetchSemanticsNode().boundsInRoot
@@ -40,7 +52,7 @@ class BufferSettingsUiTest {
         ui.setContent {SettingsPane(prefs) {applied++}}
         ui.onNodeWithText("30s cushion").performScrollTo().performClick()
         ui.runOnIdle {assertEquals(30_000,prefs.getInt("live_start_ms",0));assertEquals(1,applied)}
-        ui.onNodeWithText("Off (0s)").performScrollTo().performClick()
+        ui.onNodeWithText("Real time (0s)").performScrollTo().performClick()
         ui.runOnIdle {assertEquals(0,prefs.getInt("buffer_sec",-1));assertEquals(2,applied)}
     }
     @Test fun everyBufferSettingAppliesWithoutAnAppRestart() {
@@ -51,7 +63,7 @@ class BufferSettingsUiTest {
         ui.setContent {SettingsPane(prefs) {applied++}}
         ui.onNodeWithText("Small (10s)").performScrollTo().performClick()
         ui.runOnIdle {assertEquals(10,prefs.getInt("buffer_sec",0));assertEquals(1,applied)}
-        ui.onNodeWithText("Max (10s)").performScrollTo().performClick()
+        ui.onNodeWithText("10s cushion").performScrollTo().performClick()
         ui.runOnIdle {assertEquals(10_000,prefs.getInt("live_start_ms",0));assertEquals(2,applied)}
         ui.onNodeWithText("Steady weak-channel").performScrollTo().performClick()
         ui.runOnIdle {assertEquals(true,prefs.getBoolean("live_steady_recovery",false));assertEquals(3,applied)}

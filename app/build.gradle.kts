@@ -38,8 +38,8 @@ android {
         applicationId = "com.easyiptv.player"
         minSdk = 26
         targetSdk = 36
-        versionCode = 103
-        versionName = "4.79"
+        versionCode = 104
+        versionName = "4.80"
         buildConfigField("boolean", "TV_ARTWORK", tvArtwork.toString())
         buildConfigField("boolean", "SELF_UPDATES", selfUpdates.toString())
         buildConfigField("String", "DISTRIBUTION", "\"$ryzodDistribution\"")
@@ -118,7 +118,7 @@ dependencies {
 
     implementation("io.coil-kt:coil-compose:2.6.0")
 
-    val media3Version = "1.9.4"
+    val media3Version = "1.11.1"
     implementation("androidx.media3:media3-exoplayer:$media3Version")
     implementation("androidx.media3:media3-exoplayer-hls:$media3Version")
     implementation("androidx.media3:media3-exoplayer-dash:$media3Version")
