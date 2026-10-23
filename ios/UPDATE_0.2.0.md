@@ -10,7 +10,7 @@ Guide changes: logo at upper right, Update Guide centered with provider explanat
 
 ## Verification and limits
 
-The pure buffer logic is verified by three Swift tests. The macOS workflow additionally runs the complete provider/guide core suite, native app session tests and iPhone/iPad UI tests, and builds the unsigned device app. Check its result before treating a candidate as ready.
+The Mac workflow passed 32 tests: 21 provider/guide/buffer core, seven native session/settings and four iPhone/iPad UI executions. The unsigned device build also passed. See BUILD_STATUS.md for the exact tested commit and workflow evidence.
 
 This remains an iPhone/iPad native preview. Local DVR, scheduled recordings, offline downloads, USB storage and Apple TV are not implemented. Apple codec support differs from Android's FFmpeg extension. Layout/settings parity does not imply these capabilities exist.
 
