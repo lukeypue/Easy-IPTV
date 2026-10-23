@@ -25,7 +25,12 @@ class SearchTypingUiTest {
             LiveChannel("2","Beta TV",null,null,"http://127.0.0.1:9/beta.ts")),
             emptyList(),emptyList(),emptyList(),emptyList())
         ui.setContent {SearchTab(null,prefs,data,query.value,{query.value=it},{},{_,_->},{})}
-        ui.waitUntil(10_000) {ui.onAllNodesWithText("Alpha TV").fetchSemanticsNodes().isNotEmpty()}
+        ui.waitUntil(10_000) {
+            // The index is built on Dispatchers.Default, then posts its state
+            // back to Android. Pump that queue as well as Compose's frame clock.
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            ui.onAllNodesWithText("Alpha TV").fetchSemanticsNodes().isNotEmpty()
+        }
         ui.onNodeWithText("Search").performClick()
         ui.mainClock.autoAdvance=false
         try {
@@ -61,7 +66,12 @@ class SearchTypingUiTest {
         val data=AppData(emptyList(),listOf(LiveChannel("1","Alpha TV",null,null,"http://127.0.0.1:9/live.ts")),
             emptyList(),emptyList(),emptyList(),emptyList())
         ui.setContent {SearchTab(null,prefs,data,query.value,{query.value=it},{},{_,_->},{})}
-        ui.waitUntil(10_000) {ui.onAllNodesWithText("Alpha TV").fetchSemanticsNodes().isNotEmpty()}
+        ui.waitUntil(10_000) {
+            // The index is built on Dispatchers.Default, then posts its state
+            // back to Android. Pump that queue as well as Compose's frame clock.
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            ui.onAllNodesWithText("Alpha TV").fetchSemanticsNodes().isNotEmpty()
+        }
         ui.onNodeWithText("Search").performClick()
         ui.onNodeWithText("DONE").assertExists()
         ui.mainClock.autoAdvance=false
@@ -76,6 +86,11 @@ class SearchTypingUiTest {
             }
             ui.runOnIdle {assertEquals("alpha",query.value)}
         } finally {ui.mainClock.autoAdvance=true}
-        ui.waitUntil(10_000) {ui.onAllNodesWithText("Alpha TV").fetchSemanticsNodes().isNotEmpty()}
+        ui.waitUntil(10_000) {
+            // The index is built on Dispatchers.Default, then posts its state
+            // back to Android. Pump that queue as well as Compose's frame clock.
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            ui.onAllNodesWithText("Alpha TV").fetchSemanticsNodes().isNotEmpty()
+        }
     }
 }

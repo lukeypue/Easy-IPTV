@@ -34,10 +34,6 @@ jobs:
           python3 tools/verify_v474.py
       - name: Verify live buffering, retry sessions and memory first
         run: gradle testDebugUnitTest --tests '*PlaybackMemoryPolicyTest' --tests '*PlaybackRetrySessionTest' --tests '*BufferSettingsUiTest' --tests '*StreamBufferPolicyTest' --max-workers=1 -Pkotlin.incremental=false --no-daemon --stacktrace
-      - name: Verify Fire home icon proportions first
-        run: gradle -PryzodDistribution=fire testDebugUnitTest --tests '*FireHomeArtworkTest' --max-workers=1 -Pkotlin.incremental=false --no-daemon --stacktrace
-      - name: Verify immediate-submit typing regression first
-        run: gradle testDebugUnitTest --tests '*SearchTypingUiTest.typingAfterImmediateSubmissionKeepsTheSubmittedResults' --max-workers=1 -Pkotlin.incremental=false --no-daemon --stacktrace
       - name: Full phone/universal regression suite
         run: |
           gradle testDebugUnitTest --max-workers=1 -Pkotlin.incremental=false --no-daemon --stacktrace
@@ -102,6 +98,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view v4.80 >/dev/null 2>&1; then
+            git fetch origin refs/tags/v4.80:refs/tags/v4.80
+            test "$(git rev-parse 'v4.80^{commit}')" = "$GITHUB_SHA" || { echo 'This version is already published from another commit; increment the version.'; exit 1; }
             gh release upload v4.80 /tmp/RYZOD-v4.80.apk /tmp/RYZOD-v4.80-FireTV.apk /tmp/RYZOD-v4.80-source.zip --clobber
             gh release edit v4.80 --title "RYZOD 4.80 Live Buffer Clarity and Playback Recovery" --notes-file RELEASE_4.80.md --latest
           else
