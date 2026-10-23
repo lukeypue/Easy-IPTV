@@ -28,7 +28,7 @@ struct LoginView: View {
                 Button(action: submit) { HStack { if model.connecting { ProgressView() }; Text(model.connecting ? "Connecting…" : "Connect").font(.headline); Spacer(); Image(systemName: "arrow.right") }.padding(10) }
                     .buttonStyle(.borderedProminent).disabled(!valid || model.connecting).accessibilityIdentifier("Connect")
                 Text("RYZOD provides the player. It does not supply channels, movies, or subscriptions.").font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                Text("Apple preview • Based on RYZOD 4.70").font(.caption2).foregroundStyle(.secondary)
+                Text("Apple preview • Updated for RYZOD 4.80").font(.caption2).foregroundStyle(.secondary)
             }.padding(24).frame(maxWidth: 520).frame(maxWidth: .infinity)
         }.background(Theme.background).scrollDismissesKeyboard(.interactively)
             .toolbar { ToolbarItemGroup(placement: .keyboard) { Spacer(); Button("Done") { focused = nil } } }

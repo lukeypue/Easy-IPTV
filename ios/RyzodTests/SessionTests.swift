@@ -3,6 +3,31 @@ import RyzodCore
 @testable import Ryzod
 
 @MainActor final class SessionTests: XCTestCase {
+    func testLiveBufferChoicePersistsAndConfiguresOnlyLivePlayback() throws {
+        let name = "buffer-test-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        let playback = PlaybackController(defaults: defaults)
+        defer { playback.stop() }
+        let channel = MediaItem(id: "live", name: "Live", kind: .live, streamURL: URL(fileURLWithPath: "/tmp/live.m3u8"))
+        playback.liveBufferChoice = .twenty
+        playback.play(channel, fullScreen: false)
+        XCTAssertEqual(playback.player.currentItem?.preferredForwardBufferDuration, 20)
+        XCTAssertTrue(playback.player.automaticallyWaitsToMinimizeStalling)
+        XCTAssertFalse(try XCTUnwrap(playback.player.currentItem).automaticallyPreservesTimeOffsetFromLive)
+        playback.liveBufferChoice = .realTime
+        XCTAssertNil(playback.current)
+        XCTAssertEqual(playback.bufferAheadSeconds, 0)
+        XCTAssertNil(playback.behindAvailableEdgeSeconds)
+        playback.play(channel, fullScreen: false)
+        XCTAssertEqual(playback.player.currentItem?.preferredForwardBufferDuration, 5)
+        XCTAssertTrue(playback.player.automaticallyWaitsToMinimizeStalling, "Real time must still recover automatically after a stall")
+        let movie = MediaItem(id: "movie", name: "Movie", kind: .movie, streamURL: URL(fileURLWithPath: "/tmp/movie.mp4"))
+        playback.play(movie, fullScreen: false)
+        XCTAssertEqual(playback.player.currentItem?.preferredForwardBufferDuration, 8)
+        XCTAssertTrue(playback.player.automaticallyWaitsToMinimizeStalling)
+        XCTAssertEqual(PlaybackController(defaults: defaults).liveBufferChoice, .realTime)
+    }
     private func waitUntil(_ condition: @escaping () -> Bool) async throws {
         for _ in 0..<300 {
             if condition() { return }

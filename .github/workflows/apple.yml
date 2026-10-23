@@ -1,7 +1,7 @@
 name: RYZOD Apple
 on:
   push:
-    branches: [feature/ryzod-apple]
+    branches: [feature/ryzod-apple, ryzod-apple-480]
     paths: ['ios/**', '.github/workflows/apple.yml']
   workflow_dispatch:
 permissions:
@@ -75,7 +75,7 @@ jobs:
       - name: Upload unsigned Apple app and simulator build
         uses: actions/upload-artifact@v4
         with:
-          name: RYZOD-Apple-0.1-unsigned-and-simulator
+          name: RYZOD-Apple-0.2-unsigned-and-simulator
           path: |
             ios/DerivedData/Build/Products/Release-iphoneos/Ryzod.app
             ios/DerivedData/Build/Products/Debug-iphonesimulator/Ryzod.app

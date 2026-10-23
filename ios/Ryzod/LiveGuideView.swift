@@ -20,12 +20,12 @@ struct LiveGuideView: View {
     }
     var body: some View {
         VStack(spacing: 8) {
-            HStack { BrandHeader(); Spacer(); Button { model.refreshGuide() } label: { Label("Update Guide", systemImage: "arrow.clockwise") }.font(.caption).disabled(model.guideLoading) }.padding(.horizontal)
+            HStack { Spacer(); Button { model.refreshGuide() } label: { Label("Update Guide", systemImage: "arrow.clockwise") }.font(.caption).disabled(model.guideLoading); Spacer(); BrandHeader() }.padding(.horizontal)
             Text(model.guideStatus).font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal)
             if let current = playback.current, current.kind == .live, !playback.fullScreen {
                 HStack {
                     VideoPlayer(player: playback.player).frame(width: 150, height: 84).overlay(alignment: .topTrailing) { Button { playback.fullScreen = true } label: { Image(systemName: "arrow.up.left.and.arrow.down.right").padding(8).background(.black.opacity(0.6)) }.accessibilityLabel("Open current channel full screen") }
-                    VStack(alignment: .leading) { Text(current.name).font(.headline).lineLimit(2); Button("Full screen") { playback.fullScreen = true } }
+                    VStack(alignment: .leading, spacing: 2) { Text(current.name).font(.caption.bold()).lineLimit(1); Button("Full screen") { playback.fullScreen = true }.font(.caption); LiveBufferHealthView(compact: true) }
                     Spacer(); Button { playback.stop() } label: { Image(systemName: "stop.fill") }.accessibilityLabel("Stop preview")
                 }.padding(.horizontal)
             }
@@ -33,7 +33,7 @@ struct LiveGuideView: View {
                 Picker("Category", selection: $category) {
                     Text("All channels").tag("all")
                     ForEach(model.categories[.live] ?? []) { Text($0.name).tag($0.id) }
-                }.pickerStyle(.menu)
+                }.pickerStyle(.menu).font(.system(size: 28, weight: .bold)).foregroundStyle(.green).tint(.green)
                 Spacer(); Toggle(isOn: $favoritesOnly) { Image(systemName: "star.fill").foregroundStyle(.yellow) }.toggleStyle(.button).accessibilityLabel("Show favorites only")
             }.padding(.horizontal)
             HStack {
@@ -76,21 +76,21 @@ struct LiveGuideView: View {
         HStack(spacing: 0) {
             Button { showOptions(channel, nil) } label: {
                 HStack(spacing: 6) { Artwork(item: channel, width: 32, height: 32); Text(channel.name).font(.caption).lineLimit(2); if model.favorites.contains(channel.favoriteKey) { Image(systemName: "star.fill").font(.caption2).foregroundStyle(.yellow) } }
-                    .frame(width: 142, height: 64, alignment: .leading).padding(.horizontal, 8)
+                    .frame(width: 142, height: 44, alignment: .leading).padding(.horizontal, 8)
             }.buttonStyle(.plain).background(model.selectedLiveID == channel.id ? Theme.cyan.opacity(0.15) : Theme.panel)
             Rectangle().fill(.white.opacity(0.3)).frame(width: 1)
             HStack(spacing: 0) {
                 ForEach(GuideGeometry.cells(programs: model.guide[channel.id] ?? [], start: windowStart, end: windowStart.addingTimeInterval(7200))) { cell in
                     Button { showOptions(channel, cell.program) } label: {
-                        VStack(alignment: .leading, spacing: 5) {
+                        VStack(alignment: .leading, spacing: 1) {
                             Text(cell.program?.title.isEmpty == false ? cell.program!.title : "No guide information").font(.caption.bold()).lineLimit(2)
                             if let program = cell.program { Text(program.start.formatted(date: .omitted, time: .shortened)).font(.caption2).foregroundStyle(.secondary) }
-                        }.padding(.horizontal, 6).frame(width: max(1, cell.duration / 60 * pixelsPerMinute), height: 64, alignment: .leading)
+                        }.padding(.horizontal, 6).frame(width: max(1, cell.duration / 60 * pixelsPerMinute), height: 44, alignment: .leading)
                             .background(cell.program == nil ? Color.clear : Theme.panel.opacity(0.65)).overlay(alignment: .trailing) { Rectangle().fill(.white.opacity(0.3)).frame(width: 1) }.clipped()
                     }.buttonStyle(.plain)
                 }
             }
-        }.frame(height: 65).overlay(alignment: .bottom) { Rectangle().fill(.white.opacity(0.2)).frame(height: 1) }
+        }.frame(height: 45).overlay(alignment: .bottom) { Rectangle().fill(.white.opacity(0.2)).frame(height: 1) }
     }
     func showOptions(_ channel: MediaItem, _ program: Program?) { selected = channel; selectedProgram = program; model.selectedLiveID = channel.id; options = true }
 }

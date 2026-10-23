@@ -24,6 +24,7 @@ struct PlayerView: View {
                     Spacer()
                     Button { model.toggleFavorite(item) } label: { Label(model.favorites.contains(item.favoriteKey) ? "Favorited" : "Favorite", systemImage: model.favorites.contains(item.favoriteKey) ? "star.fill" : "star") }
                 }.padding()
+                if item.kind == .live { LiveBufferHealthView() }
                 if item.kind == .live { Text("Live pause depends on the provider's stream. Local DVR recording is not included in this first Apple preview.").font(.caption).foregroundStyle(.secondary).padding(.horizontal).padding(.bottom, 10) }
             }
         }.background(Color.black)
