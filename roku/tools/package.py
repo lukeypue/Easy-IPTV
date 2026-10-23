@@ -44,7 +44,7 @@ def archive(path,files,base):
 
 def main():
     files=validate();OUT.mkdir(exist_ok=True)
-    install=OUT/'RYZOD-Roku-0.1.0.zip'
+    install=OUT/'RYZOD-Roku-0.2.0.zip'
     companion=OUT/'RYZOD-Companion-0.1.0.zip'
     sums={install.name:archive(install,files,ROOT),companion.name:archive(companion,[ROOT/'companion'/name for name in ['server.py','test_server.py','README.md']],ROOT/'companion')}
     (OUT/'SHA256SUMS.txt').write_text(''.join(f'{sha}  {name}\n' for name,sha in sums.items()))

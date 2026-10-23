@@ -86,6 +86,7 @@ sub loadStore()
     store.settings.companion = FieldText(store.settings,"companion")
     store.settings.token = FieldText(store.settings,"token")
     store.settings.liveFormat = FieldText(store.settings,"liveFormat","hls")
+    if store.settings.liveDelay <> 0 and store.settings.liveDelay <> 10 and store.settings.liveDelay <> 20 and store.settings.liveDelay <> 30 then store.settings.liveDelay = 0
     if store.settings.lastTune = invalid then store.settings.lastTune = false
     if store.settings.streams = invalid then store.settings.streams = 1
     while store.playlists.count() > 3
@@ -168,12 +169,28 @@ sub renderHome()
     if not m.actions.visible and not m.keyboard.visible and not m.schedule.visible then m.top.setFocus(true)
     m.shell.visible = true
     m.title.text = m.menu[m.menuIndex]
+    m.title.translation = [268,28]
+    m.title.color = "0xF2F3F5FF"
+    m.title.font.size = 32
+    m.title.width = 750
+    m.subtitle.translation = [268,86]
+    m.subtitle.width = 750
+    m.subtitle.font.size = 20
     m.subtitle.text = FieldText(activePlaylist(),"name","My playlist")
     m.content.visible = true
     m.guide.visible = false
     renderRail()
     ClearGroup(m.content)
     if m.section = "live"
+        m.title.text = "All channels"
+        for each category in categoryRows("live")
+            if category.id = m.category.live then m.title.text = category.title
+        end for
+        m.title.color = "0x39FF88FF"
+        m.title.translation = [268,94]
+        m.subtitle.translation = [478,76]
+        m.subtitle.width = 540
+        m.subtitle.font.size = 14
         m.content.visible = false
         m.guide.visible = true
         channels = FilterItems(m.items.live,m.category.live,"")
@@ -223,6 +240,8 @@ sub renderHome()
             {title:"Companion address: "+m.store.settings.companion,type:"setting",key:"companion"},
             {title:"Companion pairing token: "+maskedToken(),type:"setting",key:"token"},
             {title:"Live format: "+ucase(m.store.settings.liveFormat),type:"setting",key:"liveFormat"},
+            {title:"Live delay: "+liveDelayLabel(),type:"setting",key:"liveDelay"},
+            {title:"Buffering and recovery: Roku automatic",type:"setting",key:"bufferInfo"},
             {title:"Auto-play last channel: "+boolLabel(m.store.settings.lastTune),type:"setting",key:"lastTune"},
             {title:"Provider streams: "+m.store.settings.streams.toStr(),type:"setting",key:"streams"},
             {title:"Test companion connection",type:"setting",key:"test"},
@@ -230,7 +249,7 @@ sub renderHome()
             {title:"About RYZOD / Roku compatibility",type:"setting",key:"about"}
         ]
         drawList()
-        m.subtitle.text = "RYZOD Roku 0.1.0 · based on Android 4.70"
+        m.subtitle.text = "RYZOD Roku 0.2.0 · based on Android 4.80"
     else if m.section = "recordings" or m.section = "downloads"
         m.rows = []
         for each job in m.jobs
@@ -255,6 +274,11 @@ end function
 function boolLabel(value as boolean) as string
     if value then return "ON"
     return "OFF"
+end function
+
+function liveDelayLabel() as string
+    if m.store.settings.liveDelay = 0 then return "Real time (no added delay)"
+    return m.store.settings.liveDelay.toStr()+"s behind available edge"
 end function
 
 function maskedToken() as string
@@ -302,7 +326,9 @@ sub drawList()
 end sub
 
 function categoryRows(kind as string) as object
-    result = [{title:"All",type:"category",id:"all"},{title:"Favorites",type:"category",id:"favorites"}]
+    allTitle = "All"
+    if kind = "live" then allTitle = "All channels"
+    result = [{title:allTitle,type:"category",id:"all"},{title:"Favorites",type:"category",id:"favorites"}]
     for each category in m.categories[kind]
         result.push({title:category.title,type:"category",id:category.id})
     end for
@@ -647,6 +673,7 @@ sub onGuideCommand(event as object)
         renderRail()
         m.guide.callFunc("drawGuide")
     else if command = "categories"
+        m.focus = "content"
         m.rows = categoryRows("live")
         m.view = "categories"
         m.row = 0
@@ -755,13 +782,17 @@ sub playAuthorized(item as object, fullscreen as boolean)
         content.title = item.title
         content.streamFormat = item.format
         content.httpCertificatesFile = "common:/certs/ca-bundle.crt"
-        content.httpHeaders = ["User-Agent: RYZOD-Roku/0.1.0"]
+        content.httpHeaders = ["User-Agent: RYZOD-Roku/0.2.0"]
         if FieldText(item,"agent") <> "" then content.httpHeaders = ["User-Agent: "+item.agent]
         if item.kind = "recordings" or item.kind = "downloads"
             content.httpHeaders = ["Authorization: Bearer "+m.store.settings.token]
         end if
         if item.kind = "live"
             content.live = true
+            ' Negative PlayStart requests a position behind the available edge.
+            ' This is not an arbitrary forward-buffer duration API.
+            delay = m.store.settings.liveDelay
+            if (item.format = "hls" or item.format = "dash") and (delay = 10 or delay = 20 or delay = 30) then content.playStart = -delay
             m.store.lastLive[PlaylistKey(activePlaylist())] = item.id
             saveStore()
         else
@@ -790,9 +821,9 @@ end sub
 sub setPreview()
     if m.playerItem <> invalid
         if m.playerItem.kind = "live" and m.video.state <> "stopped"
-            m.video.translation = [994,72]
-            m.video.width = 250
-            m.video.height = 140
+            m.video.translation = [28,18]
+            m.video.width = 205
+            m.video.height = 115
             m.video.visible = true
             return
         end if
@@ -925,7 +956,16 @@ sub drawMini()
     if m.video.state = "paused" then status = "Paused"
     if m.playerItem.kind = "live"
         if m.video.pauseBufferOverflow then status = status+" · Roku pause buffer is full; return to live if needed."
-        status = status+" · "+ClockText(NowSeconds())
+        if IsMap(m.video.bufferingStatus)
+            if m.video.bufferingStatus.percentage <> invalid then status = "Buffering "+m.video.bufferingStatus.percentage.toStr()+"%"
+        end if
+        latency = invalid
+        if IsMap(m.video.streamingSegment) then latency = m.video.streamingSegment.latency
+        edge = "Live edge unknown"
+        if latency <> invalid
+            if latency >= 0 then edge = "Behind available edge: "+int(latency/1000).toStr()+"s"
+        end if
+        status = status+" · "+edge
         span = m.video.pauseBufferEnd-m.video.pauseBufferStart
         if span > 0
             progress = (m.video.pauseBufferPosition-m.video.pauseBufferStart)/span
@@ -933,7 +973,7 @@ sub drawMini()
             if progress > 1 then progress = 1
             UiBox(m.mini,36,577,1200,4,"0x29445FFF")
             UiBox(m.mini,36,577,1200*progress,4,"0xF5B944FF")
-            status = status+" · Buffer "+int(span/60).toStr()+" min"
+            status = status+" · Pause history "+int(span/60).toStr()+" min"
         end if
     else
         status = status+" · "+int(m.video.position/60).toStr()+" / "+int(m.video.duration/60).toStr()+" min"
@@ -945,7 +985,7 @@ sub drawMini()
     if m.video.state = "paused" then pauseLabel = "Play"
     m.miniActions = [{id:"pausePlay",title:pauseLabel}]
     if m.playerItem.kind = "live"
-        m.miniActions.push({id:"returnLive",title:"Live"})
+        if m.video.state = "paused" or m.video.pauseBufferEnd-m.video.pauseBufferPosition > 1 then m.miniActions.push({id:"returnLive",title:"End pause"})
         m.miniActions.push({id:"rewind",title:"Rewind"})
         m.miniActions.push({id:"forward",title:"Forward"})
         m.miniActions.push({id:"previous",title:"Previous"})
@@ -1298,6 +1338,19 @@ sub editSetting(key as string)
         end if
         saveStore()
         requestCatalog("live","all")
+    else if key = "liveDelay"
+        values = [0,10,20,30]
+        index = 0
+        for i = 0 to 3
+            if values[i] = m.store.settings.liveDelay then index = i
+        end for
+        m.store.settings.liveDelay = values[WrapIndex(index+1,4)]
+        saveStore()
+        stopPlayback()
+        renderHome()
+        m.status.text = "Applies on the next channel. HLS/DASH window and Roku memory may limit delay."
+    else if key = "bufferInfo"
+        openActions("Live buffering","Real time adds no app delay; Roku still buffers for decoding. 10/20/30s asks for a starting position behind the HLS/DASH edge, not a guaranteed downloaded reserve. Roku manages refill and recovery. Pause history is separate from forward buffer. A slow provider can exhaust any buffer.",[{id:"close",title:"Close"}],"bufferInfo")
     else if key = "lastTune"
         m.store.settings.lastTune = not m.store.settings.lastTune
         saveStore()
@@ -1312,7 +1365,7 @@ sub editSetting(key as string)
     else if key = "reload"
         activatePlaylist(m.store.active)
     else if key = "about"
-        openActions("RYZOD Media Player","Roku 0.1.0, based on Android 4.70. Content comes from your own provider. Native pause length and codecs depend on Roku/stream. Saved DVR and downloads need the optional companion. Developer updates are sideloaded ZIPs.",[{id:"close",title:"Close"}],"about")
+        openActions("RYZOD Media Player","Roku 0.2.0, based on Android 4.80. Content comes from your own provider. Native pause length and codecs depend on Roku/stream. Saved DVR and downloads need the optional companion. Developer updates are sideloaded ZIPs.",[{id:"close",title:"Close"}],"about")
     end if
 end sub
 

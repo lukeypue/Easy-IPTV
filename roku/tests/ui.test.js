@@ -206,3 +206,70 @@ function removeSelection() as string
  return "confirmRemovePlaylist"
 end function
 `));
+test('live guide shows eight rows and Left opens categories before main menu',async()=>run(`scene.callFunc("regressionHook")`, `
+sub regressionHook()
+ m.store.playlists=[{type:"xtream",host:"http://one",user:"u",pass:"p",name:"One"}]
+ m.store.active=0
+ m.mode="home":m.section="live":m.menuIndex=0:m.focus="content":m.view="items"
+ m.loaded.live=true
+ m.items.live=[]
+ for i=1 to 9
+  item={id:i.toStr(),kind:"live",title:"Channel "+i.toStr(),category:"sports",url:"http://one/"+i.toStr()+".m3u8",format:"hls"}
+  m.items.live.push(item):m.epgLoaded[item.id]=true
+ end for
+ m.categories.live=[{id:"sports",title:"Sports"}]
+ renderHome()
+ visible=m.guide.callFunc("visibleChannels")
+ if visible.count()<>8 then print "UI_FAILED: expected eight visible channels"
+ m.guide.callFunc("onKeyEvent","left",true)
+ if m.view<>"categories" or not m.content.visible then print "UI_FAILED: first Left must show categories"
+ onKeyEvent("left",true)
+ if m.focus<>"rail" then print "UI_FAILED: second Left must show main menu"
+ m.menuIndex=7:onKeyEvent("OK",true)
+ if m.section<>"settings" then print "UI_FAILED: Settings OK must enter"
+end sub
+`));
+test('live delay setting requests provider window offset without delaying movies',async()=>run(`scene.callFunc("regressionHook")`, `
+sub regressionHook()
+ m.store.playlists=[{type:"xtream",host:"http://one",user:"u",pass:"p",name:"One"}]
+ m.store.active=0:m.store.settings.companion="":m.store.settings.token=""
+ m.store.settings.liveDelay=20
+ item={id:"1",kind:"live",title:"One",url:"http://one/1.m3u8",format:"hls"}
+ playAuthorized(item,true)
+ if m.video.content.playStart<>-20 then print "UI_FAILED: live20 offset"
+ m.video.control="stop":m.playerItem=invalid
+ m.store.settings.liveDelay=0
+ playAuthorized(item,true)
+ if m.video.content.playStart<>0 then print "UI_FAILED: zero must restore provider default"
+ m.video.control="stop":m.playerItem=invalid
+ movie={id:"2",kind:"movies",title:"Film",url:"http://one/film.mp4",format:"mp4"}
+ m.store.settings.liveDelay=20
+ playAuthorized(movie,true)
+ if m.video.content.playStart<>0 then print "UI_FAILED: live delay must not seek a movie"
+end sub
+`));
+test('mini guide reserves End pause for paused history and labels native measurements',async()=>run(`scene.callFunc("regressionHook")`, `
+sub regressionHook()
+ original=m.video
+ m.playerItem={id:"1",kind:"live",title:"One",url:"http://one/1.m3u8",format:"hls"}
+ m.video={state:"playing",pauseBufferOverflow:false,pauseBufferStart:0,pauseBufferEnd:0,pauseBufferPosition:0,bufferingStatus:invalid,streamingSegment:{latency:2000}}
+ drawMini()
+ for each action in m.miniActions
+  if action.id="returnLive" then print "UI_FAILED: redundant Live action"
+ end for
+ m.video.state="paused":m.video.pauseBufferEnd=120:m.video.pauseBufferPosition=90
+ drawMini()
+ found=false:measured=false
+ for each action in m.miniActions
+  if action.id="returnLive" and action.title="End pause" then found=true
+ end for
+ for each node in m.mini.getChildren(-1,0)
+  if node.subtype()="Label"
+   if instr(1,node.text,"Behind available edge: 2s")>0 and instr(1,node.text,"Pause history")>0 then measured=true
+  end if
+ end for
+ if not found then print "UI_FAILED: missing End pause"
+ if not measured then print "UI_FAILED: native measurement labels"
+ m.video=original
+end sub
+`));

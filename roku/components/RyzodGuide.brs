@@ -29,8 +29,8 @@ end sub
 function visibleChannels() as object
     result = []
     if not IsList(m.top.channels) then return result
-    start = int(m.row/6)*6
-    for i = start to start+5
+    start = int(m.row/8)*8
+    for i = start to start+7
         if i < m.top.channels.count() then result.push(m.top.channels[i])
     end for
     return result
@@ -50,7 +50,9 @@ sub drawGuide()
     if not IsList(m.top.channels) then return
     for i = 0 to 2
         text = ["Categories","Update guide","Picture"][i]
-        UiButton(m.body,text,i*210,0,198,42,m.toolbar=i and m.top.hasFocus())
+        buttonY = 0
+        if i = 1 then buttonY = -110
+        UiButton(m.body,text,i*210,buttonY,198,42,m.toolbar=i and m.top.hasFocus())
     end for
     UiLabel(m.body,"CHANNEL",10,51,185,37,17,"0xBFEFFFFF")
     for i = 0 to 5
@@ -62,14 +64,14 @@ sub drawGuide()
         UiLabel(m.body,"No channels in this category. Choose Categories or refresh.",10,155,930,100,23)
         return
     end if
-    first = int(m.row/6)*6
-    for i = first to first+5
+    first = int(m.row/8)*8
+    for i = first to first+7
         if i < m.top.channels.count()
-            y = 100+(i-first)*66
+            y = 100+(i-first)*48
             channel = m.top.channels[i]
             color = "0xF2F3F5FF"
             if i = m.row then color = "0x39FF88FF"
-            UiLabel(m.body,channel.title,7,y,185,58,18,color)
+            UiLabel(m.body,channel.title,7,y,185,42,18,color)
             cells = rowCells(channel)
             if i = m.row and m.cell >= cells.count() then m.cell = cells.count()-1
             for j = 0 to cells.count()-1
@@ -77,9 +79,9 @@ sub drawGuide()
                 x = 205 + (cell.start-m.top.windowStart)/10800*730
                 width = (cell.end-cell.start)/10800*730
                 focused = i = m.row and j = m.cell and m.toolbar=-1 and m.top.hasFocus()
-                UiButton(m.body,cell.title,x,y,width-2,58,focused)
+                UiButton(m.body,cell.title,x,y,width-2,42,focused)
             end for
-            UiBox(m.body,0,y+62,940,1,"0x29445FFF")
+            UiBox(m.body,0,y+44,940,1,"0x29445FFF")
         end if
     end for
     if m.row < m.top.channels.count()
@@ -98,6 +100,14 @@ function onKeyEvent(key as string, press as boolean) as boolean
     if not press then return false
     if key = "back"
         m.top.command = "rail"
+        return true
+    end if
+    ' Keep time browsing separate from the Left navigation hierarchy.
+    if key = "rewind" or key = "fastforward" or key = "replay"
+        if key = "rewind" then m.top.windowStart = m.top.windowStart-10800
+        if key = "fastforward" and m.top.windowStart < NowSeconds()+604800-10800 then m.top.windowStart = m.top.windowStart+10800
+        if key = "replay" then m.top.windowStart = NowSeconds()-NowSeconds() mod 1800
+        drawGuide()
         return true
     end if
     if m.toolbar >= 0
@@ -136,12 +146,8 @@ function onKeyEvent(key as string, press as boolean) as boolean
                 m.cell = 0
             else if key = "left"
                 if m.cell = 0
-                    if m.top.windowStart > NowSeconds()-1800
-                        m.top.command = "rail"
-                        return true
-                    else
-                        m.top.windowStart = m.top.windowStart-10800
-                    end if
+                    m.top.command = "categories"
+                    return true
                 else
                     m.cell = m.cell-1
                 end if

@@ -1,6 +1,6 @@
 title=RYZOD Media Player
 major_version=0
-minor_version=1
+minor_version=2
 build_version=0
 ui_resolutions=hd
 mm_icon_focus_hd=pkg:/images/channel.png

@@ -1,3 +1,9 @@
+# Roku 0.2.0 update verification — 2026-10-23
+
+Local verification: 38 Node/BrightScript checks and 16 companion checks passed, including three new native UI regressions; BrighterScript compilation and reproducible ZIP validation passed. The guide navigation/row count, native delay isolation from VOD, and conditional End pause/measurement labels failed before the changes and pass afterward. Independent review's publication/tag consistency finding was addressed with serialized publication and a tag-commit guard. Physical Roku/provider playback remains unverified. CI publication is gated on rerunning the complete verification.
+
+Historical baseline follows.
+
 # RYZOD Roku 0.1.0 — verification report
 
 Baseline: Android 4.70/build 94, `637c449f79db1f2d784d0561041a06be750c779b`. Branch: `feature/ryzod-roku`. Verified on 2026-10-03 using Node 24, Python 3.12.14, FFmpeg/ffprobe 6.1.1, BrighterScript 0.73.5, @rokucommunity/brs 0.47.6 and brs-node 2.6.0.

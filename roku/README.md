@@ -1,3 +1,5 @@
+> Current update: native Roku 0.2.0, with Android 4.80 guide/playback changes. See UPDATE_0.2.0.md for supported buffering controls and platform differences.
+
 # RYZOD Media Player for Roku — 0.1.0
 
 Native BrightScript/SceneGraph port based on the latest Android/Firestick **4.70 (build 94)** source, commit `637c449f79db1f2d784d0561041a06be750c779b`. Work is isolated on `feature/ryzod-roku`. The Android and Apple versions are unaffected.
@@ -6,7 +8,7 @@ Includes the RYZOD artwork, eight matching menu sections (Live TV, Movies, Serie
 
 ## Install on Roku
 
-Use `out/RYZOD-Roku-0.1.0.zip` directly; do not unzip it before uploading. This is a developer sideload build, not a Roku Store release or APK.
+Use `out/RYZOD-Roku-0.2.0.zip` directly; do not unzip it before uploading. This is a developer sideload build, not a Roku Store release or APK.
 
 1. Enable developer mode on your Roku: press **Home three times, Up twice, Right, Left, Right, Left, Right**. Follow Roku's prompts, accept the developer agreement, set a password, and restart. Note the Roku IP address shown there.
 2. On a computer on the same network, open `http://ROKU-IP`, sign in as `rokudev` with that password, and upload/install the ZIP. Installing replaces the existing developer channel on that Roku.

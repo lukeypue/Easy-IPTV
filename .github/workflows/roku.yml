@@ -1,13 +1,16 @@
 name: Roku validation and packages
 on:
   push:
-    branches: [feature/ryzod-roku]
+    branches: [feature/ryzod-roku, ryzod-roku-480]
     paths: ['roku/**', '.github/workflows/roku.yml']
   pull_request:
     paths: ['roku/**', '.github/workflows/roku.yml']
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
+concurrency:
+  group: ryzod-roku-release-020
+  cancel-in-progress: true
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -29,10 +32,22 @@ jobs:
       - run: npm run verify
       - uses: actions/upload-artifact@v4
         with:
-          name: RYZOD-Roku-0.1.0
+          name: RYZOD-Roku-0.2.0
           path: |
-            roku/out/RYZOD-Roku-0.1.0.zip
+            roku/out/RYZOD-Roku-0.2.0.zip
             roku/out/RYZOD-Companion-0.1.0.zip
             roku/out/SHA256SUMS.txt
             roku/README.md
             roku/TEST_REPORT.md
+      - name: Publish verified Roku testing update
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/feature/ryzod-roku'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view roku-v0.2.0 >/dev/null 2>&1; then
+            git fetch origin refs/tags/roku-v0.2.0:refs/tags/roku-v0.2.0
+            test "$(git rev-parse 'roku-v0.2.0^{commit}')" = "$GITHUB_SHA" || { echo 'This version is already published from another commit; increment the version.'; exit 1; }
+            gh release upload roku-v0.2.0 out/RYZOD-Roku-0.2.0.zip out/RYZOD-Companion-0.1.0.zip out/SHA256SUMS.txt --clobber
+          else
+            gh release create roku-v0.2.0 out/RYZOD-Roku-0.2.0.zip out/RYZOD-Companion-0.1.0.zip out/SHA256SUMS.txt --target "$GITHUB_SHA" --title "RYZOD Roku 0.2.0 — Android 4.80 guide update" --notes-file UPDATE_0.2.0.md --prerelease --latest=false
+          fi
