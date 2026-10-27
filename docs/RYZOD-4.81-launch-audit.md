@@ -40,3 +40,21 @@ Available August history adds offline access to Downloads/Recordings, channel wr
 - Corrected lifecycle + live/player targeted rerun: 40 tests passed, zero failures, including Android 16.
 - Publisher: 13 offline tests passed. Independent code review found no blocking issue before that final lifecycle correction.
 - The release workflow must independently pass full direct and Fire TV suites, lint, minified signed builds, certificate/hash/native alignment validation, and Amazon/Play candidate checks before release promotion. Do not infer hardware verification from these gates.
+
+
+## Final verification — published 4.81
+
+Release: https://github.com/lukeypue/Easy-IPTV/releases/tag/v4.81
+
+Verified source: d99e5d34a953d647b6fb82a55d01fa717ad577c7. CI run https://github.com/lukeypue/Easy-IPTV/actions/runs/40434353424 completed successfully. Full phone suite: 209 tests, zero failures/errors/skips. Full Fire TV suite: 209 tests, zero failures/errors/skips. Both distributions passed lint and optimized signed release builds. Amazon APK and Play AAB candidates passed their build, lint, distribution and launcher checks and were retained as workflow artifacts; no store submission was performed. All three APKs passed identity, permanent-certificate, signature, ZIP alignment and eight-native-library 16 KB ELF alignment checks.
+
+A prior CI run found intermittent initial-result synchronization in SearchTypingUiTest. Its wait now explicitly drives both the Android queue and Compose frames; the ten-second timeout and all typing/debounce assertions are unchanged. It passed the targeted probe, two repeated isolated runs, and both complete CI platform suites. Production search code was unchanged in this correction.
+
+Both main updater manifests now identify versionCode 105 / versionName 4.81 and match the release asset digests:
+
+| Asset | SHA-256 |
+| --- | --- |
+| RYZOD-v4.81.apk | ab71030e54885e3532c516c76b6ee2b878972bd4dd92d2095319d67770c029fe |
+| RYZOD-v4.81-FireTV.apk | 1471870da3ae282316d6ad7ec4437483155de09c95ce1fd47bd59cd7788d29e0 |
+
+Remaining launch work: physical provider/device acceptance, affected Fire launcher artwork paths, seven-day trial/licensing/commercial setup, and native-platform parity/signing. Read-only native review found Roku already has season drilldown; Apple 0.2 still initially shows all episodes with a season filter and needs the new drilldown behavior. Neither native platform was changed or declared ready by this Android release.
