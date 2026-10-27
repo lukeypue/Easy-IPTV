@@ -6,6 +6,9 @@ import android.content.SharedPreferences
 internal data class StreamBufferPolicy(val reserveMs: Int, val startMs: Int, val rebufferMs: Int) {
     companion object {
         fun from(prefs: SharedPreferences): StreamBufferPolicy {
+            // Smooth overrides stale saved cushions too; samples still need a
+            // small forward queue. This is never a startup or recovery wait.
+            if (prefs.getBoolean("live_smooth", false)) return StreamBufferPolicy(5_000, 0, 0)
             val seconds = prefs.getInt("buffer_sec", 30).coerceIn(0, 60)
             // Off removes deliberate waits, not the decoder's sample queue.
             if (seconds == 0) return StreamBufferPolicy(5_000, 0, 0)

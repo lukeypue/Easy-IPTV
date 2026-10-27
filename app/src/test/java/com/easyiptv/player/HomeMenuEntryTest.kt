@@ -84,8 +84,18 @@ class HomeMenuEntryTest {
         render()
         ui.onNodeWithContentDescription("Open menu").performClick()
         ui.onNodeWithText("News and information").assertIsDisplayed()
+        ui.onNodeWithText("←  Main menu").assertIsDisplayed()
+        ui.onNodeWithText("★ Favorites").assertIsDisplayed()
         ui.onNodeWithContentDescription("Open menu").performClick()
         ui.onNodeWithText("Settings").assertIsDisplayed()
+    }
+    @Test @Config(qualifiers="w360dp-h800dp-port")
+    fun phoneHamburgerShowsMainMenuAndFavoritesImmediately() {
+        render()
+        ui.onNodeWithContentDescription("Open menu").performClick()
+        ui.onNodeWithText("←  Main menu").assertIsDisplayed()
+        ui.onNodeWithText("★ Favorites").assertIsDisplayed()
+        category().assertIsDisplayed()
     }
     @Test fun leftTwiceOpensCategoriesThenMainMenu() {
         render();leftFromChannel()

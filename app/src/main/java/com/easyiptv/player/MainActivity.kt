@@ -1522,7 +1522,9 @@ private fun HomeRail(
     val selectedIndex = categoryIds.indexOf(selected).coerceAtLeast(0)
     suspend fun restoreRailFocus() {
         val index = if (depth == 0) RootItems.indexOfFirst { it.first == section }.coerceAtLeast(0) else selectedIndex + 1
-        railState.scrollToItem(index)
+        // Keep the header and Favorites visible when All channels is selected.
+        // Later provider categories still scroll into reach before focus restores.
+        railState.scrollToItem(if (depth == 1 && selectedIndex < extras.size) 0 else index)
         androidx.compose.runtime.withFrameNanos { }
         androidx.compose.runtime.withFrameNanos { }
         runCatching { externalFocus.requestFocus() }
@@ -3141,7 +3143,8 @@ object Playback {
             minBufferMs = policy.reserveMs,
             maxBufferMs = policy.reserveMs,
             startBufferMs = policy.startMs,
-            rebufferMs = policy.rebufferMs
+            rebufferMs = policy.rebufferMs,
+            retainBackBuffer = !prefs.getBoolean("live_smooth", false)
         ), lowRam)
         // Some IPTV MPEG-TS streams carry CEA-608 captions without declaring
         // them in PMT metadata. Tell Media3 to expose channel 1 when present so
@@ -4517,6 +4520,9 @@ fun ManagedDvrSchedulePane(
 @Composable
 fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
     var bufferSec by remember { mutableIntStateOf(prefs.getInt("buffer_sec", 30)) }
+    var smoothLive by remember { mutableStateOf(prefs.getBoolean("live_smooth", false)) }
+    var lockSec by remember { mutableIntStateOf(prefs.getInt("live_start_ms", 4000) / 1000) }
+    var steadyRecovery by remember { mutableStateOf(prefs.getBoolean("live_steady_recovery", false)) }
     val ctx = LocalContext.current
     var updateStatus by remember { mutableStateOf("") }
     var updateUrl by remember { mutableStateOf<String?>(null) }
@@ -4660,18 +4666,32 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         )
         Spacer(Modifier.height(10.dp))
         fun setBuffer(sec: Int) {
-            if (bufferSec == sec) return
+            if (bufferSec == sec && !smoothLive) return
+            smoothLive = false
             bufferSec = sec
-            prefs.edit().putInt("buffer_sec", sec).apply()
+            prefs.edit().putBoolean("live_smooth", false).putInt("buffer_sec", sec).apply()
             onModeChanged()
         }
         androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Chip("Real time (0s)", bufferSec == 0) { setBuffer(0) }
+            Chip("Smooth (0s)", smoothLive) {
+                if (!smoothLive) {
+                    smoothLive = true
+                    bufferSec = 0
+                    lockSec = 0
+                    steadyRecovery = false
+                    prefs.edit().putBoolean("live_smooth", true).putInt("buffer_sec", 0)
+                        .putInt("live_start_ms", 0).putBoolean("live_steady_recovery", false).apply()
+                    onModeChanged()
+                }
+            }
+            Chip("Real time (0s)", bufferSec == 0 && !smoothLive) { setBuffer(0) }
             Chip("Small (10s)", bufferSec == 10) { setBuffer(10) }
             Chip("20s refill", bufferSec == 20) { setBuffer(20) }
             Chip("Normal (30s)", bufferSec == 30) { setBuffer(30) }
             Chip("Big (60s)", bufferSec == 60) { setBuffer(60) }
         }
+        Text("Smooth plays directly with no added wait, mini guide or buffering message. OK or Left returns to the full guide. Pause history starts only when you press Pause.",
+            fontSize = 12.sp, color = Muted, modifier = Modifier.padding(top = 4.dp))
         Text("Changing buffer or recovery settings stops the preview and applies to the next channel you open.",
             fontSize = 10.sp, color = Muted, modifier = Modifier.padding(top = 4.dp))
 
@@ -4683,11 +4703,11 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
             fontSize = 12.sp, color = Muted
         )
         Spacer(Modifier.height(10.dp))
-        var lockSec by remember { mutableIntStateOf(prefs.getInt("live_start_ms", 4000) / 1000) }
         fun setLock(sec: Int) {
-            if (lockSec == sec) return
+            if (lockSec == sec && !smoothLive) return
+            smoothLive = false
             lockSec = sec
-            prefs.edit().putInt("live_start_ms", sec * 1000).apply()
+            prefs.edit().putBoolean("live_smooth", false).putInt("live_start_ms", sec * 1000).apply()
             onModeChanged()
         }
         androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -4706,30 +4726,32 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         // ---- Live recovery behavior ----
         Text("After a live hiccup", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
-        var steadyRecovery by remember { mutableStateOf(prefs.getBoolean("live_steady_recovery", false)) }
         Text(
             "Both modes play at normal speed and use the startup cushion you select. After running out, Natural targets 8–40 seconds; Steady targets 15–50 seconds depending on the cushion. Real time (0s) removes both waits. Device memory and provider availability can limit the actual reserve.",
             fontSize = 12.sp, color = Muted
         )
         Spacer(Modifier.height(8.dp))
         androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Chip("Natural (recommended)", !steadyRecovery) {
-                if (!steadyRecovery) return@Chip
+            Chip("Natural (recommended)", !steadyRecovery && !smoothLive) {
+                if (!steadyRecovery && !smoothLive) return@Chip
+                smoothLive = false
                 steadyRecovery = false
-                prefs.edit().putBoolean("live_steady_recovery", false).apply()
+                prefs.edit().putBoolean("live_smooth", false).putBoolean("live_steady_recovery", false).apply()
                 onModeChanged()
             }
             Chip("Steady weak-channel", steadyRecovery) {
                 if (steadyRecovery) return@Chip
+                smoothLive = false
                 steadyRecovery = true
-                prefs.edit().putBoolean("live_steady_recovery", true).apply()
+                prefs.edit().putBoolean("live_smooth", false).putBoolean("live_steady_recovery", true).apply()
                 onModeChanged()
             }
         }
 
-        val effectiveBuffer = remember(bufferSec, lockSec, steadyRecovery) { StreamBufferPolicy.from(prefs) }
+        val effectiveBuffer = remember(bufferSec, lockSec, steadyRecovery, smoothLive) { StreamBufferPolicy.from(prefs) }
         Text(
-            if (bufferSec == 0) "Real time: no added startup or recovery wait. Other cushion choices are inactive."
+            if (smoothLive) "Smooth: 0s added startup and recovery wait. Mini guide and buffering messages are off."
+            else if (bufferSec == 0) "Real time: no added startup or recovery wait. Other cushion choices are inactive."
             else "Effective live targets: start ${effectiveBuffer.startMs / 1000}s · recovery ${effectiveBuffer.rebufferMs / 1000}s · refill ${effectiveBuffer.reserveMs / 1000}s",
             fontSize = 12.sp, color = NeonGreen, modifier = Modifier.padding(top = 8.dp)
         )
@@ -5550,16 +5572,26 @@ fun SeriesDetailScreen(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
-    var eps by remember { mutableStateOf<Map<Int, List<Episode>>?>(null) }
-    var err by remember { mutableStateOf<String?>(null) }
-    var watchTick by remember { mutableIntStateOf(0) }
-    var infoEpisode by remember { mutableStateOf<Pair<Int, Episode>?>(null) }
-    BackHandler { if (infoEpisode != null) infoEpisode = null else onBack() }
+    var eps by remember(source, s.id) { mutableStateOf<Map<Int, List<Episode>>?>(null) }
+    var err by remember(source, s.id) { mutableStateOf<String?>(null) }
+    var watchTick by remember(source, s.id) { mutableIntStateOf(0) }
+    var infoEpisode by remember(source, s.id) { mutableStateOf<Pair<Int, Episode>?>(null) }
+    var selectedSeason by remember(source, s.id) { mutableStateOf<Int?>(null) }
+    fun goBack() {
+        when {
+            infoEpisode != null -> infoEpisode = null
+            selectedSeason != null -> selectedSeason = null
+            else -> onBack()
+        }
+    }
+    BackHandler { goBack() }
 
-    LaunchedEffect(s.id, err) {
+    LaunchedEffect(source, s.id, err) {
         if (err == null && eps == null) {
             try {
-                eps = source.seriesEpisodes(s.id)
+                eps = source.seriesEpisodes(s.id).toSortedMap().mapValues { (_, list) -> list.sortedBy { it.episodeNum } }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
             } catch (e: Exception) {
                 err = e.message ?: "error"
             }
@@ -5591,7 +5623,7 @@ fun SeriesDetailScreen(
             modifier = Modifier.fillMaxWidth().padding(start = 4.dp, end = 8.dp, top = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = onBack) {
+            IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = { goBack() }) {
                 Icon(Icons.Filled.ArrowBack, contentDescription = "Back", tint = Muted)
             }
             Text(
@@ -5612,6 +5644,7 @@ fun SeriesDetailScreen(
                 ) { Text("Reset watched", color = Muted, fontSize = 12.sp) }
             }
         }
+        selectedSeason?.let { SectionHeader("Season $it") }
         when {
             err != null -> ErrorBox(err!!, onRetry = { err = null }, title = "Couldn't load episodes")
             eps == null -> LoadingBox("Loading episodes…")
@@ -5622,14 +5655,18 @@ fun SeriesDetailScreen(
             ) {
                 Text("No episodes listed for this series.", color = Muted, fontSize = 14.sp)
             }
-            else -> LazyColumn(
+            else -> key(source, s.id, selectedSeason) { LazyColumn(
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 val wt = watchTick   // reading this refreshes labels after a reset
-                eps!!.forEach { (season, list) ->
-                    item { SectionHeader("Season $season") }
-                    items(list) { ep ->
+                if (selectedSeason == null) {
+                    items(eps!!.keys.toList(), key = { it }) { season ->
+                        MediaRow(name = "Season $season", icon = null, onClick = { selectedSeason = season })
+                    }
+                } else {
+                    val season = selectedSeason!!
+                    items(eps!![season].orEmpty(), key = { it.url }) { ep ->
                         val w = WatchStore.get(prefs, ep.url)
                         val mark = when {
                             w?.watched == true -> "✓  "
@@ -5658,7 +5695,7 @@ fun SeriesDetailScreen(
                         )
                     }
                 }
-            }
+            } }
         }
     }
 }
@@ -6540,6 +6577,7 @@ fun PlayerScreen(
         return
     }
     val context = LocalContext.current
+    val smoothLive = remember(prefs) { prefs.getBoolean("live_smooth", false) }
     var resizeMode by remember {
         mutableIntStateOf(prefs.getInt("resize_mode", AspectRatioFrameLayout.RESIZE_MODE_FIT))
     }
@@ -6781,7 +6819,8 @@ fun PlayerScreen(
     // it's off the air (game-day channels, etc.) without any guesswork.
     var bufPct by remember { mutableIntStateOf(0) }
     val bufferPolicy = remember { StreamBufferPolicy.from(prefs) }
-    LaunchedEffect(playState.intValue) {
+    LaunchedEffect(playState.intValue, current.isLive, smoothLive) {
+        if (current.isLive && smoothLive) return@LaunchedEffect
         // Only spins while actually buffering; the effect re-runs (and this
         // loop exits) the moment the state changes to READY. 600ms is plenty
         // for a smooth-looking %, and keeps the poll off the hot path.
@@ -6830,7 +6869,8 @@ fun PlayerScreen(
                     if (queue.getOrNull(Playback.currentIdxC.intValue)?.isLive == true && !miniGuideOpen) {
                         pvRef?.hideController()
                         overlayVisible = false
-                        miniGuideOpen = true
+                        if (smoothLive) onBack(Playback.currentIdxC.intValue, exo.currentPosition.coerceAtLeast(0L))
+                        else miniGuideOpen = true
                         true
                     } else false
                 }
@@ -6891,7 +6931,8 @@ fun PlayerScreen(
                             // in v4.17, leaving only a one-channel popup.
                             pvRef?.hideController()
                             overlayVisible = false
-                            miniGuideOpen = true
+                            if (smoothLive) onBack(Playback.currentIdxC.intValue, exo.currentPosition.coerceAtLeast(0L))
+                            else miniGuideOpen = true
                             true
                         }
                         else -> { pvRef?.showController(); true }
@@ -6902,7 +6943,8 @@ fun PlayerScreen(
                     else if (current.isLive) {
                         pvRef?.hideController()
                         overlayVisible = false
-                        miniGuideOpen = true
+                        if (smoothLive) onBack(Playback.currentIdxC.intValue, exo.currentPosition.coerceAtLeast(0L))
+                        else miniGuideOpen = true
                         true
                     } else { pvRef?.showController(); true }
                 }
@@ -6936,7 +6978,7 @@ fun PlayerScreen(
 
     LaunchedEffect(current, source, EpgStore.loaded.value) {
         nowNext = emptyList()
-        if (!current.isLive) return@LaunchedEffect
+        if (!current.isLive || smoothLive) return@LaunchedEffect
         val fromGuide = EpgStore.guide(current.guideKey, current.name)
         if (fromGuide.isNotEmpty()) {
             nowNext = fromGuide.take(2)
@@ -7026,6 +7068,7 @@ fun PlayerScreen(
                     // trapping the remote on its gear/title row. VOD/recordings
                     // still use Media3's normal controller.
                     useController = !current.isLive
+                    setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
                     // Hold the last good frame across prepare()/reconnect cycles
                     // instead of flashing black 3–4 times when a live channel
                     // starts. Also use a SurfaceView (cheaper on Fire TV) and a
@@ -7173,7 +7216,7 @@ fun PlayerScreen(
 
         // Cable-box clock (Settings › Clock while watching).
         // ---- X1-style mini guide overlay (live only) ----
-        if (miniGuideOpen && current.isLive) {
+        if (miniGuideOpen && current.isLive && !smoothLive) {
             Box(Modifier.align(Alignment.BottomCenter)) {
                 MiniGuide(
                     queue = queue,
@@ -7250,7 +7293,7 @@ fun PlayerScreen(
         }
         // Friendly status while the stream settles — so the customer knows the
         // wait is on purpose, not broken.
-        if (!streamDead.value && playState.value == Player.STATE_BUFFERING) {
+        if (!(current.isLive && smoothLive) && !streamDead.value && playState.value == Player.STATE_BUFFERING) {
             Column(
                 Modifier
                     .align(Alignment.BottomCenter)

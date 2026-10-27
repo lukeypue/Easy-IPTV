@@ -17,6 +17,23 @@ import org.robolectric.annotation.Config
 @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
 class LiveTvUiRegressionTest {
     @get:Rule val ui=createAndroidComposeRule<androidx.activity.ComponentActivity>()
+    @Test fun smoothOkReturnsToFullGuideWithoutStartingMiniGuideOrEpgRequest() {
+        val ctx=ApplicationProvider.getApplicationContext<Context>()
+        val prefs=ctx.getSharedPreferences("smooth-live-ui",Context.MODE_PRIVATE)
+        prefs.edit().clear().putBoolean("live_smooth",true).commit()
+        var guideIndex=-1
+        var epgCalls=0
+        val source=object:Source by XtreamSource("https://example.invalid","u","p") {
+            override suspend fun epg(streamId:String,limit:Int):List<EpgEntry> {epgCalls++;return emptyList()}
+        }
+        try {
+            ui.setContent {PlayerScreen(listOf(Playable("Live","http://127.0.0.1:9/live.ts",true,epgId="1")),0,source=source,prefs=prefs,onOpenSettings={_,_->},onBack={i,_->guideIndex=i})}
+            ui.runOnIdle {assertTrue(PlayerKeys.priority?.invoke(KeyEvent.KEYCODE_DPAD_CENTER)==true)}
+            ui.onNodeWithTag("live-buffer-health").assertDoesNotExist()
+            ui.onNodeWithText("Connecting…").assertDoesNotExist()
+            ui.runOnIdle {assertEquals(0,guideIndex);assertEquals(0,epgCalls);assertFalse(Timeshift.active)}
+        } finally {ui.runOnIdle {Playback.releaseAll()}}
+    }
     @Test fun miniGuideOpensWithoutPausingOrStartingTemporaryStorage() {
         val ctx=ApplicationProvider.getApplicationContext<Context>()
         val prefs=ctx.getSharedPreferences("live-ui",Context.MODE_PRIVATE)

@@ -11,6 +11,16 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk=[28])
 class StreamBufferPolicyTest {
+    @Test fun smoothOverridesOldCushionAndSteadyPreferences() {
+        val ctx=ApplicationProvider.getApplicationContext<Context>()
+        val prefs=ctx.getSharedPreferences("smooth-policy",Context.MODE_PRIVATE)
+        prefs.edit().clear().putBoolean("live_smooth",true).putInt("buffer_sec",60)
+            .putInt("live_start_ms",30_000).putBoolean("live_steady_recovery",true).commit()
+        val policy=StreamBufferPolicy.from(prefs)
+        assertEquals(0,policy.startMs)
+        assertEquals(0,policy.rebufferMs)
+        assertTrue("Only a small decoder queue should be retained",policy.reserveMs<=5_000)
+    }
     @Test fun everySettingCombinationLeavesRoomToRefillAndKeepsSteadyDistinct() {
         val ctx=ApplicationProvider.getApplicationContext<Context>()
         val prefs=ctx.getSharedPreferences("buffer-combinations",Context.MODE_PRIVATE)

@@ -45,6 +45,26 @@ class PlaybackMemoryPolicyTest {
             }
         } finally { Playback.releaseAll() }
     }
+    @Test fun smoothDropsPastSamplesWithoutBlockingMovieStartup() {
+        val ctx=androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val prefs=ctx.getSharedPreferences("smooth-memory",android.content.Context.MODE_PRIVATE)
+        prefs.edit().clear().putBoolean("live_smooth",true).putInt("live_start_ms",30_000).commit()
+        try {
+            val ensure=Playback.javaClass.getDeclaredMethod("ensurePlayer",android.content.Context::class.java,android.content.SharedPreferences::class.java).apply {isAccessible=true}
+            val p=ensure.invoke(Playback,ctx,prefs)
+            val internal=p.javaClass.getDeclaredField("internalPlayer").apply {isAccessible=true}.get(p)
+            val control=internal.javaClass.getDeclaredField("loadControl").apply {isAccessible=true}.get(internal) as LoadControl
+            withPlayer(control) { f ->
+                assertEquals(0L,control.getBackBufferDurationUs(f.playerId))
+                assertTrue(f.startPlayback(0L))
+                assertTrue(f.startPlayback(0L,rebuffering=true))
+            }
+            withPlayer(control,"http://127.0.0.1/movie.mp4") { f ->
+                assertTrue("Smooth must still load enough data to start VOD",f.continueLoading(3_000_000L))
+                assertTrue(f.startPlayback(4_000_000L))
+            }
+        } finally {Playback.releaseAll()}
+    }
     @Test fun configuredThirtySecondLiveWaitAndFiniteHlsWindowRemainSafe() {
         configuredControl(false,30_000,60) { control ->
             withPlayer(control) { f ->

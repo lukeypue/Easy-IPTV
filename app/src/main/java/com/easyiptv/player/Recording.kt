@@ -151,6 +151,7 @@ class RecordingService : Service() {
             .build()
     }
 
+    @Synchronized
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if(systemTimedOut) { stopSelf(); return START_NOT_STICKY }
         latestStartId=startId
@@ -283,10 +284,11 @@ class RecordingService : Service() {
         Recorder.usesProviderConnection = false
         Recorder.lastStatus.value = "Recording: $name"
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "EasyIPTV:record").apply {
+        val recordingWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "EasyIPTV:record").apply {
             // Cap the wakelock at 6 hours as a safety net.
             acquire(6L * 60 * 60 * 1000)
         }
+        wakeLock = recordingWakeLock
         val dir = Recorder.recordingsDir(this)
         job = scope.launch {
             var currentFile: File? = null
@@ -380,14 +382,6 @@ class RecordingService : Service() {
             } finally {
                 deadline.cancel()
                 owner.call?.cancel();owner.call=null
-                if(networkOwner===owner) networkOwner=null
-                val terminal=isActive || stopRequested || System.currentTimeMillis()>=recordingSession.end
-                if(terminal) {
-                    val prefs=getSharedPreferences("easyiptv",Context.MODE_PRIVATE)
-                    RecordingRecovery.clear(prefs,recordingSession.id)
-                    if(Recorder.activeSessionId==recordingSession.id) Recorder.activeScheduleId=-1
-                    if(recordingSession.scheduleId>=0) ScheduleStore.cancel(this@RecordingService,prefs,recordingSession.scheduleId)
-                }
                 // Never leave a fake 0 MB recording behind after a 403, dead
                 // socket, or failed storage open. This was confusing in v4.17.
                 currentFile?.let { f ->
@@ -402,21 +396,52 @@ class RecordingService : Service() {
                         Recorder.lastStatus.value = "Saved recording: ${String.format(Locale.US, "%.1f", mb)} MB"
                     }
                 }
-                if(Recorder.activeSessionId==recordingSession.id) {
-                    Recorder.activeName.value = null
-                    Recorder.activeUrl = null
-                    Recorder.activeSessionId=null
-                    Recorder.activeScheduleId=-1
-                    Recorder.usesProviderConnection = false
+            }
+        }.also { recordingJob ->
+            // A DEFAULT launch cancelled before dispatch never enters its finally.
+            // Completion owns service cleanup even when no writer was started.
+            recordingJob.invokeOnCompletion { cause ->
+                owner.call?.cancel();owner.call=null
+                // A finished writer releases ownership immediately. UI/service
+                // callbacks may wait for the main looper, but provider capacity
+                // and recording state must not wait with them.
+                val wasOwner = synchronized(this@RecordingService) {
+                    runCatching { if(recordingWakeLock.isHeld) recordingWakeLock.release() }
+                    if(networkOwner!==owner) false else {
+                        networkOwner=null
+                        if(wakeLock===recordingWakeLock) wakeLock=null
+                        val terminal=cause==null || stopRequested || System.currentTimeMillis()>=recordingSession.end
+                        if(terminal) {
+                            val prefs=getSharedPreferences("easyiptv",Context.MODE_PRIVATE)
+                            RecordingRecovery.clear(prefs,recordingSession.id)
+                            if(Recorder.activeSessionId==recordingSession.id) Recorder.activeScheduleId=-1
+                            if(recordingSession.scheduleId>=0) ScheduleStore.cancel(this@RecordingService,prefs,recordingSession.scheduleId)
+                        }
+                        if(Recorder.activeSessionId==recordingSession.id) {
+                            Recorder.activeName.value = null
+                            Recorder.activeUrl = null
+                            Recorder.activeSessionId=null
+                            Recorder.activeScheduleId=-1
+                            Recorder.usesProviderConnection = false
+                        }
+                        true
+                    }
                 }
-                android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    Playback.recordingFinished(url)
-                    if(session?.id==recordingSession.id) stopSelf(latestStartId)
+                if(wasOwner) android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    synchronized(this@RecordingService) {
+                        // A recovered recording may reuse the same session ID.
+                        // The coroutine identity distinguishes its new owner.
+                        if(job===recordingJob && networkOwner==null && session?.id==recordingSession.id) {
+                            Playback.recordingFinished(url)
+                            stopSelf(latestStartId)
+                        }
+                    }
                 }
             }
         }
     }
 
+    @Synchronized
     override fun onTimeout(startId: Int, fgsType: Int) {
         // Android 15+ shares a background budget across dataSync services.
         // Stop promptly, retain the video, and invalidate automatic recovery.
@@ -438,6 +463,7 @@ class RecordingService : Service() {
         stopSelf()
     }
 
+    @Synchronized
     override fun onDestroy() {
         networkOwner?.call?.cancel()
         scope.cancel()
