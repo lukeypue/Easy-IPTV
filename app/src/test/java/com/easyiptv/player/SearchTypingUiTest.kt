@@ -27,8 +27,10 @@ class SearchTypingUiTest {
         ui.setContent {SearchTab(null,prefs,data,query.value,{query.value=it},{},{_,_->},{})}
         ui.waitUntil(10_000) {
             // The index is built on Dispatchers.Default, then posts its state
-            // back to Android. Pump that queue as well as Compose's frame clock.
+            // back to Android. Drain that queue and explicitly produce the next
+            // Compose frame: a background emission can arrive after idle checks.
             org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            ui.mainClock.advanceTimeByFrame()
             ui.onAllNodesWithText("Alpha TV").fetchSemanticsNodes().isNotEmpty()
         }
         ui.onNodeWithText("Search").performClick()
@@ -68,8 +70,10 @@ class SearchTypingUiTest {
         ui.setContent {SearchTab(null,prefs,data,query.value,{query.value=it},{},{_,_->},{})}
         ui.waitUntil(10_000) {
             // The index is built on Dispatchers.Default, then posts its state
-            // back to Android. Pump that queue as well as Compose's frame clock.
+            // back to Android. Drain that queue and explicitly produce the next
+            // Compose frame: a background emission can arrive after idle checks.
             org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            ui.mainClock.advanceTimeByFrame()
             ui.onAllNodesWithText("Alpha TV").fetchSemanticsNodes().isNotEmpty()
         }
         ui.onNodeWithText("Search").performClick()
@@ -88,8 +92,10 @@ class SearchTypingUiTest {
         } finally {ui.mainClock.autoAdvance=true}
         ui.waitUntil(10_000) {
             // The index is built on Dispatchers.Default, then posts its state
-            // back to Android. Pump that queue as well as Compose's frame clock.
+            // back to Android. Drain that queue and explicitly produce the next
+            // Compose frame: a background emission can arrive after idle checks.
             org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            ui.mainClock.advanceTimeByFrame()
             ui.onAllNodesWithText("Alpha TV").fetchSemanticsNodes().isNotEmpty()
         }
     }
