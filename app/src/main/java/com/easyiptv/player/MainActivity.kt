@@ -33,6 +33,8 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.safeDrawingPadding
@@ -131,6 +133,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.nativeKeyEvent
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -169,10 +172,8 @@ private val Muted = Color(0xFFBFEFFF)
 private val Accent = Color(0xFFD4A548)
 private val TextGold = Color(0xFFE3BA65)
 private val OnLightGold = Color(0xFF4B2F05)
-private val MenuOrange = Color(0xFFE29145)
-private val MenuOrangeSelected = Color(0xFFF1AE70)
-private val CategorySilver = Color(0xFFC9CDD1)
-private val CategorySilverSelected = Color(0xFFE5E7E9)
+private val MenuViolet = Color(0xFF4F2678)
+private val MenuVioletSelected = Color(0xFF71429B)
 private val Live = Color(0xFFFF3B5C)
 private val ProgramCyan = Color(0xFF58D9FF)
 private val ElectricCyan = Color(0xFF49E8FF)
@@ -441,6 +442,10 @@ private fun RyzodGridBackground() {
 }
 
 class MainActivity : ComponentActivity() {
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(AppReadability.wrap(newBase))
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val television = resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_TYPE_MASK == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
@@ -1559,7 +1564,6 @@ private fun HomeRail(
             itemsIndexed(RootItems) { pos, p ->
                 RailItem(
                     p.second, section == p.first,
-                    primaryMenu = true,
                     modifier = (if (p.first == section) Modifier.focusRequester(externalFocus) else Modifier)
                         .onPreviewKeyEvent { ev ->
                             if(ev.type==KeyEventType.KeyDown && ev.key==Key.DirectionRight) { onRoot(p.first); true }
@@ -1594,14 +1598,8 @@ private fun HomeRail(
 }
 
 @Composable
-private fun RailItem(label: String, active: Boolean, modifier: Modifier = Modifier,
-    primaryMenu: Boolean = false, onClick: () -> Unit) {
-    // Solid fills keep navigation orange and categories silver, with readable gold text.
-    val bubbleColor = if (primaryMenu) {
-        if (active) MenuOrangeSelected else MenuOrange
-    } else {
-        if (active) CategorySilverSelected else CategorySilver
-    }
+private fun RailItem(label: String, active: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val bubbleColor = if (active) MenuVioletSelected else MenuViolet
     Row(
         modifier = modifier
             .padding(horizontal = 6.dp, vertical = 3.dp)
@@ -1613,7 +1611,7 @@ private fun RailItem(label: String, active: Boolean, modifier: Modifier = Modifi
             )
             .border(
                 if (active) 2.dp else 1.dp,
-                OnLightGold.copy(alpha = if (active) 1f else 0.35f),
+                Color.White.copy(alpha = if (active) 1f else 0.35f),
                 RoundedCornerShape(24.dp)
             )
             .clickable { onClick() }
@@ -1622,12 +1620,12 @@ private fun RailItem(label: String, active: Boolean, modifier: Modifier = Modifi
     ) {
         Box(
             Modifier.size(if (active) 8.dp else 6.dp)
-                .background(OnLightGold.copy(alpha = if (active) 1f else 0.65f), CircleShape)
+                .background(Color.White.copy(alpha = if (active) 1f else 0.65f), CircleShape)
         )
         Spacer(Modifier.width(9.dp))
         Text(
             label,
-            color = OnLightGold,
+            color = Color.White,
             fontSize = 12.sp,
             fontWeight = if (active) FontWeight.ExtraBold else FontWeight.SemiBold,
             maxLines = 2,
@@ -1729,7 +1727,7 @@ private fun GuideRefreshTools(loading: Boolean, onRefresh: () -> Unit) {
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
         TextButton(onClick = onRefresh, enabled = !loading,
             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-            modifier = Modifier.height(28.dp).tvFocus(RoundedCornerShape(12.dp))) {
+            modifier = Modifier.heightIn(min = 28.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)).tvFocus(RoundedCornerShape(12.dp))) {
             Text(if (loading) "UPDATING…" else "↻ UPDATE GUIDE", color = Ink, fontSize = 11.sp)
         }
         Text("Guide comes from your provider • Updates may take 1–2 minutes or longer",
@@ -1747,9 +1745,9 @@ internal fun LiveBufferHealth(bufferedMs: Long, liveOffsetMs: Long, reserveMs: I
     fun seconds(ms: Long) = String.format(Locale.US, "%.1fs", ms / 1000.0)
     Column(Modifier.fillMaxWidth().testTag("live-buffer-health").padding(top = 4.dp)) {
         Row(Modifier.fillMaxWidth()) {
-            Text("PLAY", color = FocusPink, fontSize = 9.sp)
+            Text("PLAY", color = FocusPink, fontSize = 9.sp, lineHeight = 12.sp)
             Spacer(Modifier.weight(1f))
-            Text(if (edgeKnown) "LIVE" else "REFILL GOAL", color = Muted, fontSize = 9.sp)
+            Text(if (edgeKnown) "LIVE" else "REFILL GOAL", color = Muted, fontSize = 9.sp, lineHeight = 12.sp)
         }
         Canvas(Modifier.fillMaxWidth().height(9.dp)) {
             val y = size.height / 2f
@@ -1760,10 +1758,10 @@ internal fun LiveBufferHealth(bufferedMs: Long, liveOffsetMs: Long, reserveMs: I
             drawCircle(Color.White, 3f, Offset(size.width, y))
         }
         Text("Buffer ahead ${seconds(bufferedMs)} • Goal ${reserveMs / 1000}s • Start ${startupMs / 1000}s • $trend",
-            color = Ink, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            color = Ink, fontSize = 10.sp, lineHeight = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         Text(if (edgeKnown) "Behind live ${seconds(liveOffsetMs)} • Green = downloaded video, gray = not buffered"
             else "Live distance unknown for this feed • Green = downloaded video, gray = refill goal",
-            color = Muted, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            color = Muted, fontSize = 9.sp, lineHeight = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -2150,12 +2148,12 @@ private fun LiveGridGuide(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(Modifier.width(142.dp)) {
-                Text(SimpleDateFormat("EEE M/d", Locale.getDefault()).format(Date(windowStart)), color = Muted, fontSize = 9.sp)
+                Text(SimpleDateFormat("EEE M/d", Locale.getDefault()).format(Date(windowStart)), color = Muted, fontSize = 9.sp, lineHeight = 11.sp)
             }
             repeat(4) { slot ->
                 Text(
                     fmt.format(Date(windowStart + slot * halfHour)),
-                    color = Ink, fontSize = 10.sp, fontWeight = FontWeight.Bold,
+                    color = Ink, fontSize = 10.sp, lineHeight = 12.sp, fontWeight = FontWeight.Bold,
                     modifier = Modifier.weight(1f)
                 )
             }
@@ -2180,7 +2178,7 @@ private fun LiveGridGuide(
                 val cells = remember(schedule,windowStart) { GuideGeometry.cells(schedule,windowStart,windowStart+GuideNavigation.WINDOW_MS) }
                 val cellFocus = remember(ch.id,cells.size) { cells.map { FocusRequester() } }
                 Row(
-                    Modifier.fillMaxWidth().height(44.dp),
+                    Modifier.fillMaxWidth().height(44.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Row(
@@ -2207,7 +2205,7 @@ private fun LiveGridGuide(
                     ) {
                         ChannelIcon(ch.name, ch.icon, 30.dp)
                         Spacer(Modifier.width(5.dp))
-                        Text(ch.name, color = OnLightGold, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Text(ch.name, color = OnLightGold, fontSize = 10.sp, lineHeight = 12.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     }
                     Row(Modifier.weight(1f).fillMaxHeight()) {
                         cells.forEachIndexed { cellIndex, cell ->
@@ -4685,7 +4683,7 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
                     onModeChanged()
                 },
                 modifier = Modifier.testTag("smooth-switch").tvFocus(RoundedCornerShape(18.dp)),
-                colors = androidx.compose.material3.SwitchDefaults.colors(checkedThumbColor = Ink, checkedTrackColor = Accent)
+                colors = androidx.compose.material3.SwitchDefaults.colors(checkedThumbColor = Ink, checkedTrackColor = MenuVioletSelected)
             )
         }
         Text("A lighter live player with no added startup or recovery wait, mini guide or buffering message. Try Smooth when larger buffers keep stopping to refill. A 20-second buffer helps with brief interruptions only if the stream can refill it fast enough. Neither mode fixes a slow connection or an overloaded provider. Your buffer settings below are saved for when Smooth is off.",
@@ -5001,6 +4999,7 @@ private fun SearchTvKeyboardField(value: String, onValueChange: (String) -> Unit
 private val KeyboardOrange = Color(0xFFCE752A)
 private val ChannelBlue = Color(0xFFA6CBE6)
 
+@kotlin.OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun RyzodKeyboardPanel(
     value: String, onValueChange: (String) -> Unit, label: String, password: Boolean,
@@ -5011,87 +5010,110 @@ private fun RyzodKeyboardPanel(
     var upper by remember { mutableStateOf(false) }
     var row by remember { mutableIntStateOf(1) }
     var col by remember { mutableIntStateOf(0) }
-    val rows = remember(page, upper) { KeyboardLayout.rows(page, upper) }
     val keyFocus = externalFocus ?: remember { FocusRequester() }
     var confirmPressed by remember {mutableStateOf<String?>(null)}
-    fun press(key: String) {
-        when (key) {
-            "abc", "#$%", "áçé" -> {
-                page = when(key) { "#$%" -> 1; "áçé" -> 2; else -> 0 }
-                row = 0; col = 0
-            }
-            "SHIFT" -> upper = !upper
-            "PREVIOUS" -> onPrevious()
-            "NEXT" -> onNext()
-            "DONE" -> onClose()
-            else -> onValueChange(KeyboardLayout.edit(value, key))
-        }
-    }
-    LaunchedEffect(Unit) { androidx.compose.runtime.withFrameNanos { }; keyFocus.requestFocus() }
-    BackHandler(onBack=onClose)
+    val density = LocalDensity.current
     val screenWidth = LocalConfiguration.current.screenWidthDp.dp
+    val screenHeight = LocalConfiguration.current.screenHeightDp.dp
+    val textScale = density.fontScale.coerceAtLeast(1f)
+    val letterSize = if (screenWidth >= 700.dp) 17.sp else 15.sp
     BoxWithConstraints(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
-    val keyboardWidth = if (screenWidth >= 700.dp) minOf(maxWidth, screenWidth * .60f) else maxWidth
-    Column(Modifier.width(keyboardWidth).testTag("ryzod-keyboard")
-        .background(KeyboardOrange.copy(alpha=.96f), RoundedCornerShape(12.dp))
-        .border(1.dp, Color(0xFFFFBA65), RoundedCornerShape(12.dp))
-        .onFocusChanged { if (!it.hasFocus) confirmPressed = null }
-        .focusRequester(keyFocus)
-        .onPreviewKeyEvent { ev ->
-            if(ev.key==Key.DirectionCenter || ev.key==Key.Enter) {
-                if(ev.type==KeyEventType.KeyDown && ev.nativeKeyEvent.repeatCount==0) confirmPressed=rows[row][col]
-                else if(ev.type==KeyEventType.KeyUp) {
-                    val owned = confirmPressed
-                    confirmPressed = null
-                    if (owned != null) press(owned)
+        val keyboardWidth = if (screenWidth >= 700.dp) minOf(maxWidth, screenWidth * .60f) else maxWidth
+        val innerWidth = (keyboardWidth - 12.dp).coerceAtLeast(1.dp)
+        val columns = ((innerWidth + 3.dp) / (with(density) {letterSize.toDp()} + 11.dp)).toInt().coerceIn(4,10)
+        val actionWidth = with(density) {54.sp.toDp()} + 8.dp
+        val actionColumns = when {
+            innerWidth >= actionWidth * 6 + 15.dp -> 6
+            innerWidth >= actionWidth * 3 + 6.dp -> 3
+            else -> 2
+        }
+        val navigationColumns = ((innerWidth + 3.dp) / (with(density) {72.sp.toDp()} + 11.dp)).toInt().coerceIn(1,3)
+        val rows = remember(page,upper,columns,actionColumns,navigationColumns) {
+            val base = KeyboardLayout.rows(page,upper)
+            base.dropLast(2).flatMap {it.chunked(columns)} +
+                base[base.lastIndex-1].chunked(actionColumns) + base.last().chunked(navigationColumns)
+        }
+        val selectedRow = row.coerceIn(0,rows.lastIndex)
+        val selectedCol = col.coerceIn(0,rows[selectedRow].lastIndex)
+        val rowVisibility = remember(rows) {List(rows.size) {BringIntoViewRequester()}}
+        fun press(key: String) {
+            when (key) {
+                "abc", "#$%", "áçé" -> {
+                    page = when(key) {"#$%" -> 1; "áçé" -> 2; else -> 0}
+                    row=0; col=0
                 }
-                return@onPreviewKeyEvent true
+                "SHIFT" -> upper = !upper
+                "PREVIOUS" -> onPrevious()
+                "NEXT" -> onNext()
+                "DONE" -> onClose()
+                else -> onValueChange(KeyboardLayout.edit(value,key))
             }
-            if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-            val delta = when (ev.key) {
-                Key.DirectionLeft -> -1 to 0; Key.DirectionRight -> 1 to 0
-                Key.DirectionUp -> 0 to -1; Key.DirectionDown -> 0 to 1
-                else -> null
-            }
-            if (delta != null) {
-                confirmPressed = null
-                if (ev.key == Key.DirectionDown && row == rows.lastIndex && onBottomExit != null) {
-                    onBottomExit()
+        }
+        LaunchedEffect(keyFocus) {androidx.compose.runtime.withFrameNanos {};keyFocus.requestFocus()}
+        LaunchedEffect(selectedRow,rows) {
+            androidx.compose.runtime.withFrameNanos {}
+            rowVisibility[selectedRow].bringIntoView()
+        }
+        BackHandler(onBack=onClose)
+        Column(Modifier.width(keyboardWidth).heightIn(max=screenHeight*.60f).testTag("ryzod-keyboard")
+            .background(KeyboardOrange.copy(alpha=.96f),RoundedCornerShape(12.dp))
+            .border(1.dp,Color(0xFFFFBA65),RoundedCornerShape(12.dp))
+            .verticalScroll(rememberScrollState())
+            .onFocusChanged {if(!it.hasFocus) confirmPressed=null}
+            .focusRequester(keyFocus)
+            .onPreviewKeyEvent {ev ->
+                val currentRow=row.coerceIn(0,rows.lastIndex)
+                val currentCol=col.coerceIn(0,rows[currentRow].lastIndex)
+                if(ev.key==Key.DirectionCenter || ev.key==Key.Enter) {
+                    if(ev.type==KeyEventType.KeyDown && ev.nativeKeyEvent.repeatCount==0) confirmPressed=rows[currentRow][currentCol]
+                    else if(ev.type==KeyEventType.KeyUp) {
+                        val owned=confirmPressed;confirmPressed=null
+                        if(owned!=null) press(owned)
+                    }
                     return@onPreviewKeyEvent true
                 }
-                val next=KeyboardLayout.move(rows,row,col,delta.first,delta.second)
-                row=next.first; col=next.second; true
-            } else when(ev.key) {
-                Key.DirectionCenter, Key.Enter -> { press(rows[row][col]); true }
-                Key.Backspace -> { press("DELETE"); true }
-                else -> {
+                if(ev.type!=KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                val delta=when(ev.key) {
+                    Key.DirectionLeft -> -1 to 0; Key.DirectionRight -> 1 to 0
+                    Key.DirectionUp -> 0 to -1; Key.DirectionDown -> 0 to 1
+                    else -> null
+                }
+                if(delta!=null) {
+                    confirmPressed=null
+                    if(ev.key==Key.DirectionDown && currentRow==rows.lastIndex && onBottomExit!=null) {
+                        onBottomExit();return@onPreviewKeyEvent true
+                    }
+                    val next=KeyboardLayout.move(rows,currentRow,currentCol,delta.first,delta.second)
+                    row=next.first;col=next.second;true
+                } else if(ev.key==Key.Backspace) {press("DELETE");true}
+                else {
                     val native=ev.nativeKeyEvent
                     if(native.unicodeChar>=32 && !native.isCtrlPressed && !native.isAltPressed) {
-                        onValueChange(value+String(Character.toChars(native.unicodeChar))); true
+                        onValueChange(value+String(Character.toChars(native.unicodeChar)));true
                     } else false
                 }
-            }
-        }.focusable().padding(6.dp), verticalArrangement=Arrangement.spacedBy(3.dp)) {
-        if(!compact) Text(label, color=Color(0xFF261B15), fontWeight=FontWeight.Bold, fontSize=12.sp)
-        if(!compact) Text(if(password) "•".repeat(value.length.coerceAtMost(30)) else value.ifEmpty { "Type here" },
-            color=Ink,fontSize=15.sp,maxLines=1,overflow=TextOverflow.Ellipsis,
-            modifier=Modifier.fillMaxWidth().background(Color(0xFF2C201A),RoundedCornerShape(6.dp)).border(1.dp,Accent,RoundedCornerShape(6.dp)).padding(6.dp))
-        rows.forEachIndexed { ri, keys ->
-            Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(3.dp)) {
-                keys.forEachIndexed { ci,key ->
-                    val selected=row==ri && col==ci
-                    Box(Modifier.weight(if(key=="SPACE") 1.6f else 1f).height(if(compact) 30.dp else 36.dp)
-                        .background(if(selected) Color(0xFFFFD58C) else Color(0xFF2C201A),RoundedCornerShape(4.dp))
-                        .border(if(selected) 3.dp else 1.dp,if(selected) Accent else Color(0xFFE8A45B),RoundedCornerShape(4.dp))
-                        .focusProperties { canFocus=false }
-                        .clickable { confirmPressed=null;row=ri;col=ci;press(key) },contentAlignment=Alignment.Center) {
-                        Text(if(key=="SHIFT") "aA" else key, color=if(selected) Color(0xFF261B15) else Color(0xFFFFEFC4),
-                            fontWeight=FontWeight.Bold,fontSize=if(key.length>3) 12.sp else if(screenWidth>=700.dp) 17.sp else 15.sp,maxLines=1)
+            }.focusable().padding(6.dp),verticalArrangement=Arrangement.spacedBy(3.dp)) {
+            if(!compact) Text(label,color=Color(0xFF261B15),fontWeight=FontWeight.Bold,fontSize=12.sp)
+            if(!compact) Text(if(password) "•".repeat(value.length.coerceAtMost(30)) else value.ifEmpty {"Type here"},
+                color=Ink,fontSize=15.sp,maxLines=1,overflow=TextOverflow.Ellipsis,
+                modifier=Modifier.fillMaxWidth().background(Color(0xFF2C201A),RoundedCornerShape(6.dp)).border(1.dp,Accent,RoundedCornerShape(6.dp)).padding(6.dp))
+            rows.forEachIndexed {ri,keys ->
+                Row(Modifier.fillMaxWidth().bringIntoViewRequester(rowVisibility[ri]),horizontalArrangement=Arrangement.spacedBy(3.dp)) {
+                    keys.forEachIndexed {ci,key ->
+                        val selected=selectedRow==ri && selectedCol==ci
+                        Box(Modifier.weight(if(key=="SPACE") 1.6f else 1f).height((if(compact) 30.dp else 36.dp)*textScale)
+                            .background(if(selected) Color(0xFFFFD58C) else Color(0xFF2C201A),RoundedCornerShape(4.dp))
+                            .border(if(selected) 3.dp else 1.dp,if(selected) Accent else Color(0xFFE8A45B),RoundedCornerShape(4.dp))
+                            .focusProperties {canFocus=false}
+                            .clickable {confirmPressed=null;row=ri;col=ci;press(key)},contentAlignment=Alignment.Center) {
+                            Text(if(key=="SHIFT") "aA" else key,color=if(selected) Color(0xFF261B15) else Color(0xFFFFEFC4),
+                                fontWeight=FontWeight.Bold,fontSize=if(key.length>3) 12.sp else letterSize,
+                                lineHeight=if(key.length>3) 14.sp else if(screenWidth>=700.dp) 20.sp else 18.sp,maxLines=1)
+                        }
                     }
                 }
             }
         }
-    }
     }
 }
 
@@ -5147,7 +5169,7 @@ fun SearchTab(
     val resultsFocus=remember {FocusRequester()}
     val keyboardFocus=remember {FocusRequester()}
     var keyboardOpen by remember {mutableStateOf(false)}
-    var resultsFocusRequest by remember {mutableIntStateOf(0)}
+    var resultsFocusRequested by remember {mutableStateOf(false)}
     // Raw letters update immediately; only the settled query reaches results.
     val typedQuery = query.trim()
     var appliedQuery by remember { mutableStateOf(typedQuery) }
@@ -5209,8 +5231,10 @@ fun SearchTab(
             verticalAlignment = Alignment.CenterVertically
         ) {
             SearchTvKeyboardField(
-                value = query, onValueChange = onQuery,
-                modifier = Modifier.weight(1f), keyboardFocus=keyboardFocus, onEditingChanged={keyboardOpen=it}, onSubmitted={appliedQuery=typedQuery;resultsFocusRequest++}
+                value = query, onValueChange = {resultsFocusRequested=false;onQuery(it)},
+                modifier = Modifier.weight(1f), keyboardFocus=keyboardFocus,
+                onEditingChanged={keyboardOpen=it;if(it) resultsFocusRequested=false},
+                onSubmitted={appliedQuery=typedQuery;resultsFocusRequested=true}
             )
             if (voiceAvailable) {
                 Spacer(Modifier.width(8.dp))
@@ -5287,8 +5311,9 @@ fun SearchTab(
             return
         }
 
-        SearchResultsPane(source,prefs,data,q,activeIndexes,resultsFocusRequest,resultsFocus,
-            keyboardOpen,keyboardFocus,{saveRecent(it)},{searchInfoMovie=it},onPlayLive,onSeries,searchSession)
+        SearchResultsPane(source,prefs,data,q,activeIndexes,resultsFocusRequested,resultsFocus,
+            keyboardOpen,keyboardFocus,{saveRecent(it)},{searchInfoMovie=it},onPlayLive,onSeries,searchSession,
+            onResultsFocusConsumed={resultsFocusRequested=false})
     }
 }
 
@@ -5297,10 +5322,11 @@ fun SearchTab(
 @Composable
 private fun SearchResultsPane(
     source: Source?, prefs: SharedPreferences, data: AppData, q: String,
-    indexes: SearchCatalogIndex?, resultsFocusRequest: Int, resultsFocus: FocusRequester,
+    indexes: SearchCatalogIndex?, resultsFocusRequested: Boolean, resultsFocus: FocusRequester,
     keyboardOpen: Boolean, keyboardFocus: FocusRequester,
     onSaveRecent: (String) -> Unit, onMovieInfo: (Movie) -> Unit,
-    onPlayLive: (List<Playable>, Int) -> Unit, onSeries: (SeriesItem) -> Unit, session: SearchSession
+    onPlayLive: (List<Playable>, Int) -> Unit, onSeries: (SeriesItem) -> Unit, session: SearchSession,
+    onResultsFocusConsumed: () -> Unit
 ) {
     // Catalog results never wait for the guide index to finish.
     val matches by androidx.compose.runtime.produceState<SearchMatches?>(session.matchesFor(data,q,indexes),q,indexes,data) {
@@ -5383,11 +5409,12 @@ private fun SearchResultsPane(
         return
     }
 
-    LaunchedEffect(resultsFocusRequest) {
-        if(resultsFocusRequest>0) {
+    LaunchedEffect(resultsFocusRequested) {
+        if(resultsFocusRequested) {
             androidx.compose.runtime.withFrameNanos { }
             androidx.compose.runtime.withFrameNanos { }
             runCatching {resultsFocus.requestFocus()}
+            onResultsFocusConsumed()
         }
     }
     val listState = remember(data,q,session) {
@@ -6341,13 +6368,14 @@ private fun Chip(label: String, active: Boolean, onClick: () -> Unit) {
     Box(
         modifier = Modifier
             .tvFocus(RoundedCornerShape(999.dp))
-            .background(if (active) Accent else SurfaceCol, RoundedCornerShape(999.dp))
+            .background(if (active) MenuVioletSelected else MenuViolet, RoundedCornerShape(999.dp))
+            .border(if(active) 2.dp else 1.dp, Color.White.copy(alpha=if(active) .95f else .30f), RoundedCornerShape(999.dp))
             .clickable { onClick() }
             .padding(horizontal = 14.dp, vertical = 8.dp)
     ) {
         Text(
             label,
-            color = if (active) Color(0xFF20160A) else Muted,
+            color = Color.White,
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold
         )
@@ -7692,6 +7720,7 @@ private fun MiniGuideNowInfoDialog(
 }
 
 // ZAKO_V445_RESTORED_FULL_CHAIN
+@kotlin.OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 private fun MiniGuide(
     queue: List<Playable>,
@@ -7896,13 +7925,13 @@ private fun MiniGuide(
             ) {
                 Text(
                     current?.name ?: "",
-                    color = Ink, fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                    color = Ink, fontSize = 14.sp, lineHeight = 17.sp, fontWeight = FontWeight.Bold,
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false)
                 )
                 if (recordingThis) {
                     Spacer(Modifier.width(7.dp))
-                    Text("● REC", color = Live, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    Text("● REC", color = Live, fontSize = 10.sp, lineHeight = 13.sp, fontWeight = FontWeight.Bold)
                 }
             }
             Spacer(Modifier.width(14.dp))
@@ -7911,7 +7940,7 @@ private fun MiniGuide(
                     Text(
                         nowShow.title,
                         color = TextGold, // ZAKO_V434_MINI_NOW_YELLOW
-                        fontSize = 13.sp,
+                        fontSize = 13.sp, lineHeight = 16.sp,
                         fontWeight = FontWeight.ExtraBold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -7919,7 +7948,7 @@ private fun MiniGuide(
                     Text(
                         "${fmt.format(Date(nowShow.startMs))}–${fmt.format(Date(nowShow.endMs))}" +
                             (if (nextShow != null) "   •   Next ${fmt.format(Date(nextShow.startMs))}: ${nextShow.title}" else ""),
-                        color = Muted, fontSize = 9.sp, fontWeight = FontWeight.SemiBold,
+                        color = Muted, fontSize = 9.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
                         maxLines = 1, overflow = TextOverflow.Ellipsis
                     )
                 }
@@ -7938,7 +7967,7 @@ private fun MiniGuide(
                     append("  •  ${ProviderStreams.max(prefs)} streams")
                 },
                 color = if (Playback.directLive) Accent else Muted,
-                fontSize = 8.sp,
+                fontSize = 8.sp, lineHeight = 11.sp,
                 modifier = Modifier.padding(start = 8.dp)
             )
         }
@@ -7947,10 +7976,16 @@ private fun MiniGuide(
 
         // One small row is the whole Live-TV control surface. Physical FF/RW
         // works globally, so we do not waste screen space on dead 30-second boxes.
-        Row(
+        val controlColumns = when {
+            LocalConfiguration.current.screenWidthDp < 600 -> 3
+            LocalConfiguration.current.screenWidthDp < 800 -> 5
+            else -> 9
+        }
+        androidx.compose.foundation.layout.FlowRow(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+            maxItemsInEachRow = controlColumns
         ) {
             MiniGuideControl(
                 if (playRequested) "❚❚ PAUSE" else "▶ PLAY",
@@ -8063,7 +8098,7 @@ private fun MiniGuide(
         Box(
             Modifier
                 .fillMaxWidth()
-                .height(48.dp)
+                .height(48.dp * LocalDensity.current.fontScale.coerceAtLeast(1f))
                 .tvFocus(RoundedCornerShape(8.dp))
                 .focusRequester(timelineFocus)
                 .focusProperties {
@@ -8094,10 +8129,10 @@ private fun MiniGuide(
                     Text(
                         if (hasProgramWindow) fmt.format(Date(showStart))
                         else if (visibleDvrStartWall > 0L) fmt.format(Date(visibleDvrStartWall)) else "START",
-                        color = Ink, fontSize = 9.sp
+                        color = Ink, fontSize = 9.sp, lineHeight = 12.sp
                     )
                     Spacer(Modifier.weight(1f))
-                    Text(if (hasProgramWindow) fmt.format(Date(showEnd)) else "LIVE", color = Ink, fontSize = 9.sp)
+                    Text(if (hasProgramWindow) fmt.format(Date(showEnd)) else "LIVE", color = Ink, fontSize = 9.sp, lineHeight = 12.sp)
                 }
                 Canvas(Modifier.fillMaxWidth().height(14.dp)) {
                     val y = size.height / 2f
@@ -8118,7 +8153,7 @@ private fun MiniGuide(
                     }
                     else -> "Live TV • Press Pause to save your place"
                 }
-                Text(status, color = Muted, fontSize = 8.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(status, color = Muted, fontSize = 8.sp, lineHeight = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
 
@@ -8127,13 +8162,13 @@ private fun MiniGuide(
         if (queue.size > 1) {
             Spacer(Modifier.height(4.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Channels", color = Accent, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                Text("Channels", color = Accent, fontSize = 9.sp, lineHeight = 12.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.width(8.dp))
                             }
             Spacer(Modifier.height(2.dp))
             LazyColumn(
                 state = lineupState,
-                modifier = Modifier.fillMaxWidth().height(120.dp),
+                modifier = Modifier.fillMaxWidth().height(120.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)),
                 verticalArrangement = Arrangement.spacedBy(1.dp)
             ) {
                 itemsIndexed(queue, key = { _, ch -> ch.url }) { itemIndex, ch ->
@@ -8149,7 +8184,7 @@ private fun MiniGuide(
                     Row(
                         Modifier
                             .fillMaxWidth()
-                            .height(38.dp)
+                            .height(38.dp * LocalDensity.current.fontScale.coerceAtLeast(1f))
                             .then(if (selectedNow) Modifier.focusRequester(lineupFocus) else Modifier)
                             .onPreviewKeyEvent { ev ->
                                 if (ev.type == KeyEventType.KeyDown && ev.key == Key.DirectionLeft) {
@@ -8169,7 +8204,7 @@ private fun MiniGuide(
                         Text(
                             if (selectedNow) "NOW" else "${itemIndex + 1}",
                             color = if (selectedNow) Accent else Muted,
-                            fontSize = 8.sp,
+                            fontSize = 8.sp, lineHeight = 11.sp,
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier.width(38.dp)
                         )
@@ -8179,7 +8214,7 @@ private fun MiniGuide(
                         Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
                             Text(
                                 ch.name,
-                                color = Ink, fontSize = 12.sp,
+                                color = Ink, fontSize = 12.sp, lineHeight = 15.sp,
                                 fontWeight = if (selectedNow) FontWeight.ExtraBold else FontWeight.SemiBold,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(if (rowProgram != null) 0.42f else 1f)
@@ -8188,7 +8223,7 @@ private fun MiniGuide(
                                 Spacer(Modifier.width(10.dp))
                                 Text(
                                     rowProgram.title,
-                                    color = TextGold, fontSize = 11.sp, fontWeight = FontWeight.Bold, // ZAKO_V432_MINI_YELLOW
+                                    color = TextGold, fontSize = 11.sp, lineHeight = 14.sp, fontWeight = FontWeight.Bold, // ZAKO_V432_MINI_YELLOW
                                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.weight(0.58f)
                                 )
@@ -8197,7 +8232,7 @@ private fun MiniGuide(
                         if (rowProgram != null) {
                             Text(
                                 "${fmt.format(Date(rowProgram.startMs))}–${fmt.format(Date(rowProgram.endMs))}",
-                                color = LimeBubble, fontSize = 10.sp, fontWeight = FontWeight.Bold,
+                                color = LimeBubble, fontSize = 10.sp, lineHeight = 13.sp, fontWeight = FontWeight.Bold,
                                 modifier = Modifier.padding(start = 8.dp)
                             )
                         }
@@ -8209,12 +8244,12 @@ private fun MiniGuide(
         if (showRecent) {
             Spacer(Modifier.height(4.dp))
             if (entries.isEmpty()) {
-                Text("No previous channels yet.", color = Muted, fontSize = 10.sp)
+                Text("No previous channels yet.", color = Muted, fontSize = 10.sp, lineHeight = 13.sp)
             } else {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Previous", color = Accent, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    Text("Previous", color = Accent, fontSize = 10.sp, lineHeight = 13.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.width(8.dp))
-                    Text("OK tunes • Back closes", color = Ink, fontSize = 9.sp)
+                    Text("OK tunes • Back closes", color = Ink, fontSize = 9.sp, lineHeight = 12.sp)
                 }
                 Spacer(Modifier.height(3.dp))
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
@@ -8237,8 +8272,8 @@ private fun MiniGuide(
                             ChannelIcon(ch.name, ch.artwork, 34.dp)
                             Spacer(Modifier.width(7.dp))
                             Column(Modifier.weight(1f)) {
-                                Text(ch.name, color = Ink, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(recentNow ?: "Press OK to watch", color = if (recentNow != null) ProgramCyan else Ink, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(ch.name, color = Ink, fontSize = 10.sp, lineHeight = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(recentNow ?: "Press OK to watch", color = if (recentNow != null) ProgramCyan else Ink, fontSize = 9.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                         }
                     }
@@ -8259,7 +8294,7 @@ private fun MiniGuideControl(
     Text(
         label,
         color = if (enabled) activeColor else Muted.copy(alpha = 0.62f),
-        fontSize = 10.sp,
+        fontSize = 10.sp, lineHeight = 13.sp,
         fontWeight = FontWeight.Bold,
         modifier = modifier
             .tvFocus(RoundedCornerShape(14.dp))

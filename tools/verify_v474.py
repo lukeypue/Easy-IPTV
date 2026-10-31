@@ -14,7 +14,7 @@ class LiveSearchContracts(unittest.TestCase):
     def test_search_bottom_has_a_results_exit(self):
         panel=s[s.index('private fun RyzodKeyboardPanel('):s.index('private fun RyzodKeyboardDialog(')]
         self.assertIn('onBottomExit',panel)
-        self.assertIn('row == rows.lastIndex',panel)
+        self.assertRegex(panel, r'Key\.DirectionDown\s*&&\s*\w+\s*==\s*rows\.lastIndex\s*&&\s*onBottomExit\s*!=\s*null')
     def test_stall_recovery_does_not_depend_on_optional_steady_setting(self):
         governor=s[s.index('private val governorTick'):s.index('private fun startGovernor')]
         self.assertNotIn('if (steadyRecovery && playStateC',governor)
