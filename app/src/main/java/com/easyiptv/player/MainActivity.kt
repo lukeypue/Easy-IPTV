@@ -166,7 +166,13 @@ private val Surface2 = Color(0xFF16263A)
 private val Line = Color(0xFF29445F)
 private val Ink = Color(0xFFF2F3F5)
 private val Muted = Color(0xFFBFEFFF)
-private val Accent = Color(0xFFF5B944)
+private val Accent = Color(0xFFD4A548)
+private val TextGold = Color(0xFFE3BA65)
+private val OnLightGold = Color(0xFF4B2F05)
+private val MenuOrange = Color(0xFFE29145)
+private val MenuOrangeSelected = Color(0xFFF1AE70)
+private val CategorySilver = Color(0xFFC9CDD1)
+private val CategorySilverSelected = Color(0xFFE5E7E9)
 private val Live = Color(0xFFFF3B5C)
 private val ProgramCyan = Color(0xFF58D9FF)
 private val ElectricCyan = Color(0xFF49E8FF)
@@ -263,7 +269,7 @@ private fun tintPlayerControls(root: android.view.View) {
         }
         when (v) {
             is androidx.media3.ui.DefaultTimeBar -> {
-                v.setPlayedColor(0xFFF5B944.toInt())      // watched: gold
+                v.setPlayedColor(0xFFD4A548.toInt())      // watched: gold
                 v.setBufferedColor(0xFF33E1FF.toInt())    // stored ahead: bright cyan
                 v.setUnplayedColor(0x55FFFFFF)            // rest: faint white
                 v.setScrubberColor(pink)                  // the grab handle: pink
@@ -1553,6 +1559,7 @@ private fun HomeRail(
             itemsIndexed(RootItems) { pos, p ->
                 RailItem(
                     p.second, section == p.first,
+                    primaryMenu = true,
                     modifier = (if (p.first == section) Modifier.focusRequester(externalFocus) else Modifier)
                         .onPreviewKeyEvent { ev ->
                             if(ev.type==KeyEventType.KeyDown && ev.key==Key.DirectionRight) { onRoot(p.first); true }
@@ -1587,20 +1594,26 @@ private fun HomeRail(
 }
 
 @Composable
-private fun RailItem(label: String, active: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    // ZAKO_V432_LIME_BUBBLES: lightweight rounded category bubbles, no blur/shaders.
+private fun RailItem(label: String, active: Boolean, modifier: Modifier = Modifier,
+    primaryMenu: Boolean = false, onClick: () -> Unit) {
+    // Solid fills keep navigation orange and categories silver, with readable gold text.
+    val bubbleColor = if (primaryMenu) {
+        if (active) MenuOrangeSelected else MenuOrange
+    } else {
+        if (active) CategorySilverSelected else CategorySilver
+    }
     Row(
         modifier = modifier
             .padding(horizontal = 6.dp, vertical = 3.dp)
             .fillMaxWidth()
             .tvFocus(RoundedCornerShape(24.dp))
             .background(
-                if (active) LimeBubble.copy(alpha = 0.22f) else PanelGlow.copy(alpha = 0.60f),
+                bubbleColor,
                 RoundedCornerShape(24.dp)
             )
             .border(
                 if (active) 2.dp else 1.dp,
-                if (active) LimeBubble else ElectricCyan.copy(alpha = 0.22f),
+                OnLightGold.copy(alpha = if (active) 1f else 0.35f),
                 RoundedCornerShape(24.dp)
             )
             .clickable { onClick() }
@@ -1609,12 +1622,12 @@ private fun RailItem(label: String, active: Boolean, modifier: Modifier = Modifi
     ) {
         Box(
             Modifier.size(if (active) 8.dp else 6.dp)
-                .background(if (active) LimeBubble else ElectricCyan.copy(alpha = 0.65f), CircleShape)
+                .background(OnLightGold.copy(alpha = if (active) 1f else 0.65f), CircleShape)
         )
         Spacer(Modifier.width(9.dp))
         Text(
             label,
-            color = if (active) LimeBubble else Ink,
+            color = OnLightGold,
             fontSize = 12.sp,
             fontWeight = if (active) FontWeight.ExtraBold else FontWeight.SemiBold,
             maxLines = 2,
@@ -1969,7 +1982,7 @@ fun LivePane(
                                 if (current != null) {
                                     Text(
                                         "${fmt.format(Date(current.startMs))}–${fmt.format(Date(current.endMs))}  •  ${current.title}",
-                                        color = Color(0xFFFFE45C), fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                                        color = TextGold, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                                         maxLines = 1, overflow = TextOverflow.Ellipsis
                                     )
                                 }
@@ -2173,8 +2186,8 @@ private fun LiveGridGuide(
                     Row(
                         Modifier.width(142.dp).fillMaxHeight()
                             .then(if(chIndex==returnIndex) Modifier.focusRequester(returnFocus) else Modifier)
-                            .border(if(ch.url==returnUrl) 3.dp else 1.dp,if(ch.url==returnUrl) Accent else Color.White.copy(alpha=.45f),RoundedCornerShape(8.dp))
-                            .background(ChannelOrange, RoundedCornerShape(8.dp))
+                            .border(if(ch.url==returnUrl) 3.dp else 1.dp,if(ch.url==returnUrl) OnLightGold else OnLightGold.copy(alpha=.35f),RoundedCornerShape(8.dp))
+                            .background(ChannelBlue, RoundedCornerShape(8.dp))
                             .focusRequester(channelFocus)
                             .onPreviewKeyEvent { ev ->
                                 if(ev.type!=KeyEventType.KeyDown) false else when(ev.key) {
@@ -2194,7 +2207,7 @@ private fun LiveGridGuide(
                     ) {
                         ChannelIcon(ch.name, ch.icon, 30.dp)
                         Spacer(Modifier.width(5.dp))
-                        Text(ch.name, color = Ink, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Text(ch.name, color = OnLightGold, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     }
                     Row(Modifier.weight(1f).fillMaxHeight()) {
                         cells.forEachIndexed { cellIndex, cell ->
@@ -2234,7 +2247,7 @@ private fun LiveGridGuide(
                                 .padding(horizontal = 6.dp, vertical = 2.dp)) {
                                 if (entry == null) Text("No information", color = Muted, fontSize = 10.sp, maxLines = 1)
                                 else Column {
-                                    Text(entry.title, color = Color(0xFFFFE45C), fontSize = 10.sp, lineHeight = 11.sp,
+                                    Text(entry.title, color = TextGold, fontSize = 10.sp, lineHeight = 11.sp,
                                         fontWeight = if (airing) FontWeight.ExtraBold else FontWeight.SemiBold,
                                         maxLines = 2, overflow = TextOverflow.Ellipsis)
                                     Text("${fmt.format(Date(entry.startMs))}–${fmt.format(Date(entry.endMs))}",
@@ -4986,7 +4999,7 @@ private fun SearchTvKeyboardField(value: String, onValueChange: (String) -> Unit
 }
 
 private val KeyboardOrange = Color(0xFFCE752A)
-private val ChannelOrange = Color(0xFF9C450A)
+private val ChannelBlue = Color(0xFFA6CBE6)
 
 @Composable
 private fun RyzodKeyboardPanel(
@@ -5570,7 +5583,7 @@ private fun EpisodeInfoDialog(
                 )
                 Text(
                     episode.title,
-                    color = Color(0xFFFFE45C),
+                    color = TextGold,
                     fontSize = 20.sp,
                     fontWeight = FontWeight.ExtraBold
                 )
@@ -7643,7 +7656,7 @@ private fun MiniGuideNowInfoDialog(
         title = {
             Text(
                 nowShow.title,
-                color = Color(0xFFFFE45C),
+                color = TextGold,
                 fontSize = 20.sp,
                 fontWeight = FontWeight.ExtraBold
             )
@@ -7897,7 +7910,7 @@ private fun MiniGuide(
                 Column(Modifier.weight(1f)) {
                     Text(
                         nowShow.title,
-                        color = Color(0xFFFFE45C), // ZAKO_V434_MINI_NOW_YELLOW
+                        color = TextGold, // ZAKO_V434_MINI_NOW_YELLOW
                         fontSize = 13.sp,
                         fontWeight = FontWeight.ExtraBold,
                         maxLines = 1,
@@ -7984,7 +7997,7 @@ private fun MiniGuide(
             MiniGuideControl(
                 "ⓘ INFO",
                 enabled = nowShow != null,
-                activeColor = Color(0xFFFFE45C),
+                activeColor = TextGold,
                 modifier = Modifier.weight(0.82f).focusRequester(infoFocus).focusProperties {
                     left = sizeFocus; right = sbsFocus; down = timelineFocus
                 }
@@ -8175,7 +8188,7 @@ private fun MiniGuide(
                                 Spacer(Modifier.width(10.dp))
                                 Text(
                                     rowProgram.title,
-                                    color = Color(0xFFFFE45C), fontSize = 11.sp, fontWeight = FontWeight.Bold, // ZAKO_V432_MINI_YELLOW
+                                    color = TextGold, fontSize = 11.sp, fontWeight = FontWeight.Bold, // ZAKO_V432_MINI_YELLOW
                                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.weight(0.58f)
                                 )
