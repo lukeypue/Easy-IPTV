@@ -24,15 +24,17 @@ class SearchTypingUiTest {
             LiveChannel("1","Alpha TV",null,null,"http://127.0.0.1:9/alpha.ts"),
             LiveChannel("2","Beta TV",null,null,"http://127.0.0.1:9/beta.ts")),
             emptyList(),emptyList(),emptyList(),emptyList())
-        ui.setContent {SearchTab(null,prefs,data,query.value,{query.value=it},{},{_,_->},{})}
-        ui.waitUntil(10_000) {
-            // The index is built on Dispatchers.Default, then posts its state
-            // back to Android. Drain that queue and explicitly produce the next
-            // Compose frame: a background emission can arrive after idle checks.
-            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
-            ui.mainClock.advanceTimeByFrame()
-            ui.onAllNodesWithText("Alpha TV").fetchSemanticsNodes().isNotEmpty()
+        // This probe starts from already displayed results and tests the pending
+        // debounce window. Cold asynchronous startup has separate UI coverage.
+        val index=SearchCatalogIndex(data) {}
+        val session=SearchSession().apply {
+            rememberIndex(data,index)
+            val matcher=TitleQuery("alpha")
+            rememberMatches(data,SearchMatches("alpha",data,index.live.find(matcher),
+                index.movies.find(matcher),index.series.find(matcher),emptyList()))
         }
+        ui.setContent {SearchTab(null,prefs,data,query.value,{query.value=it},{},{_,_->},{},session=session)}
+        ui.onNodeWithText("Alpha TV").assertExists()
         ui.onNodeWithText("Search").performClick()
         ui.mainClock.autoAdvance=false
         try {
@@ -43,9 +45,13 @@ class SearchTypingUiTest {
             ui.onNodeWithText("DONE").performClick()
             ui.mainClock.advanceTimeByFrame()
             ui.waitUntil(10_000) {
-                ui.mainClock.advanceTimeByFrame()
-                ui.onAllNodesWithText("Beta TV").fetchSemanticsNodes().isNotEmpty()
+                // Let real background matching finish without spending virtual
+                // debounce time on every wall-clock poll of a busy CI runner.
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                ui.runOnIdle {session.matchesFor(data,"beta",index)!=null}
             }
+            repeat(2) {ui.mainClock.advanceTimeByFrame()}
+            ui.onNodeWithText("Beta TV").assertExists()
             assertTrue("The probe must return to typing before the old debounce can finish",
                 ui.mainClock.currentTime-typedAt<190)
             ui.onNodeWithText("Search").performClick()

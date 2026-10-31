@@ -41,6 +41,18 @@ def output(command):
     return subprocess.check_output(command, text=True)
 
 
+def check_apk_certificates(certs, path):
+    # Build Tools 35 uses "Signer #1"; 37 uses scheme names like "V2 Signer:".
+    # A single signer may be printed once per scheme. Check every APK cert,
+    # independently of the label, and require the verifier's signer count to be 1.
+    counts = re.findall(r'^Number of signers: ([0-9]+)[ \t]*$', certs, re.M)
+    marker = ' certificate SHA-256 digest: '
+    digests = [line.split(marker, 1)[1].strip().upper() for line in certs.splitlines()
+               if marker in line and not line.startswith('Source Stamp Signer')]
+    if counts != ['1'] or not digests or any(digest != CERTIFICATE for digest in digests):
+        raise ValueError(f'APK permanent certificate mismatch: {path}')
+
+
 def verify_apk(path):
     path = str(path)
     badging = output([android_tool('aapt'), 'dump', 'badging', path])
@@ -52,10 +64,8 @@ def verify_apk(path):
         raise ValueError(f'APK target SDK mismatch: {path}')
     signer = android_tool('apksigner')
     subprocess.run([signer, 'verify', '--verbose', path], check=True)
-    certs = output([signer, 'verify', '--print-certs', path])
-    digests = re.findall(r'^Signer #\d+ certificate SHA-256 digest: (\w+)\s*$', certs, re.M)
-    if [digest.upper() for digest in digests] != [CERTIFICATE]:
-        raise ValueError(f'APK permanent certificate mismatch: {path}')
+    certs = output([signer, 'verify', '--verbose', '--print-certs', path])
+    check_apk_certificates(certs, path)
     subprocess.run([android_tool('zipalign'), '-c', '-P', '16', '4', path], check=True)
     subprocess.run(['python3', str(ROOT / 'tools/verify_native_alignment.py'), path], check=True)
     if Path(path).name == 'RYZOD-v4.82-Amazon.apk':

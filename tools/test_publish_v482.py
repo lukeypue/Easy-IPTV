@@ -204,7 +204,7 @@ class PackageVerificationTest(unittest.TestCase):
     def setUp(self):
         self.badging = ("package: name='com.easyiptv.player' versionCode='106' versionName='4.82'\n"
                         "targetSdkVersion:'36'\n")
-        self.certs = f'Signer #1 certificate SHA-256 digest: {publisher.CERTIFICATE.lower()}\n'
+        self.certs = f'Number of signers: 1\nSigner #1 certificate SHA-256 digest: {publisher.CERTIFICATE.lower()}\n'
         self.permissions = ''
         self.output_patch = patch.object(publisher, 'output', side_effect=self.output)
         self.output_patch.start()
@@ -250,6 +250,51 @@ class PackageVerificationTest(unittest.TestCase):
                 self.certs = certs
                 with self.assertRaisesRegex(ValueError, 'certificate'):
                     publisher.verify_apk('RYZOD-v4.82.apk')
+
+    def test_sdk37_actual_public481_certificate_output_is_accepted(self):
+        # Actual Build Tools 37 output for the immutable public 4.81 APK.
+        # Keep the fixture independent of the configured pin to catch pin typos.
+        self.certs = (
+            'Number of signers: 1\n'
+            'V2 Signer: certificate DN: CN=Zako Release, OU=Zako, O=Zako, L=Denver, ST=Colorado, C=US\n'
+            'V2 Signer: certificate SHA-256 digest: '
+            '8ef5fe2873f7a9d40302e722822c05b37b471ab08df23785fa0a1aeb19a2c165\n'
+            'V2 Signer: public key SHA-256 digest: '
+            '733e248a226f0e24140a52a881bc9770bc5cfc5c86cd3fd123323b68572d00a7\n')
+        publisher.verify_apk('RYZOD-v4.82.apk')
+
+    def test_repeated_pinned_cert_across_signature_schemes_is_accepted(self):
+        self.certs = ('Number of signers: 1\n'
+                      f'V1 Signer: certificate SHA-256 digest: {publisher.CERTIFICATE}\n'
+                      f'V2 Signer: certificate SHA-256 digest: {publisher.CERTIFICATE}\n'
+                      f'V3.0 Signer (minSdkVersion=28, maxSdkVersion=2147483647): certificate SHA-256 digest: {publisher.CERTIFICATE}\n')
+        publisher.verify_apk('RYZOD-v4.82.apk')
+
+    def test_any_different_or_malformed_scheme_certificate_is_rejected(self):
+        original = self.certs
+        for digest in ('0' * 64, publisher.CERTIFICATE[:-1], 'not-a-digest'):
+            with self.subTest(digest=digest):
+                self.certs = original + f'V2 Signer: certificate SHA-256 digest: {digest}\n'
+                with self.assertRaisesRegex(ValueError, 'certificate'):
+                    publisher.verify_apk('RYZOD-v4.82.apk')
+
+    def test_exactly_one_reported_signer_is_required_even_for_same_certificate(self):
+        original = self.certs
+        for count in ('', 'Number of signers: 0\n', 'Number of signers: 2\n',
+                      'Number of signers: 1\nNumber of signers: 1\n'):
+            with self.subTest(count=count):
+                self.certs = original.replace('Number of signers: 1\n', count)
+                with self.assertRaisesRegex(ValueError, 'certificate'):
+                    publisher.verify_apk('RYZOD-v4.82.apk')
+
+    def test_source_stamp_cannot_replace_or_change_apk_certificate_identity(self):
+        original = self.certs
+        stamp = f'Source Stamp Signer: certificate SHA-256 digest: {publisher.CERTIFICATE}\n'
+        self.certs = 'Number of signers: 1\n' + stamp
+        with self.assertRaisesRegex(ValueError, 'certificate'):
+            publisher.verify_apk('RYZOD-v4.82.apk')
+        self.certs = original + stamp.replace(publisher.CERTIFICATE, '0' * 64)
+        publisher.verify_apk('RYZOD-v4.82.apk')
 
     def test_signature_zipalign_and_native_tool_failures_propagate(self):
         for index in range(3):
