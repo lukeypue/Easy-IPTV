@@ -9,6 +9,7 @@
 // RYZOD_V455_VERIFIED_FULL
 package com.easyiptv.player
 
+import androidx.lifecycle.repeatOnLifecycle
 import android.content.Context
 import android.content.SharedPreferences
 import android.content.res.Configuration
@@ -36,6 +37,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -129,6 +131,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.nativeKeyEvent
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -570,7 +573,8 @@ fun App() {
     var liveCat by remember(activeIdx) { mutableStateOf("all") }
     var movieCat by remember(activeIdx) { mutableStateOf("all") }
     var seriesCat by remember(activeIdx) { mutableStateOf("all") }
-    var searchQuery by remember { mutableStateOf("") }
+    var searchQuery by androidx.compose.runtime.saveable.rememberSaveable(activeIdx, playlists) { mutableStateOf("") }
+    val searchSession = remember(activeIdx, playlists) { SearchSession() }
     // Heavy VOD/series JSON never competes with live playback at startup.
     // Fetch it once per session only when the viewer actually enters Movies,
     // Series, or Search. Cached catalog data can still appear immediately.
@@ -728,7 +732,7 @@ fun App() {
         startupSettled = source == null
         data = null
         loadError = null
-        EpgStore.clear()
+        EpgStore.restore(context, source?.xmltvUrl())
         if (source != null) {
             var cached: AppData? = null
             // 1) Open INSTANTLY with the saved copy from last time (if we have one).
@@ -774,19 +778,18 @@ fun App() {
         }
     }
 
-    // XMLTV can be huge. Never download/parse the full guide behind full-screen
-    // playback. PlayerScreen uses the provider's tiny now/next request instead.
-    // Load XMLTV only when the viewer is actually browsing Live/Search, and
-    // Simple Mode skips it entirely to protect troublesome channels.
-    LaunchedEffect(data, source, nav, railSection) {
+    // Keep XMLTV fresh only while Live browsing is resumed. Leaving Live, starting
+    // playback, changing provider, or backgrounding cancels the timer and HTTP work.
+    // Search may be loading the large catalog, so it does not start XMLTV parsing.
+    val epgLifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    LaunchedEffect(data != null, source, nav, railSection, epgLifecycleOwner) {
         val s = source ?: return@LaunchedEffect
-        if (data == null || nav is Nav.Play) return@LaunchedEffect
-        // Do not start XMLTV from Search: Search may already be lazily loading
-        // the large Movies/Series catalog. Two large parses at once is exactly
-        // the kind of CPU/GC competition we are removing for Fire TV.
-        if (railSection != "live") return@LaunchedEffect
-        kotlinx.coroutines.delay(600)
-        EpgStore.load(s.xmltvUrl())
+        if (data == null || nav is Nav.Play || railSection != "live") return@LaunchedEffect
+        epgLifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.RESUMED) {
+            // Re-entered on every resume: check freshness before waiting for expiry.
+            kotlinx.coroutines.delay(600)
+            EpgStore.refreshWhileBrowsing(s.xmltvUrl())
+        }
     }
 
     // True lazy loading: Xtream movie/series catalogs are often huge. They load
@@ -919,15 +922,13 @@ fun App() {
             onRoot = { id ->
                 railSection = id
                 railDepth = if (id == "live" || id == "movies" || id == "series") 1 else 0
-                // Entering Search starts with an empty box (recent-search list
-                // below stays) — no need to clear last time's text by hand.
-                if (id == "search") searchQuery = ""
+                // Keep the last query and results when returning from another section.
             },
             onBackToRoot = { railDepth = 0 },
             liveCat = liveCat, onLiveCat = { liveCat = it },
             movieCat = movieCat, onMovieCat = { movieCat = it },
             seriesCat = seriesCat, onSeriesCat = { seriesCat = it },
-            searchQuery = searchQuery, onSearchQuery = { searchQuery = it },
+            searchQuery = searchQuery, onSearchQuery = { searchQuery = it }, searchSession = searchSession,
             playlists = playlists,
             onSelectPlaylist = { i ->
                 activeIdx = i
@@ -1170,7 +1171,8 @@ fun HomeScreen(
     onRetry: () -> Unit,
     onPlay: (Playable) -> Unit,
     onPlayLive: (List<Playable>, Int) -> Unit,
-    onSeries: (SeriesItem) -> Unit
+    onSeries: (SeriesItem) -> Unit,
+    searchSession: SearchSession? = null
 ) {
     val guideRefreshScope = rememberCoroutineScope()
     // The guide, provider categories and app menu are three distinct levels.
@@ -1462,7 +1464,7 @@ fun HomeScreen(
                         depth == 1 && section == "series" -> SeriesPane(source, safeData, seriesCat, onSeries, onLeftToRail = { menuLevel = 1; railReturnRequest++ }, onRefresh=onRefreshSeries, refreshing=catalogLoading, refreshWarning=catalogError, requestInitialFocus=menuLevel == 0, entryRequest=contentRequest)
                         section == "search" -> SearchTab(
                             source, prefs, safeData, searchQuery, onSearchQuery, onPlay, onPlayLive, onSeries,
-                            onDemandWarning = if (!catalogLoading) catalogError else null
+                            onDemandWarning = if (!catalogLoading) catalogError else null, session = searchSession
                         )
                         section == "downloads" -> DownloadsPane(prefs, onPlay, requestInitialFocus = menuLevel == 0, onLeftToRail = { menuLevel = 2; railReturnRequest++ })
                         section == "recordings" -> RecordingsPane(prefs, onPlay, requestInitialFocus = menuLevel == 0, onLeftToRail = { menuLevel = 2; railReturnRequest++ })
@@ -4658,6 +4660,24 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
             }
         }
 
+        Spacer(Modifier.height(20.dp))
+        Text("Smooth", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(if (smoothLive) "On" else "Off", color = if (smoothLive) NeonGreen else Muted, modifier = Modifier.weight(1f))
+            androidx.compose.material3.Switch(
+                checked = smoothLive,
+                onCheckedChange = { enabled ->
+                    smoothLive = enabled
+                    prefs.edit().putBoolean("live_smooth", enabled).apply()
+                    onModeChanged()
+                },
+                modifier = Modifier.testTag("smooth-switch").tvFocus(RoundedCornerShape(18.dp)),
+                colors = androidx.compose.material3.SwitchDefaults.colors(checkedThumbColor = Ink, checkedTrackColor = Accent)
+            )
+        }
+        Text("A lighter live player with no added startup or recovery wait, mini guide or buffering message. Try Smooth when larger buffers keep stopping to refill. A 20-second buffer helps with brief interruptions only if the stream can refill it fast enough. Neither mode fixes a slow connection or an overloaded provider. Your buffer settings below are saved for when Smooth is off.",
+            fontSize = 12.sp, color = Muted, modifier = Modifier.padding(top = 4.dp, bottom = 16.dp))
+
         Text("Stream buffer", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
         Text(
@@ -4666,32 +4686,18 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         )
         Spacer(Modifier.height(10.dp))
         fun setBuffer(sec: Int) {
-            if (bufferSec == sec && !smoothLive) return
-            smoothLive = false
+            if (bufferSec == sec) return
             bufferSec = sec
-            prefs.edit().putBoolean("live_smooth", false).putInt("buffer_sec", sec).apply()
+            prefs.edit().putInt("buffer_sec", sec).apply()
             onModeChanged()
         }
         androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Chip("Smooth (0s)", smoothLive) {
-                if (!smoothLive) {
-                    smoothLive = true
-                    bufferSec = 0
-                    lockSec = 0
-                    steadyRecovery = false
-                    prefs.edit().putBoolean("live_smooth", true).putInt("buffer_sec", 0)
-                        .putInt("live_start_ms", 0).putBoolean("live_steady_recovery", false).apply()
-                    onModeChanged()
-                }
-            }
-            Chip("Real time (0s)", bufferSec == 0 && !smoothLive) { setBuffer(0) }
+            Chip("Real time (0s)", bufferSec == 0) { setBuffer(0) }
             Chip("Small (10s)", bufferSec == 10) { setBuffer(10) }
             Chip("20s refill", bufferSec == 20) { setBuffer(20) }
             Chip("Normal (30s)", bufferSec == 30) { setBuffer(30) }
             Chip("Big (60s)", bufferSec == 60) { setBuffer(60) }
         }
-        Text("Smooth plays directly with no added wait, mini guide or buffering message. OK or Left returns to the full guide. Pause history starts only when you press Pause.",
-            fontSize = 12.sp, color = Muted, modifier = Modifier.padding(top = 4.dp))
         Text("Changing buffer or recovery settings stops the preview and applies to the next channel you open.",
             fontSize = 10.sp, color = Muted, modifier = Modifier.padding(top = 4.dp))
 
@@ -4704,10 +4710,9 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         )
         Spacer(Modifier.height(10.dp))
         fun setLock(sec: Int) {
-            if (lockSec == sec && !smoothLive) return
-            smoothLive = false
+            if (lockSec == sec) return
             lockSec = sec
-            prefs.edit().putBoolean("live_smooth", false).putInt("live_start_ms", sec * 1000).apply()
+            prefs.edit().putInt("live_start_ms", sec * 1000).apply()
             onModeChanged()
         }
         androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -4732,26 +4737,23 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         )
         Spacer(Modifier.height(8.dp))
         androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Chip("Natural (recommended)", !steadyRecovery && !smoothLive) {
-                if (!steadyRecovery && !smoothLive) return@Chip
-                smoothLive = false
+            Chip("Natural (recommended)", !steadyRecovery) {
+                if (!steadyRecovery) return@Chip
                 steadyRecovery = false
-                prefs.edit().putBoolean("live_smooth", false).putBoolean("live_steady_recovery", false).apply()
+                prefs.edit().putBoolean("live_steady_recovery", false).apply()
                 onModeChanged()
             }
             Chip("Steady weak-channel", steadyRecovery) {
                 if (steadyRecovery) return@Chip
-                smoothLive = false
                 steadyRecovery = true
-                prefs.edit().putBoolean("live_smooth", false).putBoolean("live_steady_recovery", true).apply()
+                prefs.edit().putBoolean("live_steady_recovery", true).apply()
                 onModeChanged()
             }
         }
 
-        val effectiveBuffer = remember(bufferSec, lockSec, steadyRecovery, smoothLive) { StreamBufferPolicy.from(prefs) }
-        Text(
-            if (smoothLive) "Smooth: 0s added startup and recovery wait. Mini guide and buffering messages are off."
-            else if (bufferSec == 0) "Real time: no added startup or recovery wait. Other cushion choices are inactive."
+        val effectiveBuffer = remember(bufferSec, lockSec, steadyRecovery) { StreamBufferPolicy.buffered(prefs) }
+        if (!smoothLive) Text(
+            if (bufferSec == 0) "Real time: no added startup or recovery wait. Other cushion choices are inactive."
             else "Effective live targets: start ${effectiveBuffer.startMs / 1000}s · recovery ${effectiveBuffer.rebufferMs / 1000}s · refill ${effectiveBuffer.reserveMs / 1000}s",
             fontSize = 12.sp, color = NeonGreen, modifier = Modifier.padding(top = 8.dp)
         )
@@ -4983,7 +4985,7 @@ private fun SearchTvKeyboardField(value: String, onValueChange: (String) -> Unit
         placeholder = "SEARCH movies, shows, actors, directors & live TV", searchStyle = true, keyboardFocus=keyboardFocus, onEditingChanged=onEditingChanged, onSubmitted=onSubmitted)
 }
 
-private val KeyboardOrange = Color(0xFFD66B14)
+private val KeyboardOrange = Color(0xFFCE752A)
 private val ChannelOrange = Color(0xFF9C450A)
 
 @Composable
@@ -4998,7 +5000,7 @@ private fun RyzodKeyboardPanel(
     var col by remember { mutableIntStateOf(0) }
     val rows = remember(page, upper) { KeyboardLayout.rows(page, upper) }
     val keyFocus = externalFocus ?: remember { FocusRequester() }
-    var confirmPressed by remember {mutableStateOf(false)}
+    var confirmPressed by remember {mutableStateOf<String?>(null)}
     fun press(key: String) {
         when (key) {
             "abc", "#$%", "áçé" -> {
@@ -5014,16 +5016,21 @@ private fun RyzodKeyboardPanel(
     }
     LaunchedEffect(Unit) { androidx.compose.runtime.withFrameNanos { }; keyFocus.requestFocus() }
     BackHandler(onBack=onClose)
-    Column(Modifier.fillMaxWidth().widthIn(max=620.dp)
-        .background(KeyboardOrange.copy(alpha=.82f), RoundedCornerShape(12.dp))
+    val screenWidth = LocalConfiguration.current.screenWidthDp.dp
+    BoxWithConstraints(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+    val keyboardWidth = if (screenWidth >= 700.dp) minOf(maxWidth, screenWidth * .60f) else maxWidth
+    Column(Modifier.width(keyboardWidth).testTag("ryzod-keyboard")
+        .background(KeyboardOrange.copy(alpha=.96f), RoundedCornerShape(12.dp))
         .border(1.dp, Color(0xFFFFBA65), RoundedCornerShape(12.dp))
+        .onFocusChanged { if (!it.hasFocus) confirmPressed = null }
         .focusRequester(keyFocus)
         .onPreviewKeyEvent { ev ->
             if(ev.key==Key.DirectionCenter || ev.key==Key.Enter) {
-                if(ev.type==KeyEventType.KeyDown) confirmPressed=true
-                else if(ev.type==KeyEventType.KeyUp && confirmPressed) {
-                    confirmPressed=false
-                    press(rows[row][col])
+                if(ev.type==KeyEventType.KeyDown && ev.nativeKeyEvent.repeatCount==0) confirmPressed=rows[row][col]
+                else if(ev.type==KeyEventType.KeyUp) {
+                    val owned = confirmPressed
+                    confirmPressed = null
+                    if (owned != null) press(owned)
                 }
                 return@onPreviewKeyEvent true
             }
@@ -5034,6 +5041,7 @@ private fun RyzodKeyboardPanel(
                 else -> null
             }
             if (delta != null) {
+                confirmPressed = null
                 if (ev.key == Key.DirectionDown && row == rows.lastIndex && onBottomExit != null) {
                     onBottomExit()
                     return@onPreviewKeyEvent true
@@ -5051,25 +5059,26 @@ private fun RyzodKeyboardPanel(
                 }
             }
         }.focusable().padding(6.dp), verticalArrangement=Arrangement.spacedBy(3.dp)) {
-        if(!compact) Text(label, color=Ink, fontWeight=FontWeight.Bold, fontSize=12.sp)
+        if(!compact) Text(label, color=Color(0xFF261B15), fontWeight=FontWeight.Bold, fontSize=12.sp)
         if(!compact) Text(if(password) "•".repeat(value.length.coerceAtMost(30)) else value.ifEmpty { "Type here" },
             color=Ink,fontSize=15.sp,maxLines=1,overflow=TextOverflow.Ellipsis,
-            modifier=Modifier.fillMaxWidth().border(1.dp,Accent,RoundedCornerShape(6.dp)).padding(6.dp))
+            modifier=Modifier.fillMaxWidth().background(Color(0xFF2C201A),RoundedCornerShape(6.dp)).border(1.dp,Accent,RoundedCornerShape(6.dp)).padding(6.dp))
         rows.forEachIndexed { ri, keys ->
             Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(3.dp)) {
                 keys.forEachIndexed { ci,key ->
                     val selected=row==ri && col==ci
-                    Box(Modifier.weight(if(key=="SPACE") 1.6f else 1f).height(if(compact) 25.dp else 32.dp)
-                        .background(if(selected) Color.White else Color(0x66371B08),RoundedCornerShape(4.dp))
-                        .border(if(selected) 2.dp else 1.dp,if(selected) Accent else Color.White.copy(alpha=.25f),RoundedCornerShape(4.dp))
+                    Box(Modifier.weight(if(key=="SPACE") 1.6f else 1f).height(if(compact) 30.dp else 36.dp)
+                        .background(if(selected) Color(0xFFFFD58C) else Color(0xFF2C201A),RoundedCornerShape(4.dp))
+                        .border(if(selected) 3.dp else 1.dp,if(selected) Accent else Color(0xFFE8A45B),RoundedCornerShape(4.dp))
                         .focusProperties { canFocus=false }
-                        .clickable { row=ri;col=ci;press(key) },contentAlignment=Alignment.Center) {
-                        Text(if(key=="SHIFT") "aA" else key, color=if(selected) Color(0xFF331600) else Color.White,
-                            fontWeight=FontWeight.Bold,fontSize=if(key.length>3) 10.sp else 14.sp,maxLines=1)
+                        .clickable { confirmPressed=null;row=ri;col=ci;press(key) },contentAlignment=Alignment.Center) {
+                        Text(if(key=="SHIFT") "aA" else key, color=if(selected) Color(0xFF261B15) else Color(0xFFFFEFC4),
+                            fontWeight=FontWeight.Bold,fontSize=if(key.length>3) 12.sp else if(screenWidth>=700.dp) 17.sp else 15.sp,maxLines=1)
                     }
                 }
             }
         }
+    }
     }
 }
 
@@ -5081,7 +5090,7 @@ private fun RyzodKeyboardDialog(
     androidx.compose.ui.window.Dialog(onDismissRequest=onClose,
         properties=androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth=false)) {
         Box(Modifier.fillMaxSize().padding(10.dp),contentAlignment=Alignment.TopCenter) {
-            Column(Modifier.widthIn(max=620.dp).fillMaxWidth().verticalScroll(rememberScrollState())) {
+            Column(Modifier.widthIn(max=900.dp).fillMaxWidth().verticalScroll(rememberScrollState())) {
                 RyzodKeyboardPanel(value,onValueChange,label,password,onPrevious=onPrevious,onNext=onNext,onClose=onClose)
             }
         }
@@ -5089,7 +5098,7 @@ private fun RyzodKeyboardDialog(
 }
 
 
-private data class SearchMatches(
+internal data class SearchMatches(
     val query: String, val indexIdentity: Any,
     val live: List<LiveChannel>, val movies: List<Movie>, val series: List<SeriesItem>,
     val guide: List<EpgStore.GuideHit>
@@ -5109,8 +5118,10 @@ fun SearchTab(
     onPlay: (Playable) -> Unit,
     onPlayLive: (List<Playable>, Int) -> Unit,
     onSeries: (SeriesItem) -> Unit,
-    onDemandWarning: String? = null
+    onDemandWarning: String? = null,
+    session: SearchSession? = null
 ) {
+    val searchSession = session ?: remember { SearchSession() }
     // ZAKO_V440_SEARCH_MOVIE_DETAILS: Search movies use the same details dialog as Movies.
     var searchInfoMovie by remember { mutableStateOf<Movie?>(null) }
     searchInfoMovie?.let { movie ->
@@ -5131,12 +5142,18 @@ fun SearchTab(
         if (typedQuery.isNotEmpty()) kotlinx.coroutines.delay(250)
         appliedQuery = typedQuery
     }
-    val indexes by androidx.compose.runtime.produceState<SearchCatalogIndex?>(null,data) {
-        value=kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
-            val task=kotlinx.coroutines.currentCoroutineContext()
-            SearchCatalogIndex(data) { task.ensureActive() }
+    val indexes by androidx.compose.runtime.produceState<SearchCatalogIndex?>(searchSession.indexFor(data),data) {
+        value = searchSession.indexFor(data)
+        if (value == null) {
+            val built = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                val task=kotlinx.coroutines.currentCoroutineContext()
+                SearchCatalogIndex(data) { task.ensureActive() }
+            }
+            searchSession.rememberIndex(data, built)
+            value = built
         }
     }
+    val activeIndexes = indexes?.takeIf { searchSession.indexFor(data) === it }
 
     fun saveRecent(q: String) {
         addRecent(prefs, q)
@@ -5257,8 +5274,8 @@ fun SearchTab(
             return
         }
 
-        SearchResultsPane(source,prefs,data,q,indexes,resultsFocusRequest,resultsFocus,
-            keyboardOpen,keyboardFocus,{saveRecent(it)},{searchInfoMovie=it},onPlayLive,onSeries)
+        SearchResultsPane(source,prefs,data,q,activeIndexes,resultsFocusRequest,resultsFocus,
+            keyboardOpen,keyboardFocus,{saveRecent(it)},{searchInfoMovie=it},onPlayLive,onSeries,searchSession)
     }
 }
 
@@ -5270,36 +5287,50 @@ private fun SearchResultsPane(
     indexes: SearchCatalogIndex?, resultsFocusRequest: Int, resultsFocus: FocusRequester,
     keyboardOpen: Boolean, keyboardFocus: FocusRequester,
     onSaveRecent: (String) -> Unit, onMovieInfo: (Movie) -> Unit,
-    onPlayLive: (List<Playable>, Int) -> Unit, onSeries: (SeriesItem) -> Unit
+    onPlayLive: (List<Playable>, Int) -> Unit, onSeries: (SeriesItem) -> Unit, session: SearchSession
 ) {
     // Catalog results never wait for the guide index to finish.
-    val matches by androidx.compose.runtime.produceState<SearchMatches?>(null,q,indexes) {
+    val matches by androidx.compose.runtime.produceState<SearchMatches?>(session.matchesFor(data,q,indexes),q,indexes,data) {
+        val retained = session.matchesFor(data,q,indexes)
+        if (retained != null) { value = retained; return@produceState }
         val index=indexes ?: return@produceState
-        value=kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+        val built = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
             val task=kotlinx.coroutines.currentCoroutineContext()
             val check={ task.ensureActive() }
             val matcher=TitleQuery(q)
-            SearchMatches(q,index,index.live.find(matcher,checkActive=check),
+            SearchMatches(q,data,index.live.find(matcher,checkActive=check),
                 index.movies.find(matcher,checkActive=check),index.series.find(matcher,checkActive=check),emptyList())
         }
+        session.rememberMatches(data,built)
+        value = built
     }
     val revision=EpgStore.revision.intValue
-    val guideIndex by androidx.compose.runtime.produceState<SearchIndex<EpgStore.GuideHit>?>(null,revision) {
-        value=kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
-            val task=kotlinx.coroutines.currentCoroutineContext()
-            SearchIndex(EpgStore.searchEntries(),{it.entry.title},checkActive={task.ensureActive()})
+    val guideIndex by androidx.compose.runtime.produceState<SearchIndex<EpgStore.GuideHit>?>(session.guideIndexFor(revision),revision) {
+        value = session.guideIndexFor(revision)
+        if (value == null) {
+            val built = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                val task=kotlinx.coroutines.currentCoroutineContext()
+                SearchIndex(EpgStore.searchEntries(),{it.entry.title},checkActive={task.ensureActive()})
+            }
+            session.rememberGuideIndex(revision,built)
+            value = built
         }
     }
-    val guideMatches by androidx.compose.runtime.produceState<Triple<String,SearchIndex<EpgStore.GuideHit>,List<EpgStore.GuideHit>>?>(null,q,guideIndex) {
-        val index=guideIndex ?: return@produceState
+    val activeGuideIndex = guideIndex?.takeIf { session.guideIndexFor(revision) === it }
+    val guideMatches by androidx.compose.runtime.produceState<Triple<String,Int,List<EpgStore.GuideHit>>?>(session.guideMatchesFor(q,revision),q,activeGuideIndex,revision) {
+        val retained = session.guideMatchesFor(q,revision)
+        if (retained != null) { value = retained; return@produceState }
+        val index=activeGuideIndex ?: return@produceState
         kotlinx.coroutines.delay(180)
-        value=kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+        val built=kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
             val task=kotlinx.coroutines.currentCoroutineContext()
             val now=System.currentTimeMillis()
-            Triple(q,index,index.find(TitleQuery(q),30,{task.ensureActive()},{it.entry.endMs>now}))
+            Triple(q,revision,index.find(TitleQuery(q),30,{task.ensureActive()},{it.entry.endMs>now}))
         }
+        session.guideMatches = built
+        value = built
     }
-    val currentMatches=matches?.takeIf { it.query==q && it.indexIdentity===indexes }
+    val currentMatches=matches?.takeIf { it.query==q && it.indexIdentity===data }
     if(currentMatches==null) {
         Text("Searching…",color=Muted,modifier=Modifier.padding(16.dp))
         return
@@ -5307,14 +5338,14 @@ private fun SearchResultsPane(
     val liveHits=currentMatches.live
     val movieHits=currentMatches.movies
     val seriesHits=currentMatches.series
-    val guideHits=guideMatches?.takeIf { it.first==q && it.second===guideIndex }?.third.orEmpty()
+    val guideHits=guideMatches?.takeIf { it.first==q && it.second==revision }?.third.orEmpty().filter { it.entry.endMs > System.currentTimeMillis() }
 
 
     // Match guide channels back to playable channels (by guide id, then by name).
     val context = LocalContext.current
     // Prepared once off the UI thread, retained across query changes.
-    val byEpgId = indexes?.byEpgId.orEmpty()
-    val byNorm = indexes?.byNorm.orEmpty()
+    val byEpgId = indexes?.byEpgId ?: session.byEpgIdFor(data)
+    val byNorm = indexes?.byNorm ?: session.byNormFor(data)
     val guideFmt = remember { SimpleDateFormat("EEE h:mm a", Locale.getDefault()) }
 
     // Search used to launch a live hit as a one-item queue. That made the
@@ -5346,8 +5377,23 @@ private fun SearchResultsPane(
             runCatching {resultsFocus.requestFocus()}
         }
     }
+    val listState = remember(data,q,session) {
+        androidx.compose.foundation.lazy.LazyListState(
+            if(session.scrollQuery==q) session.scrollIndex else 0,
+            if(session.scrollQuery==q) session.scrollOffset else 0)
+    }
+    DisposableEffect(listState,data,q) {
+        onDispose {
+            if(session.hasCatalog(data)) {
+                session.scrollQuery=q
+                session.scrollIndex=listState.firstVisibleItemIndex
+                session.scrollOffset=listState.firstVisibleItemScrollOffset
+            }
+        }
+    }
     LazyColumn(
-        modifier=Modifier.focusRequester(resultsFocus).focusGroup(),
+        state=listState,
+        modifier=Modifier.freshRemoteConfirm().focusRequester(resultsFocus).focusGroup(),
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
@@ -5438,6 +5484,7 @@ private fun SearchResultsPane(
 
 @Composable
 private fun SearchLiveCard(ch: LiveChannel, onClick: () -> Unit) {
+    val guideRevision = EpgStore.revision.intValue
     val guideReady = EpgStore.loaded.value
     val nowMs = System.currentTimeMillis()
     val nowTitle = if (guideReady) {
@@ -6294,6 +6341,16 @@ private fun Chip(label: String, active: Boolean, onClick: () -> Unit) {
     }
 }
 
+@Composable
+private fun Modifier.freshRemoteConfirm(): Modifier {
+    val gate = remember { RemoteConfirmGate() }
+    return this.onFocusChanged { if (!it.hasFocus) gate.reset() }
+        .onPreviewKeyEvent { event ->
+            val native = event.nativeKeyEvent
+            gate.consume(native.keyCode, native.action, native.repeatCount)
+        }
+}
+
 /* On Fire TV, a normal text field grabs the keyboard the instant you arrow
  * onto it — jarring, and it fights the remote. This wrapper shows the field as
  * a focusable BUTTON; the editable field + keyboard appear only after you press
@@ -6309,7 +6366,7 @@ private fun TvTextField(
     LaunchedEffect(editing) { onEditingChanged(editing) }
     val borderColor = if (searchStyle) Accent else ElectricCyan
     Column(modifier) {
-        Column(Modifier.fillMaxWidth().focusRequester(fieldFocus).tvFocus(RoundedCornerShape(12.dp))
+        Column(Modifier.fillMaxWidth().freshRemoteConfirm().focusRequester(fieldFocus).tvFocus(RoundedCornerShape(12.dp))
             .background(PanelGlow.copy(alpha = .72f), RoundedCornerShape(12.dp))
             .border(2.dp, borderColor, RoundedCornerShape(12.dp))
             .clickable { editing = true }.padding(horizontal = 14.dp, vertical = 10.dp)) {
@@ -6976,7 +7033,7 @@ fun PlayerScreen(
         }
     }
 
-    LaunchedEffect(current, source, EpgStore.loaded.value) {
+    LaunchedEffect(current, source, EpgStore.loaded.value, EpgStore.revision.intValue) {
         nowNext = emptyList()
         if (!current.isLive || smoothLive) return@LaunchedEffect
         val fromGuide = EpgStore.guide(current.guideKey, current.name)

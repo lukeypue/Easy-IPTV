@@ -22,6 +22,58 @@ import org.robolectric.annotation.Config
 @OptIn(ExperimentalTestApi::class, androidx.compose.ui.ExperimentalComposeUiApi::class)
 class SearchKeyboardTest {
     @get:Rule val ui = createComposeRule()
+    @Test fun keyboardStaysWithinSixtyPercentOfTheTelevisionWidth() {
+        val ctx=ApplicationProvider.getApplicationContext<Context>()
+        val prefs=ctx.getSharedPreferences("keyboard-width",Context.MODE_PRIVATE)
+        val data=AppData(emptyList(),emptyList(),emptyList(),emptyList(),emptyList(),emptyList())
+        ui.setContent {var q by remember {mutableStateOf("")};SearchTab(null,prefs,data,q,{q=it},{},{_,_->},{})}
+        ui.onNodeWithText("Search").performClick()
+        val keyboard=ui.onNodeWithTag("ryzod-keyboard").fetchSemanticsNode().boundsInRoot
+        val screen=ui.onRoot().fetchSemanticsNode().boundsInRoot
+        assertTrue("Keyboard should occupy about 60% of television width",keyboard.width<=screen.width*.61f && keyboard.width>=screen.width*.50f)
+        ui.onNodeWithText("a",useUnmergedTree=true).assertIsDisplayed()
+        ui.onNodeWithText("DONE").assertIsDisplayed()
+        ui.runOnIdle {TestScreenshots.save("ryzod482-keyboard.png")}
+    }
+    @Test @Config(qualifiers="w360dp-h800dp-port")
+    fun phoneKeyboardKeepsLettersAndSymbolPagesWithinTheScreen() {
+        val ctx=ApplicationProvider.getApplicationContext<Context>()
+        val prefs=ctx.getSharedPreferences("keyboard-phone",Context.MODE_PRIVATE)
+        val data=AppData(emptyList(),emptyList(),emptyList(),emptyList(),emptyList(),emptyList())
+        ui.setContent {var q by remember {mutableStateOf("")};SearchTab(null,prefs,data,q,{q=it},{},{_,_->},{})}
+        ui.onNodeWithText("Search").performClick()
+        val screen=ui.onRoot().fetchSemanticsNode().boundsInRoot
+        val keyboard=ui.onNodeWithTag("ryzod-keyboard").fetchSemanticsNode().boundsInRoot
+        assertTrue(keyboard.width>=screen.width*.8f && keyboard.right<=screen.right && keyboard.left>=screen.left)
+        ui.onNodeWithText("#$%",useUnmergedTree=true).performClick()
+        ui.onNodeWithText("/",useUnmergedTree=true).assertIsDisplayed()
+        ui.onNodeWithText("DONE").assertIsDisplayed()
+        ui.runOnIdle {TestScreenshots.save("ryzod482-keyboard-phone.png")}
+    }
+    @Test fun returningUpFromResultsDoesNotActivateTheHighlightedLetterOrTuneChannel() {
+        val ctx=ApplicationProvider.getApplicationContext<Context>()
+        val prefs=ctx.getSharedPreferences("keyboard-return",Context.MODE_PRIVATE)
+        val data=AppData(emptyList(),listOf(LiveChannel("1","Alpha TV",null,null,"https://example.invalid/live.ts")),emptyList(),emptyList(),emptyList(),emptyList())
+        val q=mutableStateOf("a")
+        var played=0
+        ui.setContent {val mode=LocalInputModeManager.current;SideEffect {mode.requestInputMode(InputMode.Keyboard)};SearchTab(null,prefs,data,q.value,{q.value=it},{},{_,_->played++},{})}
+        ui.onNodeWithText("Search").performClick()
+        ui.waitUntil(10_000) {org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();ui.mainClock.advanceTimeByFrame();ui.onAllNodesWithText("Alpha TV").fetchSemanticsNodes().isNotEmpty()}
+        ui.onRoot().performKeyInput {repeat(5) {pressKey(Key.DirectionDown)};keyDown(Key.DirectionUp)}
+        // A key-up after focus changes must be navigation only.
+        ui.onRoot().performKeyInput {keyUp(Key.DirectionUp)}
+        ui.runOnIdle {assertEquals("a",q.value);assertEquals(0,played)}
+    }
+    @Test fun movingWhileConfirmIsHeldDoesNotTypeTheNewlyHighlightedLetter() {
+        val ctx=ApplicationProvider.getApplicationContext<Context>()
+        val prefs=ctx.getSharedPreferences("keyboard-confirm-owner",Context.MODE_PRIVATE)
+        val data=AppData(emptyList(),emptyList(),emptyList(),emptyList(),emptyList(),emptyList())
+        val q=mutableStateOf("")
+        ui.setContent {val mode=LocalInputModeManager.current;SideEffect {mode.requestInputMode(InputMode.Keyboard)};SearchTab(null,prefs,data,q.value,{q.value=it},{},{_,_->},{})}
+        ui.onNodeWithText("Search").performClick()
+        ui.onRoot().performKeyInput {keyDown(Key.DirectionCenter);pressKey(Key.DirectionDown);keyUp(Key.DirectionCenter)}
+        ui.runOnIdle {assertEquals("Navigating cancels a pending keyboard click","",q.value)}
+    }
     @Test fun remoteDoneClosesKeyboardAndMovesToResults() {
         val ctx=ApplicationProvider.getApplicationContext<Context>()
         val prefs=ctx.getSharedPreferences("easyiptv",Context.MODE_PRIVATE)

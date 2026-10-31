@@ -797,6 +797,46 @@ object EpgStore {
     val revision = androidx.compose.runtime.mutableIntStateOf(0)
     @Volatile private var requestGeneration = 0L
     private var loadedUrl: String? = null
+    private var savedAt = 0L
+    private var appContext: Context? = null
+    private var snapshotCache: EpgSnapshotCache? = null
+    private var activeCall: okhttp3.Call? = null
+
+    /** Restore before catalog/provider refresh. Disk work never runs on the UI thread. */
+    suspend fun restore(context: Context, url: String?) {
+        val source = url?.takeIf { it.isNotBlank() }
+        val generation: Long
+        val cache: EpgSnapshotCache
+        synchronized(this) {
+            appContext = context.applicationContext
+            cache = EpgSnapshotCache(java.io.File(appContext!!.filesDir, "epg_snapshots"))
+            snapshotCache = cache
+            if (loadedUrl != source) {
+                clear()
+                loadedUrl = source
+            }
+            if (source == null || byChannel.isNotEmpty() || loading.value) return
+            generation = requestGeneration
+        }
+        val snapshot = withContext(Dispatchers.IO) {
+            val stored = cache.read(source!!) ?: return@withContext null
+            val now = System.currentTimeMillis()
+            stored.copy(channels = stored.channels.mapValues { (_, rows) -> rows.filter { it.endMs > now } }
+                .filterValues { it.isNotEmpty() })
+        } ?: return
+        withContext(Dispatchers.Main) {
+            synchronized(this@EpgStore) {
+                if (generation != requestGeneration || loadedUrl != source || loading.value) return@synchronized
+                byChannel = snapshot.channels
+                nameToId = snapshot.names
+                idToName = snapshot.displayNames
+                savedAt = snapshot.savedAt
+                loaded.value = byChannel.isNotEmpty()
+                revision.intValue++
+                status.value = if (loaded.value) "Saved guide restored." else "Saved guide has expired. Updating needed."
+            }
+        }
+    }
     private var byChannel: Map<String, List<EpgEntry>> = emptyMap()
     private var nameToId: Map<String, String> = emptyMap()
     private var idToName: Map<String, String> = emptyMap()
@@ -831,7 +871,10 @@ object EpgStore {
 
     private fun norm(s: String): String = s.lowercase().replace(Regex("[^a-z0-9]"), "")
 
-    fun clear() {
+    @Synchronized fun clear() {
+        activeCall?.cancel()
+        activeCall = null
+        savedAt = 0L
         requestGeneration++
         revision.intValue++
         status.value = ""
@@ -846,7 +889,6 @@ object EpgStore {
     /** Guide for one channel: match by guide id first, then by channel name. */
     fun guide(epgId: String?, channelName: String, fromMs: Long = System.currentTimeMillis()): List<EpgEntry> {
         if (byChannel.isEmpty()) return emptyList()
-        val now = System.currentTimeMillis()
         val direct = epgId?.let { byChannel[it.lowercase()] }
         val byName = if (direct == null) {
             nameToId[norm(channelName)]?.let { byChannel[it] }
@@ -855,126 +897,211 @@ object EpgStore {
         return list.filter { it.endMs >= fromMs }
     }
 
-    suspend fun load(url: String?, force: Boolean = false) {
-        if (url.isNullOrBlank()) {
-            status.value = "Your provider has not supplied a guide URL. Channel playback and manual recording still work."
-            return
+    /** Lifecycle-owned loop: cancellation stops both the timer and any active HTTP read. */
+    internal suspend fun refreshWhileBrowsing(url: String?) {
+        if (url.isNullOrBlank()) return
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            // The lifecycle effect owns a single source; never switch back to an obsolete one.
+            synchronized(this) { if (loadedUrl != url) return }
+            load(url)
+            val waitMs = synchronized(this) {
+                if (loadedUrl != url) return
+                freshnessDelayMs(System.currentTimeMillis())
+            }
+            // A stale/failed/active refresh is retried at most once per minute.
+            kotlinx.coroutines.delay(if (waitMs > 0) waitMs else 60_000L)
         }
-        if (!force && loadedUrl == url && loaded.value) return
-        if (loading.value) return
-        val generation = ++requestGeneration
-        loading.value = true
-        status.value = "Updating guide from your provider…"
-        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            try {
-                val fmtZ = java.text.SimpleDateFormat("yyyyMMddHHmmss Z", java.util.Locale.US)
-                val fmtNoZ = java.text.SimpleDateFormat("yyyyMMddHHmmss", java.util.Locale.US)
-                fun parseTime(raw: String): Long {
-                    val t = raw.trim()
-                    if (t.isEmpty()) return 0L
-                    return try {
-                        if (t.contains(' ')) fmtZ.parse(t)?.time ?: 0L
-                        else fmtNoZ.parse(t)?.time ?: 0L
-                    } catch (e: Exception) { 0L }
-                }
+    }
 
-                val now = System.currentTimeMillis()
-                val windowStart = now - 60L * 60 * 1000            // keep last hour
-                // Fire Stick memory guard: keep only the useful near-term guide
-                // in RAM. Two days is enough for now/next + short planning/search
-                // without holding a giant 7-day XMLTV object graph on ~1 GB boxes.
-                val windowEnd = now + 48L * 60 * 60 * 1000
-                val programmes = HashMap<String, ArrayList<EpgEntry>>()
-                val names = HashMap<String, String>()
-                val idNames = HashMap<String, String>()
+    /** Wake at TTL expiry or when all cached programmes have ended, whichever comes first. */
+    private fun freshnessDelayMs(now: Long): Long {
+        val lastEnd = byChannel.values.maxOfOrNull { rows -> rows.maxOfOrNull { it.endMs } ?: 0L } ?: 0L
+        if (savedAt <= 0 || savedAt > now || lastEnd <= now) return 0L
+        return minOf(savedAt + EpgSnapshotCache.FRESH_MS, lastEnd).minus(now).coerceAtLeast(0L)
+    }
 
-                val req = okhttp3.Request.Builder().url(url).header("User-Agent", Net.UA).header("Cache-Control", "no-cache").build()
-                val call = Net.client.newCall(req)
-                call.timeout().timeout(120, java.util.concurrent.TimeUnit.SECONDS)
-                call.execute().use { resp ->
-                    check(resp.isSuccessful) { "Provider returned HTTP ${resp.code}" }
-                    val stream = resp.body?.byteStream() ?: error("Provider returned an empty guide")
-                    val parser = android.util.Xml.newPullParser()
-                    parser.setInput(stream, null)
+    suspend fun load(url: String?, force: Boolean = false) {
+        val generation: Long
+        val cache: EpgSnapshotCache?
+        synchronized(this) {
+            if (loadedUrl != url?.takeIf { it.isNotBlank() }) {
+                clear()
+                loadedUrl = url?.takeIf { it.isNotBlank() }
+            }
+            if (url.isNullOrBlank()) {
+                status.value = "Your provider has not supplied a guide URL. Channel playback and manual recording still work."
+                return
+            }
+            val now = System.currentTimeMillis()
+            val useful = byChannel.values.any { rows -> rows.any { it.endMs > now } }
+            if (!force && useful && now - savedAt in 0 until EpgSnapshotCache.FRESH_MS) return
+            if (loading.value) return
+            generation = ++requestGeneration
+            cache = snapshotCache
+            loading.value = true
+            status.value = "Updating guide from your provider…"
+        }
+        try {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    val fmtZ = java.text.SimpleDateFormat("yyyyMMddHHmmss Z", java.util.Locale.US)
+                    val fmtNoZ = java.text.SimpleDateFormat("yyyyMMddHHmmss", java.util.Locale.US)
+                    fun parseTime(raw: String): Long {
+                        val t = raw.trim()
+                        if (t.isEmpty()) return 0L
+                        return try {
+                            if (t.contains(' ')) fmtZ.parse(t)?.time ?: 0L
+                            else fmtNoZ.parse(t)?.time ?: 0L
+                        } catch (e: Exception) { 0L }
+                    }
 
-                    var event = parser.eventType
-                    var curChannelId: String? = null           // inside <channel>
-                    var progChannel: String? = null            // inside <programme>
-                    var progStart = 0L
-                    var progStop = 0L
-                    var progTitle = ""
-                    var progDesc = ""
-                    var textTarget = 0                          // 1=display-name 2=title 3=desc
+                    val now = System.currentTimeMillis()
+                    val windowStart = now - 60L * 60 * 1000            // keep last hour
+                    // Fire Stick memory guard: keep only the useful near-term guide
+                    // in RAM. Two days is enough for now/next + short planning/search
+                    // without holding a giant 7-day XMLTV object graph on ~1 GB boxes.
+                    val windowEnd = now + 48L * 60 * 60 * 1000
+                    val programmes = HashMap<String, ArrayList<EpgEntry>>()
+                    val names = HashMap<String, String>()
+                    val idNames = HashMap<String, String>()
 
-                    while (event != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
-                        when (event) {
-                            org.xmlpull.v1.XmlPullParser.START_TAG -> when (parser.name) {
-                                "channel" -> curChannelId =
-                                    parser.getAttributeValue(null, "id")?.lowercase()
-                                "display-name" -> if (curChannelId != null) textTarget = 1
-                                "programme" -> {
-                                    progChannel = parser.getAttributeValue(null, "channel")?.lowercase()
-                                    progStart = parseTime(parser.getAttributeValue(null, "start") ?: "")
-                                    progStop = parseTime(parser.getAttributeValue(null, "stop") ?: "")
-                                    progTitle = ""; progDesc = ""
-                                }
-                                "title" -> if (progChannel != null) textTarget = 2
-                                "desc" -> if (progChannel != null) textTarget = 3
-                            }
-                            org.xmlpull.v1.XmlPullParser.TEXT -> when (textTarget) {
-                                1 -> {
-                                    val id = curChannelId
-                                    val nm = parser.text?.trim() ?: ""
-                                    if (id != null && nm.isNotBlank()) {
-                                        val key = norm(nm)
-                                        if (key.isNotBlank() && !names.containsKey(key)) names[key] = id
-                                        if (!idNames.containsKey(id)) idNames[id] = nm
+                    val req = okhttp3.Request.Builder().url(url!!).header("User-Agent", Net.UA).header("Cache-Control", "no-cache").build()
+                    val call = Net.client.newCall(req)
+                    call.timeout().timeout(120, java.util.concurrent.TimeUnit.SECONDS)
+                    synchronized(this@EpgStore) {
+                        if (generation != requestGeneration) { call.cancel(); return@withContext }
+                        activeCall = call
+                    }
+                    // A blocking body read is closed promptly when its coroutine is cancelled.
+                    val cancellation = kotlinx.coroutines.CoroutineScope(currentCoroutineContext()).async(
+                        kotlinx.coroutines.Dispatchers.Unconfined
+                    ) {
+                        try { kotlinx.coroutines.awaitCancellation() } finally { call.cancel() }
+                    }
+                    try {
+                        call.execute().use { resp ->
+                            check(resp.isSuccessful) { "Provider returned HTTP ${resp.code}" }
+                            val stream = resp.body?.byteStream() ?: error("Provider returned an empty guide")
+                            val parser = android.util.Xml.newPullParser()
+                            parser.setInput(stream, null)
+
+                            var event = parser.eventType
+                            var curChannelId: String? = null           // inside <channel>
+                            var progChannel: String? = null            // inside <programme>
+                            var progStart = 0L
+                            var progStop = 0L
+                            var progTitle = ""
+                            var progDesc = ""
+                            var textTarget = 0                          // 1=display-name 2=title 3=desc
+
+                            var entryCount = 0
+                            while (event != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
+                                currentCoroutineContext().ensureActive()
+                                check(generation == requestGeneration) { "Guide source changed" }
+                                when (event) {
+                                    org.xmlpull.v1.XmlPullParser.START_TAG -> when (parser.name) {
+                                        "channel" -> curChannelId =
+                                            parser.getAttributeValue(null, "id")?.lowercase()
+                                        "display-name" -> if (curChannelId != null) textTarget = 1
+                                        "programme" -> {
+                                            progChannel = parser.getAttributeValue(null, "channel")?.lowercase()
+                                            progStart = parseTime(parser.getAttributeValue(null, "start") ?: "")
+                                            progStop = parseTime(parser.getAttributeValue(null, "stop") ?: "")
+                                            progTitle = ""; progDesc = ""
+                                        }
+                                        "title" -> if (progChannel != null) textTarget = 2
+                                        "desc" -> if (progChannel != null) textTarget = 3
+                                    }
+                                    org.xmlpull.v1.XmlPullParser.TEXT -> when (textTarget) {
+                                        1 -> {
+                                            val id = curChannelId
+                                            val nm = parser.text?.trim() ?: ""
+                                            if (id != null && nm.isNotBlank()) {
+                                                check(id.length <= 4096) { "Guide channel ID is too long" }
+                                                val key = norm(nm.take(4096))
+                                                if (key.isNotBlank() && !names.containsKey(key)) names[key] = id
+                                                if (!idNames.containsKey(id)) idNames[id] = nm.take(4096)
+                                                check(names.size <= EpgSnapshotCache.MAX_CHANNELS && idNames.size <= EpgSnapshotCache.MAX_CHANNELS) { "Guide has too many channels" }
+                                            }
+                                        }
+                                        2 -> progTitle = (progTitle + (parser.text ?: "")).take(8192).trim()
+                                        3 -> { /* descriptions skipped: keeps the guide light in memory */ }
+                                    }
+                                    org.xmlpull.v1.XmlPullParser.END_TAG -> when (parser.name) {
+                                        "channel" -> curChannelId = null
+                                        "display-name", "title", "desc" -> textTarget = 0
+                                        "programme" -> {
+                                            val ch = progChannel
+                                            if (ch != null && progStart in 1 until windowEnd &&
+                                                (if (progStop > 0) progStop else progStart) >= windowStart
+                                            ) {
+                                                val end = if (progStop > progStart) progStop
+                                                else progStart + 30 * 60 * 1000
+                                                check(++entryCount <= EpgSnapshotCache.MAX_ENTRIES) { "Guide has too many programmes" }
+                                                check(ch.length <= 4096 && (programmes.containsKey(ch) || programmes.size < EpgSnapshotCache.MAX_CHANNELS)) { "Guide has too many channels" }
+                                                programmes.getOrPut(ch) { ArrayList() }
+                                                    .add(EpgEntry(progTitle.ifBlank { "Program" }, progDesc, progStart, end))
+                                            }
+                                            progChannel = null
+                                        }
                                     }
                                 }
-                                2 -> progTitle = (progTitle + (parser.text ?: "")).trim()
-                                3 -> { /* descriptions skipped: keeps the guide light in memory */ }
-                            }
-                            org.xmlpull.v1.XmlPullParser.END_TAG -> when (parser.name) {
-                                "channel" -> curChannelId = null
-                                "display-name", "title", "desc" -> textTarget = 0
-                                "programme" -> {
-                                    val ch = progChannel
-                                    if (ch != null && progStart in 1 until windowEnd &&
-                                        (if (progStop > 0) progStop else progStart) >= windowStart
-                                    ) {
-                                        val end = if (progStop > progStart) progStop
-                                        else progStart + 30 * 60 * 1000
-                                        programmes.getOrPut(ch) { ArrayList() }
-                                            .add(EpgEntry(progTitle.ifBlank { "Program" }, progDesc, progStart, end))
-                                    }
-                                    progChannel = null
-                                }
+                                event = parser.next()
                             }
                         }
-                        event = parser.next()
+
+                    } finally { cancellation.cancel() }
+                    currentCoroutineContext().ensureActive()
+
+                    programmes.values.forEach { it.sortBy { e -> e.startMs } }
+                    check(programmes.isNotEmpty()) { "No current guide entries supplied" }
+                    check(programmes.values.any { rows -> rows.any { it.endMs > now } }) { "No current guide entries supplied" }
+                    val completedAt = System.currentTimeMillis()
+                    // Persistence is best effort: a full disk must not discard a usable network guide.
+                    var prepared: java.io.File? = null
+                    try {
+                        if (cache != null && generation == requestGeneration) {
+                            prepared = try {
+                                cache.prepare(url!!, EpgSnapshotCache.Snapshot(completedAt, programmes, names, idNames))
+                            } catch (_: Exception) { null }
+                        }
+                        currentCoroutineContext().ensureActive()
+                        synchronized(this@EpgStore) {
+                            if (generation == requestGeneration && prepared != null) {
+                                try { cache!!.commit(url!!, prepared!!) } catch (_: Exception) { /* keep old snapshot */ }
+                            }
+                        }
+                    } finally { prepared?.delete() }
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        synchronized(this@EpgStore) {
+                            if (generation != requestGeneration) return@synchronized
+                            byChannel = programmes
+                            nameToId = names
+                            idToName = idNames
+                            loadedUrl = url
+                            savedAt = completedAt
+                            loaded.value = true
+                            revision.intValue++
+                            status.value = "Guide updated from your provider."
+                        }
+                    }
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        synchronized(this@EpgStore) {
+                            if (generation != requestGeneration) return@synchronized
+                            // Provider errors may embed credential-bearing URLs; keep status generic.
+                            status.value = "Guide update failed: provider unavailable. ${if (loaded.value) "Keeping the previous guide." else "Try again shortly."}"
+                        }
                     }
                 }
-
-                programmes.values.forEach { it.sortBy { e -> e.startMs } }
-                check(programmes.isNotEmpty()) { "No current guide entries supplied" }
-                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                    if (generation != requestGeneration) return@withContext
-                    byChannel = programmes
-                    nameToId = names
-                    idToName = idNames
-                    loadedUrl = url
-                    loaded.value = true
-                    revision.intValue++
-                    status.value = "Guide updated from your provider."
+            }
+        } finally {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable + kotlinx.coroutines.Dispatchers.Main) {
+                synchronized(this@EpgStore) {
+                    if (generation == requestGeneration) { loading.value = false; activeCall = null }
                 }
-            } catch (e: Exception) {
-                if (e is kotlinx.coroutines.CancellationException) throw e
-                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                    if (generation != requestGeneration) return@withContext
-                    status.value = "Guide update failed: ${e.message ?: "provider unavailable"}. ${if (loaded.value) "Keeping the previous guide." else "Try again shortly."}"
-                }
-            } finally {
-                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable + kotlinx.coroutines.Dispatchers.Main) { if (generation == requestGeneration) loading.value = false }
             }
         }
     }

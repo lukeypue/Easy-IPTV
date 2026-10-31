@@ -16,22 +16,24 @@ import org.robolectric.annotation.Config
 @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
 class BufferSettingsUiTest {
     @get:Rule val ui=createComposeRule()
-    @Test fun smoothSetsEveryAddedWaitToZeroAndDisablesSteady() {
+    @Test fun smoothIsIndependentAndPreservesManualBufferChoicesWhenToggled() {
         val ctx=ApplicationProvider.getApplicationContext<Context>()
         val prefs=ctx.getSharedPreferences("smooth-settings",Context.MODE_PRIVATE)
         prefs.edit().clear().putInt("buffer_sec",60).putInt("live_start_ms",30_000).putBoolean("live_steady_recovery",true).commit()
         ui.setContent {SettingsPane(prefs) {}}
-        ui.onNodeWithText("Smooth (0s)").performScrollTo().performClick()
+        ui.onNodeWithTag("smooth-switch").performScrollTo().performClick()
         ui.runOnIdle {
             assertEquals(true,prefs.getBoolean("live_smooth",false))
-            assertEquals(0,prefs.getInt("buffer_sec",-1))
-            assertEquals(0,prefs.getInt("live_start_ms",-1))
-            assertEquals(false,prefs.getBoolean("live_steady_recovery",true))
+            assertEquals(60,prefs.getInt("buffer_sec",-1))
+            assertEquals(30_000,prefs.getInt("live_start_ms",-1))
             assertEquals(0,StreamBufferPolicy.from(prefs).startMs)
             assertEquals(0,StreamBufferPolicy.from(prefs).rebufferMs)
         }
-        ui.onNodeWithText("Normal (30s)").performScrollTo().performClick()
-        ui.runOnIdle {assertEquals(false,prefs.getBoolean("live_smooth",true))}
+        ui.onNodeWithText("20s refill").performScrollTo().performClick()
+        ui.runOnIdle {assertEquals(true,prefs.getBoolean("live_smooth",false));assertEquals(20,prefs.getInt("buffer_sec",-1))}
+        ui.onNodeWithTag("smooth-switch").performScrollTo().performClick()
+        ui.runOnIdle {assertEquals(false,prefs.getBoolean("live_smooth",true));assertEquals(30_000,StreamBufferPolicy.from(prefs).startMs)}
+        ui.onNodeWithText("Smooth (0s)").assertDoesNotExist()
     }
     @Test fun twentySecondRefillAndRealTimeOverrideAreVisible() {
         val ctx=ApplicationProvider.getApplicationContext<Context>()
