@@ -27,8 +27,12 @@
 
 ## Tasks
 
-- [ ] Add SearchFocusUiTest covering submit, return to keyboard, type and wait for multiple settled queries; reproduce failure before changing focus behavior.
-- [ ] Replace persistent/replayed focus requests with a consumed parent-owned intent; cancel it when editing starts or changes the query. Verify explicit exits still focus results.
-- [ ] Add AppReadability context helper and tests; integrate MainActivity before UI creation and adapt fixed-height text containers.
-- [ ] Replace navigation/category fills with violet/white, retaining visible selection/focus. Capture TV/phone search, guide, menus and settings at the actual enlarged scale; inspect for clipping.
-- [ ] Run focused and complete regression suites, review independently, lint and signed-build both distributions; verify release and both updater manifests before completion.
+- [x] Add SearchFocusUiTest covering submit, return to keyboard, type and wait for multiple settled queries; reproduce failure before changing focus behavior.
+- [x] Replace persistent/replayed focus requests with a consumed parent-owned intent; cancel it when editing starts or changes the query. Verify explicit exits still focus results.
+- [x] Add AppReadability context helper and tests; integrate MainActivity before UI creation and adapt fixed-height text containers.
+- [x] Replace navigation/category fills with violet/white, retaining visible selection/focus. Capture TV/phone search, guide, menus and settings at the actual enlarged scale; inspect for clipping.
+- [x] Run focused and complete regression suites, review independently, lint and signed-build both distributions; verify release and both updater manifests before completion.
+
+## Accessibility follow-up (4.85 / code 109)
+
+A final real Android activity-context test at system font scale 1.5 reproduced PREVIOUS being truncated. Android nonlinear font conversion means converting a combined 72sp width underestimates six actual 12sp label units. Convert the actual label size first, then estimate word width. This check failed on 4.84 and passed with the corrected sizing; retain it in AppReadabilityTest. Publish a new immutable 4.85 release with all prior readability changes and 245 full-suite tests per distribution.

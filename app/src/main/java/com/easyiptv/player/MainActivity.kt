@@ -5021,13 +5021,15 @@ private fun RyzodKeyboardPanel(
         val keyboardWidth = if (screenWidth >= 700.dp) minOf(maxWidth, screenWidth * .60f) else maxWidth
         val innerWidth = (keyboardWidth - 12.dp).coerceAtLeast(1.dp)
         val columns = ((innerWidth + 3.dp) / (with(density) {letterSize.toDp()} + 11.dp)).toInt().coerceIn(4,10)
-        val actionWidth = with(density) {54.sp.toDp()} + 8.dp
+        // Convert the actual label size before estimating word width: Android font scaling is nonlinear.
+        val actionLabelSize = with(density) {12.sp.toDp()}
+        val actionWidth = actionLabelSize * 4.5f + 8.dp
         val actionColumns = when {
             innerWidth >= actionWidth * 6 + 15.dp -> 6
             innerWidth >= actionWidth * 3 + 6.dp -> 3
             else -> 2
         }
-        val navigationColumns = ((innerWidth + 3.dp) / (with(density) {72.sp.toDp()} + 11.dp)).toInt().coerceIn(1,3)
+        val navigationColumns = ((innerWidth + 3.dp) / (actionLabelSize * 6f + 11.dp)).toInt().coerceIn(1,3)
         val rows = remember(page,upper,columns,actionColumns,navigationColumns) {
             val base = KeyboardLayout.rows(page,upper)
             base.dropLast(2).flatMap {it.chunked(columns)} +

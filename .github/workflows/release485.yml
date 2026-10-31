@@ -1,0 +1,234 @@
+name: Release RYZOD 4.85 Readability
+on:
+  push:
+    branches: [ryzod-v4.85-readability]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  # Shared with 4.81 and all future releases; historical workflows remain separate.
+  group: ryzod-release
+  cancel-in-progress: false
+jobs:
+  publisher-tests:
+    if: github.ref == 'refs/heads/ryzod-v4.85-readability'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Offline publisher regressions
+        run: python3 -B -m unittest discover -s tools -p 'test_publish_v*.py' -v
+      - name: Existing Live TV and guide contracts
+        run: |
+          python3 tools/verify_v470.py
+          python3 tools/verify_v474.py
+
+  build:
+    if: github.ref == 'refs/heads/ryzod-v4.85-readability'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distribution: direct
+            suffix: ''
+          - distribution: fire
+            suffix: '-FireTV'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Full unfiltered regression suite (245 minimum)
+        run: |
+          gradle -PryzodDistribution=${{ matrix.distribution }} cleanTestDebugUnitTest testDebugUnitTest --max-workers=1 -Pkotlin.incremental=false --no-daemon --stacktrace
+          python3 tools/verify_unit_results.py app/build/test-results/testDebugUnitTest 245
+      - name: Retain UI screenshots for visual review
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RYZOD-4.85-ui-${{ matrix.distribution }}
+          path: |
+            /tmp/ryzod484*.png
+            /tmp/ryzod*.png
+          if-no-files-found: ignore
+      - name: Restore permanent signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ZAKO_RELEASE_KEYSTORE_B64 }}
+        run: |
+          test -n "$KEYSTORE_B64"
+          umask 077
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/ryzod-release.jks"
+      - name: Lint and build minified signed APK
+        env:
+          ZAKO_KEYSTORE_PATH: ${{ runner.temp }}/ryzod-release.jks
+          ZAKO_STORE_PASSWORD: ${{ secrets.ZAKO_STORE_PASSWORD }}
+          ZAKO_KEY_ALIAS: ${{ secrets.ZAKO_KEY_ALIAS }}
+          ZAKO_KEY_PASSWORD: ${{ secrets.ZAKO_KEY_PASSWORD }}
+        run: |
+          gradle -PryzodDistribution=${{ matrix.distribution }} lintDebug assembleRelease -Pkotlin.incremental=false --no-daemon --stacktrace
+          test -s app/build/outputs/mapping/release/mapping.txt
+          cp app/build/outputs/mapping/release/mapping.txt /tmp/RYZOD-v4.85${{ matrix.suffix }}-mapping.txt
+          cp app/build/outputs/apk/release/app-release.apk /tmp/RYZOD-v4.85${{ matrix.suffix }}.apk
+      - name: Verify package, version, permanent certificate and native 16 KB alignment
+        run: python3 tools/publish_v485.py --verify-apk /tmp/RYZOD-v4.85${{ matrix.suffix }}.apk
+      - name: Archive exact source HEAD
+        if: matrix.distribution == 'direct'
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git archive --format=zip HEAD -o /tmp/RYZOD-v4.85-source.zip
+      - name: Retain verified build inputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: RYZOD-4.85-verified-${{ matrix.distribution }}
+          path: /tmp/RYZOD-v4.85*
+          if-no-files-found: error
+      - name: Retain full regression reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RYZOD-4.85-tests-${{ matrix.distribution }}
+          path: app/build/test-results
+      - name: Remove restored signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/ryzod-release.jks"
+
+  store-candidates:
+    if: github.ref == 'refs/heads/ryzod-v4.85-readability'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      BUNDLETOOL_JAR: /tmp/bundletool-all-1.18.3.jar
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Install pinned bundletool for AAB identity checks
+        run: |
+          curl --fail --location --retry 3 https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar --output "$BUNDLETOOL_JAR"
+          echo "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29  $BUNDLETOOL_JAR" | sha256sum --check --strict
+      - name: Limit store test class discovery before Robolectric forks
+        run: |
+          cat > "$RUNNER_TEMP/store-tests.gradle" <<'GRADLE'
+          allprojects {
+              tasks.withType(org.gradle.api.tasks.testing.Test).configureEach {
+                  include '**/*DistributionTest.class'
+                  include '**/*Launcher*Test.class'
+              }
+          }
+          GRADLE
+      - name: Restore permanent signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ZAKO_RELEASE_KEYSTORE_B64 }}
+        run: |
+          test -n "$KEYSTORE_B64"
+          umask 077
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/ryzod-release.jks"
+      - name: Test, lint, build and verify store candidates (artifacts only)
+        env:
+          ZAKO_KEYSTORE_PATH: ${{ runner.temp }}/ryzod-release.jks
+          ZAKO_STORE_PASSWORD: ${{ secrets.ZAKO_STORE_PASSWORD }}
+          ZAKO_KEY_ALIAS: ${{ secrets.ZAKO_KEY_ALIAS }}
+          ZAKO_KEY_PASSWORD: ${{ secrets.ZAKO_KEY_PASSWORD }}
+        run: |
+          gradle -I "$RUNNER_TEMP/store-tests.gradle" -PryzodDistribution=amazon cleanTestDebugUnitTest testDebugUnitTest --max-workers=1 -Pkotlin.incremental=false --no-daemon --stacktrace
+          python3 tools/verify_unit_results.py app/build/test-results/testDebugUnitTest 9
+          cp -R app/build/test-results /tmp/ryzod-485-tests-amazon
+          gradle -PryzodDistribution=amazon lintDebug assembleRelease -Pkotlin.incremental=false --no-daemon --stacktrace
+          test -s app/build/outputs/mapping/release/mapping.txt
+          cp app/build/outputs/mapping/release/mapping.txt /tmp/RYZOD-v4.85-Amazon-mapping.txt
+          cp app/build/outputs/apk/release/app-release.apk /tmp/RYZOD-v4.85-Amazon.apk
+          python3 tools/publish_v485.py --verify-apk /tmp/RYZOD-v4.85-Amazon.apk
+          gradle -I "$RUNNER_TEMP/store-tests.gradle" -PryzodDistribution=play cleanTestDebugUnitTest testDebugUnitTest --max-workers=1 -Pkotlin.incremental=false --no-daemon --stacktrace
+          python3 tools/verify_unit_results.py app/build/test-results/testDebugUnitTest 9
+          cp -R app/build/test-results /tmp/ryzod-485-tests-play
+          gradle -PryzodDistribution=play lintDebug bundleRelease -Pkotlin.incremental=false --no-daemon --stacktrace
+          test -s app/build/outputs/mapping/release/mapping.txt
+          cp app/build/outputs/mapping/release/mapping.txt /tmp/RYZOD-v4.85-Play-mapping.txt
+          cp app/build/outputs/bundle/release/app-release.aab /tmp/RYZOD-v4.85-Play.aab
+          python3 tools/publish_v485.py --verify-aab /tmp/RYZOD-v4.85-Play.aab
+      - name: Retain verified store candidates without uploading to stores
+        uses: actions/upload-artifact@v4
+        with:
+          name: RYZOD-4.85-store-submission-candidates
+          path: |
+            /tmp/RYZOD-v4.85-Amazon.apk
+            /tmp/RYZOD-v4.85-Play.aab
+            /tmp/RYZOD-v4.85-Amazon-mapping.txt
+            /tmp/RYZOD-v4.85-Play-mapping.txt
+          if-no-files-found: error
+      - name: Retain store regression reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RYZOD-4.85-tests-stores
+          path: |
+            /tmp/ryzod-485-tests-*
+            app/build/test-results
+      - name: Remove restored signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/ryzod-release.jks"
+
+  publisher:
+    if: github.ref == 'refs/heads/ryzod-v4.85-readability'
+    needs: [publisher-tests, build, store-candidates]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BUNDLETOOL_JAR: /tmp/bundletool-all-1.18.3.jar
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install pinned bundletool for AAB identity checks
+        run: |
+          curl --fail --location --retry 3 https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar --output "$BUNDLETOOL_JAR"
+          echo "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29  $BUNDLETOOL_JAR" | sha256sum --check --strict
+      - name: Download only verified direct and Fire inputs from this run
+        uses: actions/download-artifact@v4
+        with:
+          pattern: RYZOD-4.85-verified-*
+          merge-multiple: true
+          path: /tmp
+      - name: Download verified store candidates for re-verification
+        uses: actions/download-artifact@v4
+        with:
+          name: RYZOD-4.85-store-submission-candidates
+          path: /tmp
+      - name: Reverify input assets and reject conflicting or downgrading updaters
+        run: python3 tools/publish_v485.py --check
+      - name: Publish exactly two APKs and exact-HEAD source ZIP
+        run: |
+          REMOTE_TAG="$(git ls-remote origin refs/tags/v4.85 'refs/tags/v4.85^{}')"
+          if test -n "$REMOTE_TAG"; then
+            git fetch origin refs/tags/v4.85:refs/tags/v4.85
+            test "$(git rev-parse 'v4.85^{commit}')" = "$GITHUB_SHA" || { echo 'Version already belongs to another commit; increment version.'; exit 1; }
+          fi
+          if gh release view v4.85 >/dev/null 2>&1; then
+            python3 tools/publish_v485.py --verify-release
+          else
+            gh release create v4.85 /tmp/RYZOD-v4.85.apk /tmp/RYZOD-v4.85-FireTV.apk /tmp/RYZOD-v4.85-source.zip --target "$GITHUB_SHA" --title "RYZOD 4.85 Readability" --notes-file RELEASE_4.85.md --latest=false
+          fi
+      - name: Atomically promote matching main updaters before marking latest
+        run: |
+          python3 tools/publish_v485.py
+          gh release edit v4.85 --latest

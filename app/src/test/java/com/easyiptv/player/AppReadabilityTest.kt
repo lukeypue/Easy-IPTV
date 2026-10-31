@@ -12,13 +12,22 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Text
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performSemanticsAction
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -162,6 +171,33 @@ class AppReadabilityTest {
             }
         } finally {
             controller.pause().stop().destroy()
+        }
+    }
+
+    @Test @Config(qualifiers="w360dp-h800dp-port")
+    fun realAccessibilityContextKeepsKeyboardActionWordsReadable() {
+        val controller=Robolectric.buildActivity(LargeActivity::class.java).setup()
+        try {
+            val activity=controller.get()
+            val prefs=activity.getSharedPreferences("real-large-keyboard",Context.MODE_PRIVATE)
+            val data=AppData(emptyList(),emptyList(),emptyList(),emptyList(),emptyList(),emptyList())
+            activity.setContent {MaterialTheme {var q by androidx.compose.runtime.remember {androidx.compose.runtime.mutableStateOf("")};SearchTab(null,prefs,data,q,{q=it},{},{_,_->},{})}}
+            ui.onNodeWithText("Search").performClick()
+            for(word in listOf("DELETE","PREVIOUS","DONE")) {
+                val node=ui.onNodeWithText(word,useUnmergedTree=true).performScrollTo()
+                val layouts=mutableListOf<TextLayoutResult>()
+                node.performSemanticsAction(SemanticsActions.GetTextLayoutResult) {it(layouts)}
+                for(layout in layouts) {
+                    assertTrue("$word must retain every character at the real accessibility scale",!layout.multiParagraph.didExceedMaxLines)
+                    for(line in 0 until layout.lineCount) assertTrue("$word glyphs must fit",layout.getLineRight(line)-layout.getLineLeft(line)<=layout.size.width+1f)
+                }
+            }
+        } finally {controller.pause().stop().destroy()}
+    }
+    class LargeActivity : ComponentActivity() {
+        override fun attachBaseContext(newBase: Context) {
+            val userContext=newBase.createConfigurationContext(Configuration(newBase.resources.configuration).apply {fontScale=1.5f})
+            super.attachBaseContext(AppReadability.wrap(userContext))
         }
     }
 
