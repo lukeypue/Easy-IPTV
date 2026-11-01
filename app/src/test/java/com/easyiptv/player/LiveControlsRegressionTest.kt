@@ -26,6 +26,37 @@ class LiveControlsRegressionTest {
             assertEquals("Holding OK must open the guide only once",1,calls)
         } finally {PlayerKeys.priority=null;controller.pause().stop().destroy()}
     }
+    @Test fun consumedBackOwnsItsHoldAndReleaseButNeverTheNextPhysicalPress() {
+        val controller = Robolectric.buildActivity(MainActivity::class.java).setup()
+        var ownedPresses = 0
+        var normalBacks = 0
+        val callback = object : androidx.activity.OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() { normalBacks++ }
+        }
+        try {
+            AppInputGate.startupLocked = false
+            val activity = controller.get()
+            activity.onBackPressedDispatcher.addCallback(callback)
+            PlayerKeys.priority = { key ->
+                if (key == KeyEvent.KEYCODE_BACK) { ownedPresses++; true } else false
+            }
+            activity.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_BACK))
+            activity.dispatchKeyEvent(KeyEvent(0, 0, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_BACK, 1))
+            activity.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_BACK))
+            assertEquals("Holding Back must perform only one player action", 1, ownedPresses)
+            assertEquals(0, normalBacks)
+            activity.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_BACK))
+            // A dialog can receive this press's release in its own window.
+            PlayerKeys.priority = null
+            activity.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_BACK))
+            activity.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_BACK))
+            assertEquals("A fresh Back must not inherit a dialog's missing release", 1, normalBacks)
+        } finally {
+            callback.remove()
+            PlayerKeys.priority = null
+            controller.pause().stop().destroy()
+        }
+    }
     @Test fun readyDoesNotEraseAnExhaustedPauseRecoveryBudget() {
         val field=Playback.javaClass.getDeclaredField("stallRestarts").apply {isAccessible=true}
         try {

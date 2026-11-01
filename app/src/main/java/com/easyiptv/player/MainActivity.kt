@@ -497,9 +497,13 @@ class MainActivity : ComponentActivity() {
         // ACTION_UP can click the Pause button which just gained focus.
         if (event.action == android.view.KeyEvent.ACTION_UP && consumedRemoteKeys.remove(event.keyCode)) return true
         if (event.action == android.view.KeyEvent.ACTION_DOWN) {
+            // A dialog may receive an owned press's release in its own window.
+            // Ownership must never leak into the next physical press.
+            if (event.repeatCount == 0) consumedRemoteKeys.remove(event.keyCode)
             if (event.keyCode in consumedRemoteKeys && event.repeatCount > 0 &&
                 (event.keyCode == android.view.KeyEvent.KEYCODE_DPAD_CENTER ||
-                    event.keyCode == android.view.KeyEvent.KEYCODE_ENTER)) return true
+                    event.keyCode == android.view.KeyEvent.KEYCODE_ENTER ||
+                    event.keyCode == android.view.KeyEvent.KEYCODE_BACK)) return true
             if (PlayerKeys.priority?.invoke(event.keyCode) == true) {
                 consumedRemoteKeys.add(event.keyCode)
                 return true
@@ -876,9 +880,9 @@ fun App() {
                     nav = Nav.Home
                 },
                 onBack = { idx, posMs ->
-                    // Back doesn't stop or reconnect anything — the SAME stream
-                    // just moves to the corner while you browse.
-                    mini = MiniState(pl.queue, idx, posMs)
+                    // Live browsing keeps the same stream in the corner. A
+                    // confirmed VOD stop already released it; never resurrect it.
+                    mini = if (Playback.player != null) MiniState(pl.queue, idx, posMs) else null
                     nav = pl.from
                 }
             )
@@ -6725,6 +6729,10 @@ fun PlayerScreen(
     val playState = Playback.playStateC
     val everReady = Playback.everReadyC
     var pvRef by remember { mutableStateOf<PlayerView?>(null) }
+    // Remote callbacks live across episode transitions; keep their state stable.
+    var showStopWatching by remember { mutableStateOf(false) }
+    LaunchedEffect(current.url) { showStopWatching = false }
+    var playbackStopped by remember { mutableStateOf(false) }
     val remoteDvrSeek = remember { DvrSeekAccelerator() }
     var dvrSeekHint by remember { mutableStateOf("") }
 
@@ -6829,19 +6837,22 @@ fun PlayerScreen(
         applyCaptionPreference(exo, on)
         toast(context, if (on) "Closed captions on when this program provides them." else "Closed captions off.")
     }
+    fun savePlaybackPosition() {
+        runCatching {
+            val i = exo.currentMediaItemIndex
+            if (i in queue.indices && !queue[i].isLive && exo.currentPosition > 10_000) {
+                WatchStore.setProgress(
+                    prefs, queue[i].url, exo.currentPosition,
+                    if (exo.duration > 0) exo.duration else 0L
+                )
+            }
+        }
+    }
     DisposableEffect(Unit) {
         onDispose {
-            // The stream KEEPS PLAYING (it moves to the corner). Just remember
-            // where we are in movies/episodes, and detach this screen's view.
-            runCatching {
-                val i = exo.currentMediaItemIndex
-                if (i in queue.indices && !queue[i].isLive && exo.currentPosition > 10_000) {
-                    WatchStore.setProgress(
-                        prefs, queue[i].url, exo.currentPosition,
-                        if (exo.duration > 0) exo.duration else 0L
-                    )
-                }
-            }
+            // Browsing/settings can keep the stream alive. A confirmed stop
+            // saved progress before releasing it, so don't read that player again.
+            if (!playbackStopped) savePlaybackPosition()
             pvRef?.let { Playback.detachVideoView(it); it.player = null }
             if (matchFps) (context as? android.app.Activity)?.let { clearFrameRateMatch(it) }
         }
@@ -6933,14 +6944,50 @@ fun PlayerScreen(
             }
         }
     }
-    // ONE press of Back = out to the channel list (the show keeps playing in
-    // the corner). Another press there = main menu. Simple, like a cable box.
-    BackHandler {
-        if (miniGuideOpen) {
-            miniGuideOpen = false
-        } else {
-            onBack(Playback.currentIdxC.intValue, exo.currentPosition.coerceAtLeast(0L))
+    fun playerBack() {
+        when {
+            showStopWatching -> showStopWatching = false
+            miniGuideOpen -> miniGuideOpen = false
+            queue.getOrNull(Playback.currentIdxC.intValue)?.isLive == true ->
+                onBack(Playback.currentIdxC.intValue, exo.currentPosition.coerceAtLeast(0L))
+            overlayVisible || pvRef?.isControllerFullyVisible == true -> {
+                pvRef?.hideController()
+                overlayVisible = false
+            }
+            else -> showStopWatching = true
         }
+    }
+    fun stopWatching() {
+        if (playbackStopped) return
+        val index = Playback.currentIdxC.intValue
+        val position = exo.currentPosition.coerceAtLeast(0L)
+        savePlaybackPosition()
+        playbackStopped = true
+        showStopWatching = false
+        Playback.releaseAll()
+        onBack(index, position)
+    }
+    BackHandler { playerBack() }
+    if (showStopWatching) {
+        AlertDialog(
+            onDismissRequest = { showStopWatching = false },
+            containerColor = SurfaceCol,
+            title = { Text("Stop watching?", color = Ink) },
+            text = { Text("Stop this show and return to browsing? Your place will be saved.", color = Muted) },
+            confirmButton = {
+                TextButton(modifier = Modifier.tvFocus(RoundedCornerShape(18.dp)),
+                    onClick = { stopWatching() }) { Text("STOP WATCHING", color = Ink) }
+            },
+            dismissButton = {
+                val keepWatchingFocus = remember { FocusRequester() }
+                LaunchedEffect(Unit) {
+                    androidx.compose.runtime.withFrameNanos { }
+                    keepWatchingFocus.requestFocus()
+                }
+                TextButton(modifier = Modifier.focusProperties { canFocus = true }.focusRequester(keepWatchingFocus).tvFocus(RoundedCornerShape(18.dp)),
+                    onClick = { showStopWatching = false }) { Text("KEEP WATCHING", color = Ink) }
+            }
+        )
     }
 
     // Channel surfing: +1 / −1 through the category, wrapping at the ends —
@@ -6964,6 +7011,14 @@ fun PlayerScreen(
         // checked before anything on screen sees the press.
         PlayerKeys.priority = { key ->
             when (key) {
+                // Own Back before Media3 or its focused child can handle it.
+                // Dialogs keep their normal dismissal; live keeps cable-box Back.
+                android.view.KeyEvent.KEYCODE_BACK -> {
+                    if (queue.getOrNull(Playback.currentIdxC.intValue)?.isLive == false && !showStopWatching) {
+                        playerBack()
+                        true
+                    } else false
+                }
                 android.view.KeyEvent.KEYCODE_DPAD_CENTER,
                 android.view.KeyEvent.KEYCODE_ENTER -> {
                     if (queue.getOrNull(Playback.currentIdxC.intValue)?.isLive == true && !miniGuideOpen) {
@@ -7469,7 +7524,7 @@ fun PlayerScreen(
                 }
             ) {
                 IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = {
-                    onBack(Playback.currentIdxC.intValue, exo.currentPosition.coerceAtLeast(0L))
+                    playerBack()
                 }) {
                     Icon(Icons.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
                 }
