@@ -1,0 +1,87 @@
+# Streaming resilience: primary-source research for RYZOD
+
+Requested filename date: 2026-11-01. Sources checked: 2026-11-02 UTC. Scope: read-only public research; this document is the sole owned change. No production changes, stream probes, or diagnosis of the user's actual feed were performed.
+
+## Findings that should drive the app
+
+- The user reports Ethernet, good YouTube/Prime playback, and the same selected IPTV channels failing in RYZOD and TiviMate. This makes a problem exclusive to RYZOD less likely, but **does not prove a provider/server fault**. Shared upstream feeds, delivery routes, channel encoding/timestamps, device codec support, and shared playback components remain hypotheses. Other services working does not test the same origin, route, encoding, or buffering behavior.
+- Major-service resilience combines delivery infrastructure, encoded alternatives, player adaptation, and measurements. A player setting cannot reproduce infrastructure or create a missing rendition.
+- **A fixed, single-rendition MPEG-TS feed cannot have its network bandwidth reduced by lowering decoder/display resolution.** The original encoded bytes must still arrive. Bandwidth savings require requesting a genuinely lower-bitrate source/rendition before those bytes cross the constrained link. A resolution/bitrate track-selection cap only selects among existing tracks; it does not encode new ones. [A1, A2, M1]
+- Local transcoding still receives the full original input and adds decode/encode work, resource use, and pipeline delay; it does not reduce the device's incoming source bandwidth. This is an engineering consequence of the pipeline, supported by Android's distinction between transcoding and compressed-sample copying. It is not a recommended default buffering fix. [M3]
+- MPEG-TS is a container, not proof that adaptation is absent: HLS can carry TS segments with multiple variants. Conversely, an `.m3u8` can expose only one video rendition. Inspect prepared tracks/manifest content rather than deciding from the extension. [A1, A2, M1]
+
+## Concise platform comparison
+
+| Platform | Officially supported practice | Useful RYZOD lesson and evidence limit |
+| --- | --- | --- |
+| Netflix | Open Connect embeds appliances in qualifying ISP networks and uses peering to localize traffic. Appliances feed health/load into content routing. Netflix engineering describes encoding multiple quality representations and adaptive client selection. [N1–N3] | Delivery capacity and rendition ladders are separate from decoder controls. Encoding article is from 2015: evidence of the practice, not a current exhaustive architecture or ladder. No claim that this user's Netflix/other traffic uses an embedded cache. |
+| YouTube | Google documents cacheable YouTube delivery through GGC or core locations. YouTube adjusts quality for viewing conditions, offers quality/data-saver choices, and exposes Stats for nerds/debug information. Lower live latency reduces read-ahead protection and increases buffering risk. [Y1–Y4] | Show observable playback metrics and actual quality choices. A good YouTube session does not measure IPTV-path capacity. Do not infer that every live video is cached or every viewer uses GGC. |
+| Amazon Prime Video | AWS's 2019 engineering post explicitly describes Prime's multiple CDNs including CloudFront, with evaluation using rebuffer-free/error-free sessions, bitrate, response time, and first-frame time, segmented by ISP/location/device. Prime's live help describes bandwidth-dependent quality and supported-device requirements; playback help also checks app/software and display compatibility. [P1–P3] | Measure experience per source/device rather than relying on a generic speed test. Historical multi-CDN evidence does not establish today's complete topology, traffic allocation, or identical treatment of every event. Do not extrapolate every AWS architecture example to Prime. |
+| Apple / HLS | Apple's HLS overview describes alternate bitrates and client switching. Its device authoring specification requires multiple video bitrates (§9.9), identifies rendition attributes, and addresses continuity/timestamps. Low-Latency HLS requires backend/delivery changes. [A1–A3] | Offer real variants; verify stream conformance when possible. HLS is a protocol/toolchain reference, **not disclosure of Apple TV+ delivery architecture**, nor a guarantee that third-party IPTV obeys Apple's authoring requirements. |
+| Disney+ | Official help describes automatic quality based on device/network capability and per-device data-usage controls that lower visual quality when data use is reduced. [D1] | Clear data-saving choices are a useful UI precedent when the source supports them. This help source does not disclose CDN vendors, capacity, rendition ladders, or ABR internals. |
+| Hulu | Official help says quality adjusts with available bandwidth and varies by content/device. Separate help documents Data Saver/Best Available on desktop and cellular-data controls on mobile. [H1, H2] | Scope quality controls to supported situations; do not imply all TV clients offer manual resolution selection. No CDN/topology claims from these help pages. |
+| Max / HBO Max | Current official HBO Max help says quality adjusts with bandwidth/connection speed and resolution cannot be manually adjusted; format availability also depends on device/plan. [X1] | Automatic quality and manual controls are separate capabilities. This source does not reveal CDN allocation, exact ladders, buffer targets, or decoder implementation. |
+| Peacock | Official help covers transmission delays/buffering, competing network activity, connection checks, background apps, and device/app troubleshooting. [C1, C2] | Separate network symptoms from device symptoms. These pages do **not** establish a particular CDN, ABR algorithm, manual-quality control, or low-latency architecture. Their simplified “packets” explanation is not a protocol specification. |
+
+## Concrete recommendations for the stream-health panel
+
+These are RYZOD recommendations inferred from the sources, not claims about existing app implementation or exact platform parity. Media3 suggestions apply only if that is the playback engine; check the project's pinned API version before implementation. [M1, M2]
+
+| Panel item | Measurement and interpretation |
+| --- | --- |
+| Playback status | Show starting, playing, buffering, paused, failed; distinguish initial startup, seek/channel-switch waits, and involuntary rebuffering. Track stalls and stall duration per session. |
+| Buffered ahead | Show playable seconds and a short trend. Label unavailable/unknown values. Buffer duration is not measured end-to-end live latency. |
+| Delivery activity | Show bytes received, recent receive rate/window, last-data age, and load errors/status when available. Label receive rate separately from estimated available bandwidth and declared media bitrate. A paced single TS feed's receive rate is **not** a broadband capacity test; it may approximate the feed rate. |
+| Active video | Show actual selected resolution, codec/profile, frame rate and declared bitrate if known. Keep unknown bitrate unknown. Include supported alternate video renditions rather than counting audio/subtitles as quality choices. |
+| Device/rendering | Show decoder name/type if exposed, dropped frames over a stated window, and decoder/render errors separately from network/load failures. Drops can also reflect scheduling, timestamps or rendering; they do not prove decoder overload. |
+| Session diagnostics | Include app/OS/device versions, playback-engine version, UTC timestamps, channel identifier, sanitized source identity, retries/errors, and selected-track changes. Prefer a bounded local event history and user-initiated copy/export. Redact credentials, signed query tokens, playlist passwords, and sensitive URL paths. |
+
+Suggested neutral interpretations:
+
+- “Buffer running low; waiting for stream data” when measured starvation coincides with stalled reads. This identifies delivery starvation, not whether its origin is the server, ISP route, or local connection.
+- “Frames dropping while buffer is available” when both are observed. Suggest checking format/device compatibility; do not declare a CPU/decoder cause proven.
+- “Stream format/playback error” for parse, timestamp, or codec failures with an available error detail. A full buffer does not certify valid media.
+- Avoid “Server overloaded,” “Your internet is slow,” or a universal green network score based only on Ethernet, ping, or other-service success.
+
+## Lower-quality and buffering behavior
+
+1. After preparation, enumerate supported same-content video tracks. Show Auto plus available choices or a lower-bitrate preference; verify the active selection after changes. Resolution alone does not order bitrate reliably, especially across codecs. [M1]
+2. With one fixed rendition, show **“Lower quality unavailable — this source provides one video quality.”** Do not report a cosmetic 720p/display cap as reduced network usage. If provider metadata explicitly maps an SD/HD alternative of the same channel, offer it as a separate source; do not invent mappings from names alone. [A1, M1]
+3. If a source switch is supported, distinguish lower quality from alternate delivery route. A backup at the same bitrate may help availability without reducing bandwidth. Never fabricate a CDN URL or assume changing TS to HLS creates ABR.
+4. Offer a bounded, optional larger-buffer mode with a plain explanation: **“More protection against brief interruptions; slower start and further behind live.”** Exact targets need device/feed measurements, not copied platform numbers. More buffering cannot repair sustained arrival below consumption, malformed media, or decoder failure. Read-ahead protection versus latency is explicitly documented by YouTube; Low-Latency HLS also depends on delivery-system support. [Y4, A3]
+5. Use bounded retry/backoff and visible recovery status rather than rapid reconnect loops; avoid parallel probes or duplicate players that may consume provider connection slots. These are proposed safeguards, not verified behavior of the named services.
+
+## Minimal investigation for this user's report
+
+Without changing production, recommend collecting a short, timestamped comparison of one failing and one good IPTV channel on the same device, player settings, and connection. Compare RYZOD and TiviMate sequentially, not simultaneously. Capture buffering timeline, bytes/read gaps, format, dropped frames, and exact errors. Then, if available and authorized, compare a genuine lower-rendition/alternate provider source and a second device or delivery route, changing one variable at a time.
+
+Repeated cross-player failure is useful evidence to share with the provider, especially with channel IDs and UTC times. Agreement across players still cannot separate shared feed faults, routing/capacity, and common device/codec behavior without additional measurements. YouTube/Prime success is a control for general usability, not proof of IPTV service health or a server-side root cause.
+
+## Verified primary sources and retrieval limits
+
+All links below are official provider documentation, engineering publications, or help. Claims are intentionally narrower than the existence of a large streaming brand. No secondary articles or community posts were used as authority.
+
+- **N1 — Netflix Open Connect overview:** https://openconnect.netflix.com/en/ — opened official overview; ISP-local delivery, embedded appliances, peering.
+- **N2 — Netflix Open Connect Appliances:** https://openconnect.netflix.com/en/appliances — opened full text; high availability, monitoring, health/load-informed routing.
+- **N3 — Netflix TechBlog, High Quality Video Encoding at Scale (2015-12-09):** https://netflixtechblog.com/high-quality-video-encoding-at-scale-d159db052746 — opened full text; codec profiles, quality representations, adaptive selection. Historical engineering account; no current bitrate-number claims adopted.
+- **Y1 — Google Interconnect, Content Served:** https://support.google.com/interconnect/answer/7658599?hl=en — opened full text; YouTube cache/core delivery and serving-location caveats.
+- **Y2 — YouTube, Change the quality of your video:** https://support.google.com/youtube/answer/91449?hl=en — opened full text; adaptive quality, manual choices, device-format limits.
+- **Y3 — YouTube, Send YouTube debug info:** https://support.google.com/youtube/answer/7519898?hl=en — opened official Android help; Stats for nerds, device/session/video and bandwidth details.
+- **Y4 — YouTube, Understand live streaming latency:** https://support.google.com/youtube/answer/7444635?hl=en — opened full text; read-ahead buffer/latency tradeoff, buffering despite sufficient average bitrate.
+- **P1 — AWS, Using multiple content delivery networks for video streaming — part 2 (2019):** https://aws.amazon.com/blogs/networking-and-content-delivery/using-multiple-content-delivery-networks-for-video-streaming-part-2/ — opened full text and located Prime-specific paragraphs. General routing examples elsewhere in this post are not treated as Prime architecture.
+- **P2 — Prime Video, Issues with Live Streams:** https://www.primevideo.com/help?nodeId=GP57SKQ7CB5DRS6F — opened official help (regional redirect); bandwidth-dependent quality and device/TV motion considerations.
+- **P3 — Prime Video, Issues While Playing Titles:** https://www.primevideo.com/help?nodeId=GU85HKX66NVFNQ9Y — opened full text; app/system, HDMI/HDCP and Dolby Vision checks. Listing a possible cause does not diagnose IPTV.
+- **A1 — Apple, HTTP Live Streaming overview:** https://developer.apple.com/documentation/http-live-streaming — official search-index text explicitly describes multiple bitrates, switching and TS/fMP4 delivery; live HTML requires JavaScript and linked Markdown could not be retrieved by the research tool. Cross-checked against A2 and M1.
+- **A2 — Apple, HLS authoring specification for Apple devices:** https://developer.apple.com/streaming/hls-authoring-specification-for-apple-devices.html — opened full text; §§7.2, 9.9–9.10, 9.13–9.15 support continuity, variants, and bitrate/format attributes. Requirements are scoped to this authoring specification.
+- **A3 — Apple, Enabling Low-Latency HLS:** https://developer.apple.com/documentation/http-live-streaming/enabling-low-latency-http-live-streaming-hls — official search-index text describes partial segments, playlist changes, and backend/delivery requirements; same JavaScript/Markdown retrieval limitation as A1. No Apple TV+ architecture inference.
+- **D1 — Disney+, Changing data usage settings:** https://help.disneyplus.com/article/disneyplus-managing-data-usage — official indexed help text verified with targeted search; direct open returned no readable article lines. Supports automatic quality and per-device data controls only; no topology claim.
+- **H1 — Hulu, Video quality:** https://help.hulu.com/article/hulu-video-quality — official indexed help text verified with targeted search; direct open returned no readable article lines. Supports bandwidth adaptation and content/device-dependent availability.
+- **H2 — Hulu, Change video quality and data usage:** https://help.hulu.com/article/hulu-video-quality-settings — official indexed help text; Data Saver/Best Available and desktop/mobile scope. No claim that these controls exist on every TV client.
+- **X1 — HBO Max, Watch in 4K UHD & HDR10 or Dolby Vision:** https://help.hbomax.com/US-en/answer/detail/000002523 — opened full text and located automatic quality/no manual resolution statement. Uses current HBO Max branding; avoids search results from staging/UAT mirrors.
+- **C1 — Peacock, Slow loading or buffering:** https://www.peacocktv.com/help/article/how-do-i-fix-issues-with-slow-loading-or-buffering-on-peacock — opened full text. Speed recommendations are service guidance, not measurements or universal IPTV thresholds.
+- **C2 — Peacock, Device troubleshooting:** https://www.peacocktv.com/help/help/article/device-troubleshooting — opened full text; background apps, connection, restart/cache/app checks.
+- **M1 — Android Media3, Track selection:** https://developer.android.com/media/media3/exoplayer/track-selection — opened full text; prepared available tracks, support/selection state, adaptive groups, constraints and overrides. A constraint cannot synthesize a missing track.
+- **M2 — Android Media3, Analytics:** https://developer.android.com/media/media3/exoplayer/analytics — opened full text; analytics events, initial/rebuffer/seek distinction, playback stats, dropped frames, network bytes, optional-history memory overhead.
+- **M3 — Android Media3, Transformations:** https://developer.android.com/media/media3/transformer/transformations — opened full text; transcoding versus transmuxing, computational cost of decode/re-encode. Used to explain local-transcode limitations, not to propose Transformer as a live IPTV player.
+
+Research limitations: no stream captures, manifest inspection, provider telemetry, controlled device tests, or production changes. Search-index-only sources are explicitly marked; unavailable architecture details remain unknown. Published historical mechanisms are not represented as a complete 2026 deployment inventory. Exact buffer, timeout, and automatic-switch thresholds require RYZOD-specific validation.

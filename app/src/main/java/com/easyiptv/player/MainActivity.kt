@@ -17,6 +17,8 @@ import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -1726,17 +1728,37 @@ private fun ErrorBox(err: String, onRetry: () -> Unit, title: String = "Couldn't
     }
 }
 
+@kotlin.OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 private fun GuideRefreshTools(loading: Boolean, onRefresh: () -> Unit) {
-    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-        TextButton(onClick = onRefresh, enabled = !loading,
-            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-            modifier = Modifier.heightIn(min = 28.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)).tvFocus(RoundedCornerShape(12.dp))) {
-            Text(if (loading) "UPDATING…" else "↻ UPDATE GUIDE", color = Ink, fontSize = 11.sp)
+    var showHealth by remember { mutableStateOf(false) }
+    // Observe the engine's state so a stopped stream disables the entry too.
+    val playbackState by Playback.playStateC
+    val live = remember(playbackState, Playback.currentIdxC.intValue, Playback.player) {
+        Playback.player != null && Playback.queue.getOrNull(Playback.currentIdxC.intValue)?.isLive == true
+    }
+    if (showHealth) StreamHealthDialog { showHealth = false }
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val compact = maxWidth < 260.dp
+        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+            androidx.compose.foundation.layout.FlowRow(Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center) {
+                TextButton(onClick = onRefresh, enabled = !loading,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    modifier = Modifier.heightIn(min = 28.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)).tvFocus(RoundedCornerShape(12.dp))) {
+                    Text(if (loading) "UPDATING…" else if (compact) "UPDATE" else "↻ UPDATE GUIDE", color = Ink, fontSize = 11.sp)
+                }
+                TextButton(onClick = { showHealth = true }, enabled = live,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    modifier = Modifier.semantics { contentDescription = "Stream health" }
+                        .heightIn(min = 28.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)).tvFocus(RoundedCornerShape(12.dp))) {
+                    Text(if (compact) "HEALTH" else "STREAM HEALTH", color = if (live) Ink else Muted, fontSize = 11.sp)
+                }
+            }
+            Text("Guide comes from your provider • Updates may take 1–2 minutes or longer",
+                color = Muted, fontSize = 9.sp, lineHeight = 10.sp, maxLines = 2,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center)
         }
-        Text("Guide comes from your provider • Updates may take 1–2 minutes or longer",
-            color = Muted, fontSize = 9.sp, lineHeight = 10.sp, maxLines = 2,
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center)
     }
 }
 
@@ -2921,6 +2943,21 @@ object Playback {
 
     // Compose-observable playback state, shared by every screen.
     val currentIdxC = androidx.compose.runtime.mutableIntStateOf(0)
+    internal val streamHealth = StreamHealthMeter()
+    internal val streamQuality = StreamQualityController()
+    internal var dualStreamStatus = "Off — single stream"
+        private set
+    private var dualStreamSession: DualHlsDataSourceFactory? = null
+    private var trialPlainDataFactory: androidx.media3.datasource.DataSource.Factory? = null
+
+    internal fun dualDeliveryObservationPending(): Boolean = dualStreamSession?.isDeliveryObservationPending == true
+
+    private fun closeDualStreamTrial() {
+        dualStreamSession?.close()
+        dualStreamSession = null
+    }
+    internal var streamStats: androidx.media3.exoplayer.analytics.PlaybackStatsListener? = null
+        private set
     val playStateC = androidx.compose.runtime.mutableIntStateOf(Player.STATE_IDLE)
     val streamDeadC = androidx.compose.runtime.mutableStateOf(false)
     val everReadyC = androidx.compose.runtime.mutableStateOf(false)
@@ -3070,6 +3107,8 @@ object Playback {
         stopGovernor()
         p.stop()
         p.clearMediaItems()
+        closeDualStreamTrial()
+        dualStreamStatus = "Trial inactive during saved pause playback"
         p.playWhenReady = keepPlaying && !backgroundSuspended
         Timeshift.start(ctx, tsUrl(ch.url), prefsRef) { ready ->
             if (myGen != playbackGen || player !== p || !liveMode) return@start
@@ -3194,7 +3233,11 @@ object Playback {
             .setConnectTimeoutMs(15_000)
             .setReadTimeoutMs(20_000)
             .setAllowCrossProtocolRedirects(true)
-        val mediaData = androidx.media3.datasource.DefaultDataSource.Factory(context, mediaHttp)
+        val plainMediaData = androidx.media3.datasource.DefaultDataSource.Factory(context, mediaHttp)
+        trialPlainDataFactory = plainMediaData
+        val mediaData = androidx.media3.datasource.DataSource.Factory {
+            plainMediaData.createDataSource().also { it.addTransferListener(streamHealth.newTransferListener()) }
+        }
 
         // Normal/live uses the cheap extractor path. Only MPEG-TS VOD gets the
         // more tolerant (and more CPU-expensive) parser used for malformed files.
@@ -3223,15 +3266,25 @@ object Playback {
             .setConnectTimeoutMs(15_000)
             .setReadTimeoutMs(20_000)
             .setAllowCrossProtocolRedirects(true)
-        val browserData = androidx.media3.datasource.DefaultDataSource.Factory(context, browserHttp)
+        val browserData = androidx.media3.datasource.DefaultDataSource.Factory(context,
+            androidx.media3.datasource.DataSource.Factory {
+                browserHttp.createDataSource().also { it.addTransferListener(streamHealth.newTransferListener()) }
+            })
         browserVodMediaSources = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(browserData, tolerantTsExtractors)
             .setLoadErrorHandlingPolicy(androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy(8))
         val p = ExoPlayer.Builder(context, renderersFactory)
+            .setTrackSelector(androidx.media3.exoplayer.trackselection.DefaultTrackSelector(context,
+                SmoothAdaptiveSelectionFactory { prefs.getBoolean("live_smooth", false) }))
             .setMediaSourceFactory(standardMediaSources!!)
             .setSeekBackIncrementMs(10_000)
             .setSeekForwardIncrementMs(30_000)
             .setLoadControl(loadControl)
             .build()
+        // Aggregate existing analytics events only; never retain event history,
+        // launch a probe, or open another provider connection.
+        streamStats = androidx.media3.exoplayer.analytics.PlaybackStatsListener(false, null).also {
+            p.addAnalyticsListener(it)
+        }
         // Proper audio focus: when the customer leaves for the Fire TV home
         // screen or another app grabs the speakers, Android pauses us
         // automatically — no more channel audio haunting the main menu.
@@ -3761,6 +3814,9 @@ object Playback {
         directLive = true
         p.stop()
         p.clearMediaItems()
+        closeDualStreamTrial()
+        if (!preserveDirect) streamQuality.reset(p)
+        streamHealth.reset()
         val policy = StreamBufferPolicy.from(prefsRef ?: return)
         val item = MediaItem.Builder()
             .setTag(LIVE_BUFFER_TAG)
@@ -3772,7 +3828,20 @@ object Playback {
             .setUri(Uri.parse(ch.url))
             .setMediaMetadata(MediaMetadata.Builder().setTitle(ch.name).build())
             .build()
-        p.setMediaItem(item)
+        val prefs = prefsRef ?: return
+        val backgroundSlots = (if (Recorder.activeName.value != null) maxOf(1, ProviderStreams.recordingSlots()) else 0) +
+            ProviderStreams.downloadSlots(ctx, prefs)
+        val dualPlan = planDualStreamTrial(prefs, ch.url, backgroundSlots)
+        dualStreamStatus = dualPlan.status
+        val plainFactory = trialPlainDataFactory
+        if (dualPlan.active && plainFactory != null) {
+            val trial = DualHlsDataSourceFactory(plainFactory, Net.UA) { streamHealth.newTransferListener() }
+            dualStreamSession = trial
+            val source = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(trial)
+                .setLoadErrorHandlingPolicy(androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy(8))
+                .createMediaSource(item)
+            p.setMediaSource(source)
+        } else p.setMediaItem(item)
         // Set the requested state while IDLE, before prepare. An internal paused
         // fallback must not look like a new user Pause and start another writer.
         p.playWhenReady = startPlaying
@@ -3823,6 +3892,10 @@ object Playback {
             // Movies / episodes / downloads / recordings: no periodic live-TV
             // supervision at all. Keep the Fire Stick focused on decode/render.
             liveMode = false
+            closeDualStreamTrial()
+            dualStreamStatus = "Off — on-demand playback uses one stream"
+            streamQuality.reset(p)
+            streamHealth.reset()
             stopVideoHealthWatchdog()
             liveProviderReserved = false
             vodUaFallbackUsed = false
@@ -3883,6 +3956,7 @@ object Playback {
 
     fun suspendForBackground() {
         pauseForVisibility()
+        closeDualStreamTrial()
         val p = player ?: return
         if (Recorder.activeName.value != null) {
             p.pause()
@@ -3932,6 +4006,18 @@ object Playback {
         }
     }
 
+    internal fun onProviderBudgetChanged() {
+        if (dualStreamSession == null) return
+        val prefs = prefsRef ?: return
+        val context = appContext ?: return
+        val channel = queue.getOrNull(currentIdxC.intValue) ?: return
+        val background = (if (Recorder.activeName.value != null) maxOf(1, ProviderStreams.recordingSlots()) else 0) +
+            ProviderStreams.downloadSlots(context, prefs)
+        if (!planDualStreamTrial(prefs, channel.url, background).active) {
+            zapTo(currentIdxC.intValue, preserveDirect = true, startPlaying = player?.playWhenReady == true)
+        }
+    }
+
     fun livePathLabel(): String = when {
         Timeshift.active -> "PAUSE RECORDING"
         simpleRaw -> "LIVE • PAUSE AVAILABLE"
@@ -3945,11 +4031,11 @@ object Playback {
         val cur = queue.getOrNull(currentIdxC.intValue) ?: return 0
         if (cur.url.startsWith("/") || cur.url.startsWith("file:")) return 0
         if (player == null) return 0
-        if (liveProviderReserved) return 1
+        if (liveProviderReserved) return if (dualStreamSession != null) 2 else 1
         if (playStateC.intValue == Player.STATE_IDLE) return 0
         return if (liveMode && !simpleRaw && !directLive) {
             if (Timeshift.active) 1 else 0
-        } else 1
+        } else if (dualStreamSession != null) 2 else 1
     }
 
     /** Canonical provider URL for the currently playing live channel. */
@@ -3960,6 +4046,12 @@ object Playback {
 
     /** Full stop: close the one stream, stop the DVR recorder, free the decoders. */
     fun releaseAll() {
+        closeDualStreamTrial()
+        dualStreamStatus = "Off — no playback"
+        trialPlainDataFactory = null
+        streamQuality.reset(player)
+        streamHealth.reset()
+        streamStats = null
         liveProviderReserved = false
         playbackGen++
         videoHealthSession++
@@ -4575,13 +4667,13 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         Spacer(Modifier.height(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Chip("1 stream", providerStreams == 1) {
-                providerStreams = 1; ProviderStreams.setMax(prefs, 1)
+                providerStreams = 1; ProviderStreams.setMax(prefs, 1); Playback.onProviderBudgetChanged()
             }
             Chip("2 streams", providerStreams == 2) {
-                providerStreams = 2; ProviderStreams.setMax(prefs, 2)
+                providerStreams = 2; ProviderStreams.setMax(prefs, 2); Playback.onProviderBudgetChanged()
             }
             Chip("3 streams", providerStreams == 3) {
-                providerStreams = 3; ProviderStreams.setMax(prefs, 3)
+                providerStreams = 3; ProviderStreams.setMax(prefs, 3); Playback.onProviderBudgetChanged()
             }
         }
         Text(
@@ -4693,6 +4785,19 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
         Text("A lighter live player with no added startup or recovery wait, mini guide or buffering message. Try Smooth when larger buffers keep stopping to refill. A 20-second buffer helps with brief interruptions only if the stream can refill it fast enough. Neither mode fixes a slow connection or an overloaded provider. Your buffer settings below are saved for when Smooth is off.",
             fontSize = 12.sp, color = Muted, modifier = Modifier.padding(top = 4.dp, bottom = 16.dp))
 
+        var dualTrial by remember { mutableStateOf(prefs.getBoolean("dual_stream_trial", false)) }
+        Text("Dual Stream Trial", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(if (dualTrial) "Allowed" else "Off", color = Ink, modifier = Modifier.weight(1f))
+            androidx.compose.material3.Switch(checked = dualTrial, onCheckedChange = { enabled ->
+                dualTrial = enabled
+                prefs.edit().putBoolean("dual_stream_trial", enabled).apply()
+                onModeChanged()
+            }, modifier = Modifier.testTag("dual-stream-switch").tvFocus(RoundedCornerShape(18.dp)),
+                colors = androidx.compose.material3.SwitchDefaults.colors(checkedThumbColor = Ink, checkedTrackColor = MenuVioletSelected))
+        }
+        Text("Experimental and off by default. For compatible HLS feeds, race two copies of a complete video segment and use the first copy. Requires two free provider-stream slots; other feeds stay single-stream. Uses extra data and may add live delay. Open a channel again after changing this setting; Stream health shows whether the trial is active. Both copies can still fail when the source itself stops.",
+            fontSize = 12.sp, color = Muted, modifier = Modifier.padding(top = 4.dp, bottom = 16.dp))
         Text("Stream buffer", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
         Text(
@@ -6731,6 +6836,7 @@ fun PlayerScreen(
     var pvRef by remember { mutableStateOf<PlayerView?>(null) }
     // Remote callbacks live across episode transitions; keep their state stable.
     var showStopWatching by remember { mutableStateOf(false) }
+    var showStreamHealth by remember { mutableStateOf(false) }
     LaunchedEffect(current.url) { showStopWatching = false }
     var playbackStopped by remember { mutableStateOf(false) }
     val remoteDvrSeek = remember { DvrSeekAccelerator() }
@@ -6946,6 +7052,7 @@ fun PlayerScreen(
     }
     fun playerBack() {
         when {
+            showStreamHealth -> showStreamHealth = false
             showStopWatching -> showStopWatching = false
             miniGuideOpen -> miniGuideOpen = false
             queue.getOrNull(Playback.currentIdxC.intValue)?.isLive == true ->
@@ -6968,6 +7075,7 @@ fun PlayerScreen(
         onBack(index, position)
     }
     BackHandler { playerBack() }
+    if (showStreamHealth) StreamHealthDialog { showStreamHealth = false }
     if (showStopWatching) {
         AlertDialog(
             onDismissRequest = { showStopWatching = false },
@@ -7011,6 +7119,12 @@ fun PlayerScreen(
         // checked before anything on screen sees the press.
         PlayerKeys.priority = { key ->
             when (key) {
+                android.view.KeyEvent.KEYCODE_INFO -> {
+                    if (queue.getOrNull(Playback.currentIdxC.intValue)?.isLive == true && !showStreamHealth) {
+                        showStreamHealth = true
+                        true
+                    } else false
+                }
                 // Own Back before Media3 or its focused child can handle it.
                 // Dialogs keep their normal dismissal; live keeps cable-box Back.
                 android.view.KeyEvent.KEYCODE_BACK -> {
