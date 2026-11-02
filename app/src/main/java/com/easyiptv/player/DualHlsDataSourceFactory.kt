@@ -31,6 +31,7 @@ import okhttp3.Response
  * Trial transfer callbacks count usable segment payload, not duplicate wire traffic;
  * they are not a measurement of physical ingress bandwidth.
  */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 internal class DualHlsDataSourceFactory(
     private val baseFactory: DataSource.Factory,
     private val userAgent: String,

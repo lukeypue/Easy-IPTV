@@ -50,6 +50,7 @@ private data class PanelObservation(
 )
 
 /** No polling exists outside the dialog; network telemetry uses the current feed. */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun StreamHealthDialog(onClose: () -> Unit) {

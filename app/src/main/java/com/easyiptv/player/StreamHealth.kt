@@ -16,6 +16,7 @@ internal data class StreamTransferSnapshot(
 )
 
 /** Passive HTTP accounting. Call snapshot from the open panel; no polling or network work here. */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 internal class StreamHealthMeter(private val clock: () -> Long = { SystemClock.elapsedRealtime() }) {
     private val lock = Any()
     private var generation = 0L

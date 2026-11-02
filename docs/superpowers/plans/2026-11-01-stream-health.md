@@ -6,9 +6,9 @@
 
 **Spec:** docs/superpowers/specs/2026-11-01-stream-health-design.md
 
-- [ ] Add transport/classifier and quality tests; observe their failures before implementations, then verify realistic healthy/idle/starving/local/reset/unsupported cases.
-- [ ] Add guide-entry/player INFO/UI regressions before integration; preserve focus, playback and Back behavior; sample formats/buffer/counters honestly.
-- [ ] Integrate session reset/HTTP transfer listener and quality reset into existing Playback; show unknown/paused/local states without false server diagnoses.
+- [x] Add transport/classifier and quality tests; observe their failures before implementations, then verify realistic healthy/idle/starving/local/reset/unsupported cases.
+- [x] Add guide-entry/player INFO/UI regressions before integration; preserve focus, playback and Back behavior; sample formats/buffer/counters honestly.
+- [x] Integrate session reset/HTTP transfer listener and quality reset into existing Playback; show unknown/paused/local states without false server diagnoses.
 - [ ] Review independently, inspect phone/TV panel, run focused and full Android/Fire suites, lint/sign/alignment/publisher gates.
 - [ ] Publish4.87/code111 and verify public packages, exact source ZIP and both updater manifests. Include platform research with primary sources.
 
@@ -24,3 +24,5 @@
 - Phone and TV screenshots reviewed at the enlarged application font scale; details scroll with the remote while quality controls and Close remain accessible.
 
 - Local final focused suite: 119 tests, zero failures/errors/skips. Existing guide contracts: 14 cases passed. Offline publisher suite: 283 cases passed. Release workflow actionlint passed. Full 344-case distribution suites, signed packages and public verification are still gated by CI.
+
+- First CI run passed both full distribution regression gates. Lint then found 75 missing Media3 opt-in annotations across the new transport, meter and panel. Added declaration-level opt-ins in those three files, retaining all lint checks; local lintDebug now passes. Release reruns target the corrected source commit.
