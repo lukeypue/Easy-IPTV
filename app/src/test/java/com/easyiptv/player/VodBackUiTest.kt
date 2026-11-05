@@ -62,6 +62,18 @@ class VodBackUiTest {
         ui.activity.dispatchKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_BACK, 0))
     }
 
+    @Test fun movieControlsDoNotShowTheUnreachableSettingsGear() {
+        try {
+            open()
+            ui.runOnIdle {
+                val gear = playerView().findViewById<View>(androidx.media3.ui.R.id.exo_settings)
+                assertTrue("Remove the unused bottom-right gear", gear == null || gear.visibility == View.GONE)
+                assertNotNull(playerView().findViewById<View>(androidx.media3.ui.R.id.exo_play_pause))
+                assertNotNull(playerView().findViewById<View>(androidx.media3.ui.R.id.exo_progress))
+            }
+        } finally { ui.runOnIdle { Playback.releaseAll() } }
+    }
+
     @Test fun systemBackHidesMovieControlsWithoutLeavingOrPausing() {
         try {
             open()

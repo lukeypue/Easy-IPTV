@@ -1,0 +1,40 @@
+name: Guide scrolling, focus and player controls
+on:
+  push:
+    branches: [fix/ryzod-guide-scroll-player-gear]
+permissions:
+  contents: read
+jobs:
+  focused:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Select affected UI classes before Robolectric forks
+        run: |
+          cat > "$RUNNER_TEMP/focus-tests.gradle" <<'GRADLE'
+          allprojects {
+              tasks.withType(org.gradle.api.tasks.testing.Test).configureEach {
+                  include '**/*Guide*Test.class'
+                  include '**/*VodBackUiTest.class'
+                  include '**/*HomeMenuEntryTest.class'
+                  include '**/*EnlargedUiTest.class'
+              }
+          }
+          GRADLE
+      - name: Guide and player regression tests
+        run: |
+          gradle -I "$RUNNER_TEMP/focus-tests.gradle" -PryzodDistribution=fire testDebugUnitTest lintDebug --max-workers=1 -Pkotlin.incremental=false --no-daemon --stacktrace
+          python3 tools/verify_unit_results.py app/build/test-results/testDebugUnitTest 21
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: guide-scroll-test-results
+          path: app/build/test-results

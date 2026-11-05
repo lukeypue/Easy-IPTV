@@ -33,6 +33,7 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.relocation.BringIntoViewRequester
@@ -85,6 +86,7 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Today
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Icon
@@ -255,9 +257,9 @@ private val AppColors = darkColorScheme(
 )
 
 /* Fire TV remote: draw a gold outline around whatever the D-pad has focused. */
-/** The remote's highlighter: hot pink, thick, with a soft glow behind it —
- *  you can always tell exactly where you are, even against busy backgrounds. */
+/** The remote's highlighter: a solid pink fill plus a bright outline. */
 private val FocusPink = Color(0xFFFF2FB9)
+private val FocusFill = Color(0xFF94005A)
 
 /** Walks the player's own control panel (play/pause, FF, RW, sound, settings,
  *  progress bar) and gives every button the same hot-pink focus glow as the
@@ -282,7 +284,7 @@ private fun tintPlayerControls(root: android.view.View) {
                     addState(
                         intArrayOf(android.R.attr.state_focused),
                         android.graphics.drawable.GradientDrawable().apply {
-                            setColor(0x40FF2FB9)
+                            setColor(0xFF94005A.toInt())
                             cornerRadius = 28f
                             setStroke(5, pink)
                         }
@@ -296,7 +298,10 @@ private fun tintPlayerControls(root: android.view.View) {
     walk(root)
 }
 
-private fun Modifier.tvFocus(shape: RoundedCornerShape = RoundedCornerShape(14.dp)): Modifier =
+private fun Modifier.tvFocus(
+    shape: RoundedCornerShape = RoundedCornerShape(14.dp),
+    backgroundColor: Color = Color.Transparent
+): Modifier =
     composed {
         var focused by remember { mutableStateOf(false) }
         this
@@ -306,7 +311,7 @@ private fun Modifier.tvFocus(shape: RoundedCornerShape = RoundedCornerShape(14.d
                 scaleY = if (focused) 1.018f else 1f
             }
             .background(
-                color = if (focused) ElectricCyan.copy(alpha = 0.10f) else Color.Transparent,
+                color = if (focused) FocusFill else backgroundColor,
                 shape = shape
             )
             .border(
@@ -316,6 +321,26 @@ private fun Modifier.tvFocus(shape: RoundedCornerShape = RoundedCornerShape(14.d
             )
     }
 
+@Composable
+private fun FocusButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    content: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit
+) {
+    var focused by remember { mutableStateOf(false) }
+    Button(
+        onClick = onClick,
+        modifier = modifier.onFocusChanged { focused = it.isFocused },
+        enabled = enabled,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = if (focused) FocusFill else Accent,
+            contentColor = if (focused) Color.White else AppColors.onPrimary
+        ),
+        content = content
+    )
+}
+
 /**
  * Fire TV's View focus search can climb from Media3's seek bar to the playback
  * row and then get "stuck" there. Wire every visible stock-controller button
@@ -324,6 +349,14 @@ private fun Modifier.tvFocus(shape: RoundedCornerShape = RoundedCornerShape(14.d
  */
 @OptIn(UnstableApi::class)
 private fun wireStockPlayerDpad(root: PlayerView) {
+    // Movies and episodes use the stock controller, whose bottom-right gear
+    // cannot be reached reliably with the Fire TV remote. Keep app settings in
+    // the main menu and remove this unused control before wiring remote focus.
+    root.findViewById<android.view.View>(androidx.media3.ui.R.id.exo_settings)?.apply {
+        visibility = android.view.View.GONE
+        isFocusable = false
+        isClickable = false
+    }
     val progress = root.findViewById<android.view.View>(androidx.media3.ui.R.id.exo_progress) ?: return
     val play = root.findViewById<android.view.View>(androidx.media3.ui.R.id.exo_play_pause)
     progress.isFocusable = true
@@ -1118,7 +1151,7 @@ fun AddPlaylistScreen(first: Boolean, onSaved: (Playlist) -> Unit, onBack: (() -
                 fontSize = 12.sp, color = Muted
             )
             Spacer(Modifier.height(12.dp))
-            Button(
+            FocusButton(
                 onClick = { connect() },
                 enabled = !loading,
                 modifier = Modifier.fillMaxWidth().height(52.dp).tvFocus(RoundedCornerShape(26.dp))
@@ -1144,8 +1177,7 @@ private fun BigOption(title: String, subtitle: String, onClick: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .tvFocus()
-            .background(SurfaceCol, RoundedCornerShape(14.dp))
+            .tvFocus(RoundedCornerShape(14.dp), backgroundColor = SurfaceCol)
             .clickable { onClick() }
             .padding(18.dp)
     ) {
@@ -1411,8 +1443,7 @@ fun HomeScreen(
                             Spacer(Modifier.height(6.dp))
                             Row(
                                 Modifier
-                                    .tvFocus(RoundedCornerShape(8.dp))
-                                    .background(Surface2, RoundedCornerShape(8.dp))
+                                    .tvFocus(RoundedCornerShape(8.dp), backgroundColor = Surface2)
                                     .clickable { onCloseMini() }
                                     .padding(horizontal = 10.dp, vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically
@@ -1610,11 +1641,7 @@ private fun RailItem(label: String, active: Boolean, modifier: Modifier = Modifi
         modifier = modifier
             .padding(horizontal = 6.dp, vertical = 3.dp)
             .fillMaxWidth()
-            .tvFocus(RoundedCornerShape(24.dp))
-            .background(
-                bubbleColor,
-                RoundedCornerShape(24.dp)
-            )
+            .tvFocus(RoundedCornerShape(24.dp), backgroundColor = bubbleColor)
             .border(
                 if (active) 2.dp else 1.dp,
                 Color.White.copy(alpha = if (active) 1f else 0.35f),
@@ -1720,7 +1747,7 @@ private fun ErrorBox(err: String, onRetry: () -> Unit, title: String = "Couldn't
             fontSize = 13.sp, color = Muted
         )
         Spacer(Modifier.height(20.dp))
-        Button(onClick = onRetry, modifier = Modifier.tvFocus(RoundedCornerShape(26.dp))) {
+        FocusButton(onClick = onRetry, modifier = Modifier.tvFocus(RoundedCornerShape(26.dp))) {
             Icon(Icons.Filled.Refresh, contentDescription = null)
             Spacer(Modifier.width(8.dp))
             Text("Try again")
@@ -1985,8 +2012,7 @@ fun LivePane(
                                     else -> false
                                 }
                             }
-                            .tvFocus()
-                            .background(SurfaceCol, RoundedCornerShape(14.dp))
+                            .tvFocus(RoundedCornerShape(14.dp), backgroundColor = SurfaceCol)
                             .clickable {
                                 // Hand the player this WHOLE category, starting on this
                                 // channel — that's what makes channel up/down work.
@@ -2148,6 +2174,26 @@ private fun LiveGridGuide(
         val item=layout.visibleItemsInfo.firstOrNull {it.index==row} ?: return false
         return item.offset>=layout.viewportStartOffset && item.offset+item.size<=layout.viewportEndOffset
     }
+    suspend fun revealRow(row: Int) {
+        val layout = guideListState.layoutInfo
+        val item = layout.visibleItemsInfo.firstOrNull { it.index == row }
+        if (item != null) {
+            val overflow = when {
+                item.offset < layout.viewportStartOffset -> item.offset - layout.viewportStartOffset
+                item.offset + item.size > layout.viewportEndOffset -> item.offset + item.size - layout.viewportEndOffset
+                else -> 0
+            }
+            if (overflow != 0) guideListState.scrollBy(overflow.toFloat())
+        } else {
+            // Down reveals the next row at the bottom, retaining its neighbors.
+            // Aligning every new row at the top caused an abrupt full-page jump.
+            val lastVisible = layout.visibleItemsInfo.lastOrNull()
+            val offset = if (lastVisible != null && row > lastVisible.index)
+                -(layout.viewportEndOffset - lastVisible.size).coerceAtLeast(0)
+            else 0
+            guideListState.scrollToItem(row, offset)
+        }
+    }
     fun moveTo(row: Int, last: Boolean=false, afterPageChange:Boolean=false) {
         if(!afterPageChange && rowFullyVisible(row)) {
             if(runCatching { (if(last) lastCells[row] else firstCells[row])?.requestFocus() ?: error("Row not composed") }.isSuccess) return
@@ -2158,7 +2204,7 @@ private fun LiveGridGuide(
         val target=pendingFocus ?: return@LaunchedEffect
         // A composed row can still be clipped. Reveal it before focus so the
         // default animated bring-into-view does not fight the guide's D-pad move.
-        if(!rowFullyVisible(target.first)) guideListState.scrollToItem(target.first)
+        if(!rowFullyVisible(target.first)) revealRow(target.first)
         androidx.compose.runtime.withFrameNanos { }
         androidx.compose.runtime.withFrameNanos { }
         runCatching { (if(target.second) lastCells[target.first] else firstCells[target.first])?.requestFocus() }
@@ -2196,6 +2242,7 @@ private fun LiveGridGuide(
                 val first = remember { FocusRequester() }
                 val last = remember { FocusRequester() }
                 val channelFocus = remember { FocusRequester() }
+                var channelHighlighted by remember { mutableStateOf(false) }
                 DisposableEffect(chIndex, channels) {
                     firstCells[chIndex]=first; lastCells[chIndex]=last
                     onDispose { firstCells.remove(chIndex); lastCells.remove(chIndex) }
@@ -2213,6 +2260,7 @@ private fun LiveGridGuide(
                             .border(if(ch.url==returnUrl) 3.dp else 1.dp,if(ch.url==returnUrl) OnLightGold else OnLightGold.copy(alpha=.35f),RoundedCornerShape(8.dp))
                             .background(ChannelBlue, RoundedCornerShape(8.dp))
                             .focusRequester(channelFocus)
+                            .onFocusChanged { channelHighlighted = it.isFocused }
                             .onPreviewKeyEvent { ev ->
                                 if(ev.type!=KeyEventType.KeyDown) false else when(ev.key) {
                                     Key.DirectionLeft -> { onLeftToRail(); true }
@@ -2231,17 +2279,19 @@ private fun LiveGridGuide(
                     ) {
                         ChannelIcon(ch.name, ch.icon, 30.dp)
                         Spacer(Modifier.width(5.dp))
-                        Text(ch.name, color = OnLightGold, fontSize = 10.sp, lineHeight = 12.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Text(ch.name, color = if (channelHighlighted) Color.White else OnLightGold, fontSize = 10.sp, lineHeight = 12.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     }
                     Row(Modifier.weight(1f).fillMaxHeight()) {
                         cells.forEachIndexed { cellIndex, cell ->
                             val entry = cell.entry
+                            var programHighlighted by remember { mutableStateOf(false) }
                             val airing = entry != null && now in entry.startMs until entry.endMs
                             Box(Modifier.weight((cell.endMs - cell.startMs).toFloat()).fillMaxHeight()
                                 .padding(start = 2.dp)
                                 .focusRequester(cellFocus[cellIndex])
                                 .then(if(cellIndex==0) Modifier.focusRequester(first) else Modifier)
                                 .then(if(cellIndex==cells.lastIndex) Modifier.focusRequester(last) else Modifier)
+                                .onFocusChanged { programHighlighted = it.isFocused }
                                 .onPreviewKeyEvent { ev ->
                                     if(ev.type!=KeyEventType.KeyDown) false else when(ev.key) {
                                         Key.DirectionDown -> { moveTo(GuideNavigation.row(chIndex,1,channels.size)); true }
@@ -2264,14 +2314,13 @@ private fun LiveGridGuide(
                                         else -> false
                                     }
                                 }
-                                .tvFocus(RoundedCornerShape(4.dp))
-                                .background(if (airing) ProgramCyan.copy(alpha = 0.20f) else Surface2, RoundedCornerShape(4.dp))
+                                .tvFocus(RoundedCornerShape(4.dp), backgroundColor = if (airing) ProgramCyan.copy(alpha = 0.20f) else Surface2)
                                 .clickable { selected = ch to (entry ?: EpgEntry("Manual Recording",
                                     "No program information from provider.", cell.startMs, cell.endMs)) }
                                 .padding(horizontal = 6.dp, vertical = 2.dp)) {
-                                if (entry == null) Text("No information", color = Muted, fontSize = 10.sp, maxLines = 1)
+                                if (entry == null) Text("No information", color = if (programHighlighted) Color.White else Muted, fontSize = 10.sp, maxLines = 1)
                                 else Column {
-                                    Text(entry.title, color = TextGold, fontSize = 10.sp, lineHeight = 11.sp,
+                                    Text(entry.title, color = if (programHighlighted) Color.White else TextGold, fontSize = 10.sp, lineHeight = 11.sp,
                                         fontWeight = if (airing) FontWeight.ExtraBold else FontWeight.SemiBold,
                                         maxLines = 2, overflow = TextOverflow.Ellipsis)
                                     Text("${fmt.format(Date(entry.startMs))}–${fmt.format(Date(entry.endMs))}",
@@ -5351,8 +5400,7 @@ fun SearchTab(
                 Spacer(Modifier.width(8.dp))
                 Box(
                     Modifier
-                        .tvFocus(RoundedCornerShape(24.dp))
-                        .background(Accent.copy(alpha = 0.25f), RoundedCornerShape(24.dp))
+                        .tvFocus(RoundedCornerShape(24.dp), backgroundColor = Accent.copy(alpha = 0.25f))
                         .clickable { startVoice() }
                         .padding(12.dp)
                 ) {
@@ -5406,8 +5454,7 @@ fun SearchTab(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .tvFocus()
-                                .background(SurfaceCol, RoundedCornerShape(12.dp))
+                                .tvFocus(RoundedCornerShape(12.dp), backgroundColor = SurfaceCol)
                                 .clickable { onQuery(r) }
                                 .padding(horizontal = 12.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically
@@ -5592,8 +5639,7 @@ private fun SearchResultsPane(
                     modifier = Modifier
                         .fillMaxWidth()
                         .focusProperties { if(hitIndex==0 && liveHits.isEmpty() && movieHits.isEmpty() && seriesHits.isEmpty()) up=if(keyboardOpen) keyboardFocus else FocusRequester.Default }
-                        .tvFocus()
-                        .background(SurfaceCol, RoundedCornerShape(14.dp))
+                        .tvFocus(RoundedCornerShape(14.dp), backgroundColor = SurfaceCol)
                         .clickable(enabled = ch != null) {
                             if (ch == null) return@clickable
                             onSaveRecent(q)
@@ -6063,8 +6109,7 @@ fun DownloadsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit, requestI
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .tvFocus()
-                            .background(SurfaceCol, RoundedCornerShape(14.dp))
+                            .tvFocus(RoundedCornerShape(14.dp), backgroundColor = SurfaceCol)
                             .clickable { selectedDownload = d }
                             .padding(10.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -6302,7 +6347,7 @@ fun RecordingsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit, request
                 Icon(Icons.Filled.FiberManualRecord, contentDescription = null, tint = Live)
                 Spacer(Modifier.width(8.dp))
                 Text("Recording: $active", color = Ink, fontSize = 14.sp, modifier = Modifier.weight(1f))
-                Button(onClick = {
+                FocusButton(onClick = {
                     confirmStopRecording = true
                 }) {
                     Icon(Icons.Filled.Stop, contentDescription = null)
@@ -6328,8 +6373,7 @@ fun RecordingsPane(prefs: SharedPreferences, onPlay: (Playable) -> Unit, request
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .tvFocus()
-                            .background(SurfaceCol, RoundedCornerShape(14.dp))
+                            .tvFocus(RoundedCornerShape(14.dp), backgroundColor = SurfaceCol)
                             .clickable { selectedRecordingFile = f }
                             .padding(10.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -6424,8 +6468,7 @@ fun PlaylistsPane(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .tvFocus()
-                        .background(SurfaceCol, RoundedCornerShape(14.dp))
+                        .tvFocus(RoundedCornerShape(14.dp), backgroundColor = SurfaceCol)
                         .clickable { onSelect(i) }
                         .padding(12.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -6457,8 +6500,7 @@ fun PlaylistsPane(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .tvFocus()
-                            .background(Surface2, RoundedCornerShape(14.dp))
+                            .tvFocus(RoundedCornerShape(14.dp), backgroundColor = Surface2)
                             .clickable { onAdd() }
                             .padding(14.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -6478,8 +6520,7 @@ fun PlaylistsPane(
 private fun Chip(label: String, active: Boolean, onClick: () -> Unit) {
     Box(
         modifier = Modifier
-            .tvFocus(RoundedCornerShape(999.dp))
-            .background(if (active) MenuVioletSelected else MenuViolet, RoundedCornerShape(999.dp))
+            .tvFocus(RoundedCornerShape(999.dp), backgroundColor = if (active) MenuVioletSelected else MenuViolet)
             .border(if(active) 2.dp else 1.dp, Color.White.copy(alpha=if(active) .95f else .30f), RoundedCornerShape(999.dp))
             .clickable { onClick() }
             .padding(horizontal = 14.dp, vertical = 8.dp)
@@ -6518,8 +6559,7 @@ private fun TvTextField(
     LaunchedEffect(editing) { onEditingChanged(editing) }
     val borderColor = if (searchStyle) Accent else ElectricCyan
     Column(modifier) {
-        Column(Modifier.fillMaxWidth().freshRemoteConfirm().focusRequester(fieldFocus).tvFocus(RoundedCornerShape(12.dp))
-            .background(PanelGlow.copy(alpha = .72f), RoundedCornerShape(12.dp))
+        Column(Modifier.fillMaxWidth().freshRemoteConfirm().focusRequester(fieldFocus).tvFocus(RoundedCornerShape(12.dp), backgroundColor = PanelGlow.copy(alpha = .72f))
             .border(2.dp, borderColor, RoundedCornerShape(12.dp))
             .clickable { editing = true }.padding(horizontal = 14.dp, vertical = 10.dp)) {
             Text(label, color = borderColor, fontSize = 11.sp, fontWeight = FontWeight.Bold)
@@ -6746,8 +6786,7 @@ private fun MediaRow(
                 }
             }
             .focusProperties { if (trailing != null) right = trailingFocus }
-            .tvFocus()
-            .background(SurfaceCol, RoundedCornerShape(14.dp))
+            .tvFocus(RoundedCornerShape(14.dp), backgroundColor = SurfaceCol)
             .clickable { if (!longOkFired) onClick() }
             .padding(10.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -7612,7 +7651,7 @@ fun PlayerScreen(
                     color = Muted, fontSize = 12.sp
                 )
                 Spacer(Modifier.height(12.dp))
-                Button(
+                FocusButton(
                     modifier = Modifier.tvFocus(RoundedCornerShape(22.dp)),
                     onClick = { Playback.tryAgain() }
                 ) { Text("Try again") }
@@ -8363,11 +8402,7 @@ private fun MiniGuide(
                                     true
                                 } else false
                             }
-                            .tvFocus(RoundedCornerShape(6.dp))
-                            .background(
-                                if (selectedNow) ElectricCyan.copy(alpha = 0.22f) else Color(0xCC0A2642),
-                                RoundedCornerShape(6.dp)
-                            )
+                            .tvFocus(RoundedCornerShape(6.dp), backgroundColor = if (selectedNow) ElectricCyan.copy(alpha = 0.22f) else Color(0xCC0A2642))
                             .clickable { touch(); onTune(ch) }
                             .padding(horizontal = 7.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -8434,8 +8469,7 @@ private fun MiniGuide(
                                 .width(170.dp)
                                 .then(if (itemIndex == 0) Modifier.focusRequester(recentFocus) else Modifier)
                                 .focusProperties { up = timelineFocus }
-                                .tvFocus(RoundedCornerShape(9.dp))
-                                .background(Color(0x55202634), RoundedCornerShape(9.dp))
+                                .tvFocus(RoundedCornerShape(9.dp), backgroundColor = Color(0x55202634))
                                 .clickable { touch(); onTune(ch) }
                                 .padding(7.dp),
                             verticalAlignment = Alignment.CenterVertically
@@ -8468,8 +8502,7 @@ private fun MiniGuideControl(
         fontSize = 10.sp, lineHeight = 13.sp,
         fontWeight = FontWeight.Bold,
         modifier = modifier
-            .tvFocus(RoundedCornerShape(14.dp))
-            .background(Color(0x66202634), RoundedCornerShape(14.dp))
+            .tvFocus(RoundedCornerShape(14.dp), backgroundColor = Color(0x66202634))
             // Keep unavailable buttons focusable so the D-pad grid never hits
             // a dead end. Pressing one gives the user the reason it is
             // unavailable (for example DIRECT RESCUE vs DVR Live).
@@ -8489,8 +8522,7 @@ private fun MiniGuideChip(
         label,
         color = color, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
         modifier = modifier
-            .tvFocus(RoundedCornerShape(20.dp))
-            .background(Color(0x66202634), RoundedCornerShape(20.dp))
+            .tvFocus(RoundedCornerShape(20.dp), backgroundColor = Color(0x66202634))
             .clickable { onClick() }
             .padding(horizontal = 14.dp, vertical = 7.dp)
     )

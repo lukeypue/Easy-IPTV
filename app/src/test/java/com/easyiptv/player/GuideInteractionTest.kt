@@ -73,6 +73,20 @@ class GuideInteractionTest {
         ui.onNodeWithText("This Is My Home").performKeyInput { pressKey(Key.DirectionRight) }
         ui.onNodeWithText("Heritage Show").assertIsFocused()
     }
+    @Test fun focusedProgramChangesItsWholeBackgroundColor() {
+        render()
+        ui.onNodeWithText("All Is Lost").performSemanticsAction(SemanticsActions.RequestFocus) { it() }
+        val bounds = ui.onNodeWithText("All Is Lost").fetchSemanticsNode().boundsInWindow
+        ui.runOnIdle { TestScreenshots.save("ryzod-focus-filled-guide.png") }
+        val image = android.graphics.BitmapFactory.decodeFile("${System.getProperty("java.io.tmpdir")}/ryzod-focus-filled-guide.png")
+        // Sample well inside the card, away from its border and text.
+        val pixel = image.getPixel((bounds.left + bounds.width * .90f).toInt(), (bounds.top + bounds.height * .80f).toInt())
+        val red = android.graphics.Color.red(pixel) / 255f
+        val green = android.graphics.Color.green(pixel) / 255f
+        val blue = android.graphics.Color.blue(pixel) / 255f
+        assertTrue("The whole focused show must have a pink fill, not only an outline: ${Integer.toHexString(pixel)}",
+            red > .35f && red > green * 2 && blue > green * 1.5f)
+    }
     @Test fun downAcrossUncomposedRowsKeepsFirstProgramFocus() {
         val now=System.currentTimeMillis()
         val channels=(0..24).map { LiveChannel("row$it","Channel $it",null,null,"https://example.invalid/$it.ts","row$it") }
@@ -88,6 +102,8 @@ class GuideInteractionTest {
         repeat(24) { i ->
             ui.onNodeWithText("Program $i").performKeyInput {pressKey(Key.DirectionDown)}
             ui.waitUntil(5_000) {ui.onAllNodesWithText("Program ${i+1}").filter(isFocused()).fetchSemanticsNodes().isNotEmpty()}
+            ui.onNodeWithText("Program $i").assertIsDisplayed()
+            ui.onNodeWithText("Program ${i+1}").assertIsDisplayed()
         }
         ui.onNodeWithText("Program 24").performKeyInput {pressKey(Key.DirectionDown)}
         ui.onNodeWithText("Program 24").assertIsFocused()
@@ -108,5 +124,39 @@ class GuideInteractionTest {
         ui.onNodeWithText(java.text.SimpleDateFormat("EEE M/d",java.util.Locale.getDefault()).format(tomorrow.time)).performClick()
         ui.onNodeWithText("RECORD").performClick(); ui.onNodeWithText("YES, RECORD").performClick()
         ui.runOnIdle { val s=ScheduleStore.load(prefs).single(); assertEquals(5_400_000L,s.endMs-s.startMs) }
+    }
+
+    @Test fun repeatedDownKeepsTheFocusedProgramVisibleAtLargeTextSize() {
+        val now = System.currentTimeMillis()
+        val channels = (0..79).map { LiveChannel("row$it", "Channel $it", null, null, "https://example.invalid/$it.ts", "row$it") }
+        val guide = channels.mapIndexed { i, ch -> ch.id to listOf(EpgEntry("Program $i", "", now-60_000, now+7_200_000)) }.toMap()
+        EpgStore::class.java.getDeclaredField("byChannel").apply { isAccessible=true }.set(EpgStore, guide)
+        EpgStore.loaded.value = true
+        prefs.edit().putString("last_live_url", channels[30].url).commit()
+        ui.setContent {
+            val density = androidx.compose.ui.platform.LocalDensity.current
+            val inputMode = LocalInputModeManager.current
+            SideEffect { inputMode.requestInputMode(InputMode.Keyboard) }
+            androidx.compose.runtime.CompositionLocalProvider(
+                androidx.compose.ui.platform.LocalDensity provides androidx.compose.ui.unit.Density(density.density, 1.56f)
+            ) {
+                LivePane(prefs, 0, AppData(emptyList(), channels, emptyList(), emptyList(), emptyList(), emptyList()), "all", {_,_->})
+            }
+        }
+        ui.onNodeWithText("Channel 30").performKeyInput { pressKey(Key.DirectionRight) }
+        ui.onNodeWithText("Program 30").assertIsFocused().assertIsDisplayed()
+        var previous = 30
+        repeat(15) {
+            ui.onRoot().performKeyInput {
+                repeat(3) { pressKey(Key.DirectionDown); advanceEventTime(30) }
+            }
+            ui.waitForIdle()
+            val focused = ui.onAllNodes(isFocused() and hasText("Program ", substring = true)).onFirst()
+            focused.assertIsDisplayed()
+            val row = focused.fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.Text]
+                .first { it.text.startsWith("Program ") }.text.removePrefix("Program ").toInt()
+            assertTrue("Down must advance without jumping or getting stuck: $previous -> $row", row in (previous+1)..(previous+3))
+            previous = row
+        }
     }
 }
