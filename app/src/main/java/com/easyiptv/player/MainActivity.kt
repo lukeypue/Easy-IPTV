@@ -524,9 +524,7 @@ class MainActivity : ComponentActivity() {
 
     @android.annotation.SuppressLint("RestrictedApi")
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
-        // A cached playlist may be visible before the fresh provider refresh is
-        // finished. During that short window, swallow remote input so nobody can
-        // drive into half-built lists and trigger the startup crash/glitch path.
+        // Ignore remote input while the startup splash is still covering the UI.
         if (AppInputGate.startupLocked) return true
         // A press that opens an overlay owns its repeats and release. Otherwise
         // ACTION_UP can click the Pause button which just gained focus.
@@ -613,9 +611,9 @@ fun App() {
     var data by remember { mutableStateOf<AppData?>(null) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var reload by remember { mutableIntStateOf(0) }
-    // Cached data may paint immediately, but interaction stays locked until the
-    // fresh live refresh has completed (successfully or with a safe cached fallback).
     var startupSettled by remember(activeIdx, reload) { mutableStateOf(false) }
+    var liveRefreshFinished by remember(activeIdx, reload) { mutableStateOf(false) }
+    var guideRestoreFinished by remember(activeIdx, reload) { mutableStateOf(false) }
 
     // Remembered across screens so "back" lands where you left off.
     var railSection by remember { mutableStateOf("live") }
@@ -779,22 +777,33 @@ fun App() {
     }
 
     LaunchedEffect(source, reload) {
+        guideRestoreFinished = false
+        EpgStore.restore(context, source?.xmltvUrl())
+        guideRestoreFinished = true
+    }
+
+    LaunchedEffect(source, reload) {
         startupSettled = source == null
+        liveRefreshFinished = source == null
         data = null
         loadError = null
-        EpgStore.restore(context, source?.xmltvUrl())
         if (source != null) {
-            var cached: AppData? = null
-            // 1) Open INSTANTLY with the saved copy from last time (if we have one).
-            if (cacheKey != null) {
-                cached = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    DataCache.load(context, cacheKey)
-                }
-                if (cached != null) data = cached
+            // Even without a cache, the menus are useful while the provider is slow.
+            val splashDeadline = launch {
+                kotlinx.coroutines.delay(5_000)
+                startupSettled = true
             }
-            // 2) Refresh LIVE first. Xtream can do this with only two small calls,
-            // so live playback is not fighting VOD/series JSON parsing at startup.
             try {
+                val cached = cacheKey?.let { key ->
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        DataCache.load(context, key)
+                    }
+                }
+                if (cached != null) {
+                    data = cached
+                    startupSettled = true
+                }
+
                 val liveFresh = source.loadLiveOnly()
                 val merged = if (source.supportsSeries) {
                     AppData(
@@ -810,6 +819,7 @@ fun App() {
                     liveFresh
                 }
                 data = merged
+                startupSettled = true
 
                 // Save the refreshed live lineup plus any cached catalog. Do NOT
                 // start a giant VOD/series refresh on a timer behind live TV.
@@ -817,14 +827,15 @@ fun App() {
                 if (cacheKey != null) kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                     DataCache.save(context, cacheKey, merged)
                 }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
             } catch (e: Exception) {
                 loadError = e.message ?: "Provider refresh unavailable"
-            } finally {
-                // Unlock only after the fresh provider attempt has finished. If
-                // it failed but a cache exists, the cache is now a deliberate
-                // fallback rather than an accidental half-loaded startup state.
                 startupSettled = true
+            } finally {
+                splashDeadline.cancel()
             }
+            liveRefreshFinished = true
         }
     }
 
@@ -832,9 +843,9 @@ fun App() {
     // playback, changing provider, or backgrounding cancels the timer and HTTP work.
     // Search may be loading the large catalog, so it does not start XMLTV parsing.
     val epgLifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
-    LaunchedEffect(data != null, source, nav, railSection, epgLifecycleOwner) {
+    LaunchedEffect(data != null, source, nav, railSection, epgLifecycleOwner, guideRestoreFinished) {
         val s = source ?: return@LaunchedEffect
-        if (data == null || nav is Nav.Play || railSection != "live") return@LaunchedEffect
+        if (!guideRestoreFinished || data == null || nav is Nav.Play || railSection != "live") return@LaunchedEffect
         epgLifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.RESUMED) {
             // Re-entered on every resume: check freshness before waiting for expiry.
             kotlinx.coroutines.delay(600)
@@ -845,11 +856,11 @@ fun App() {
     // True lazy loading: Xtream movie/series catalogs are often huge. They load
     // only when the viewer opens an on-demand/search screen, never on a timer
     // behind live TV. This applies in normal AND Simple Mode.
-    LaunchedEffect(railSection, source, activeIdx, startupSettled, nav, catalogRetry) {
+    LaunchedEffect(railSection, source, activeIdx, liveRefreshFinished, nav, catalogRetry) {
         val s = source ?: return@LaunchedEffect
         val needsCatalog = railSection == "movies" || railSection == "series" || railSection == "search"
         val liveBase = data ?: return@LaunchedEffect
-        if (!startupSettled || nav is Nav.Play || !needsCatalog || catalogLoadedThisSession ||
+        if (!liveRefreshFinished || nav is Nav.Play || !needsCatalog || catalogLoadedThisSession ||
             (!s.supportsSeries && catalogRetry==0)) return@LaunchedEffect
         val job=kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]
         if(job!=null) BackgroundWorkSupervisor.replace("catalog",job)
@@ -1286,7 +1297,15 @@ fun HomeScreen(
 
     val railFocus = remember { FocusRequester() }
     val previewFocus = remember { FocusRequester() }
+    val openMenuFocus = remember { FocusRequester() }
     var railReturnRequest by remember { mutableIntStateOf(0) }
+    val waitingForPlaylist = data == null && loadError == null
+    LaunchedEffect(waitingForPlaylist) {
+        if (waitingForPlaylist) {
+            androidx.compose.runtime.withFrameNanos { }
+            openMenuFocus.requestFocus()
+        }
+    }
     val safeData = data ?: AppData(
         liveCats = emptyList(), live = emptyList(),
         vodCats = emptyList(), movies = emptyList(),
@@ -1330,7 +1349,7 @@ fun HomeScreen(
             IconButton(onClick = {
                 menuLevel = if (menuLevel == 0 && hasCategories) 1 else 2
                 railReturnRequest++
-            }, modifier = Modifier.tvFocus(RoundedCornerShape(12.dp))) {
+            }, modifier = Modifier.focusRequester(openMenuFocus).tvFocus(RoundedCornerShape(12.dp))) {
                 Icon(Icons.Filled.Menu, contentDescription = "Open menu", tint = Ink)
             }
             Text(clock, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Ink)
@@ -2141,9 +2160,10 @@ private fun LiveGridGuide(
     var selected by remember { mutableStateOf<Pair<LiveChannel, EpgEntry>?>(null) }
     val returnUrl = prefs.getString("last_live_url", null)
     val returnIndex = channels.indexOfFirst { it.url == returnUrl }.coerceAtLeast(0)
-    val returnFocus = remember(returnUrl, channels.size) { FocusRequester() }
+    val returnFocus = remember(returnUrl) { FocusRequester() }
     val guideListState = androidx.compose.foundation.lazy.rememberLazyListState()
-    LaunchedEffect(returnUrl, channels.size, entryRequest, requestInitialFocus) {
+    // A background lineup refresh can change the row count while the viewer browses.
+    LaunchedEffect(returnUrl, entryRequest, requestInitialFocus) {
         if (channels.isNotEmpty()) {
             runCatching { guideListState.scrollToItem(returnIndex.coerceIn(0, channels.lastIndex)) }
             androidx.compose.runtime.withFrameNanos { }
