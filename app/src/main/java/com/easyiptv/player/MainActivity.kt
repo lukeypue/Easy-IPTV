@@ -3035,7 +3035,7 @@ object Playback {
     internal val streamQuality = StreamQualityController()
     internal var dualStreamStatus = "Off — single stream"
         private set
-    private var dualStreamSession: DualHlsDataSourceFactory? = null
+    @Volatile private var dualStreamSession: DualHlsDataSourceFactory? = null
     private var trialPlainDataFactory: androidx.media3.datasource.DataSource.Factory? = null
 
     internal fun dualDeliveryObservationPending(): Boolean = dualStreamSession?.isDeliveryObservationPending == true
@@ -3051,6 +3051,7 @@ object Playback {
     val everReadyC = androidx.compose.runtime.mutableStateOf(false)
     val videoFpsC = androidx.compose.runtime.mutableFloatStateOf(0f)
 
+    private var smoothProgressiveSources: androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory? = null
     private var standardMediaSources: androidx.media3.exoplayer.source.DefaultMediaSourceFactory? = null
     private var tolerantTsMediaSources: androidx.media3.exoplayer.source.DefaultMediaSourceFactory? = null
     private var liveDvrMediaSources: androidx.media3.exoplayer.source.DefaultMediaSourceFactory? = null
@@ -3151,7 +3152,8 @@ object Playback {
                 StabilityCore.note("live_stall_recover clock=$progressStalled state=${p.playbackState} buffered=${p.totalBufferedDuration} direct=$directLive temporary=${Timeshift.active} mime=${p.videoFormat?.sampleMimeType}")
                 // Disable the decoder before rebuilding the same source. Do not
                 // recreate the shared player or steal a recording's provider slot.
-                if (myGen == playbackGen && player === p && !backgroundSuspended && p.playWhenReady) {
+                if (myGen == playbackGen && player === p && !backgroundSuspended &&
+                    p.playWhenReady && !recoverSmoothLive(p)) {
                     val wasPlaying = p.playWhenReady
                     p.stop()
                     if (!recoverTemporaryLive()) {
@@ -3331,6 +3333,15 @@ object Playback {
         // more tolerant (and more CPU-expensive) parser used for malformed files.
         standardMediaSources = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(mediaData, extractors)
             .setLoadErrorHandlingPolicy(androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy(8))
+        if (prefs.getBoolean("live_smooth", false)) {
+            // Progressive Media3 loads can silently restart unknown-length feeds
+            // at byte zero. Let Smooth's controller decide whether to recover.
+            smoothProgressiveSources = androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(mediaData, extractors)
+                .setLoadErrorHandlingPolicy(object : androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy() {
+                    override fun getRetryDelayMsFor(loadErrorInfo: androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy.LoadErrorInfo) =
+                        C.TIME_UNSET
+                })
+        }
         tolerantTsMediaSources = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(mediaData, tolerantTsExtractors)
             .setLoadErrorHandlingPolicy(androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy(8))
         // DVR Live is a still-growing MPEG-TS stream. Do NOT ask Media3 to
@@ -3522,8 +3533,28 @@ object Playback {
         return (1_000L * retriesP).coerceAtMost(5_000L)
     }
 
+    private fun isSmoothDirectLive() = liveMode && simpleRaw && prefsRef?.getBoolean("live_smooth", false) == true
+
+    private fun recoverSmoothLive(p: ExoPlayer): Boolean {
+        if (!isSmoothDirectLive()) return false
+        val canAdvance = p.isCurrentWindowLive && p.isCurrentWindowDynamic &&
+            p.currentTimeline.getWindow(p.currentMediaItemIndex, androidx.media3.common.Timeline.Window())
+                .defaultPositionMs > p.currentPosition
+        if (canAdvance && playbackRetryDelay() != null) {
+            StabilityCore.note("smooth_live_advance")
+            p.seekToDefaultPosition()
+            p.prepare()
+        } else {
+            StabilityCore.note("smooth_live_no_forward_position")
+            p.stop()
+            liveProviderReserved = false
+            streamDeadC.value = true
+        }
+        return true
+    }
+
     private fun scheduleLiveRecovery(p: ExoPlayer, reason: String, seekLiveWindow: Boolean = false) {
-        if (backgroundSuspended) return
+        if (backgroundSuspended || recoverSmoothLive(p)) return
         val wait = playbackRetryDelay()
         StabilityCore.note("live_reconnect reason=$reason attempt=$retriesP exhausted=${wait == null}")
         if (wait == null) return
@@ -3917,19 +3948,31 @@ object Playback {
             .setMediaMetadata(MediaMetadata.Builder().setTitle(ch.name).build())
             .build()
         val prefs = prefsRef ?: return
-        val backgroundSlots = (if (Recorder.activeName.value != null) maxOf(1, ProviderStreams.recordingSlots()) else 0) +
-            ProviderStreams.downloadSlots(ctx, prefs)
-        val dualPlan = planDualStreamTrial(prefs, ch.url, backgroundSlots)
-        dualStreamStatus = dualPlan.status
-        val plainFactory = trialPlainDataFactory
-        if (dualPlan.active && plainFactory != null) {
-            val trial = DualHlsDataSourceFactory(plainFactory, Net.UA) { streamHealth.newTransferListener() }
-            dualStreamSession = trial
+        // A completing download can launch the next transfer from its worker.
+        // Check free slots and publish the new reservation under its admission lock.
+        val trial = synchronized(DownloadService.dispatchLock) {
+            val backgroundSlots = (if (Recorder.activeName.value != null) maxOf(1, ProviderStreams.recordingSlots()) else 0) +
+                ProviderStreams.downloadSlots(ctx, prefs)
+            val plan = planDualStreamTrial(prefs, ch.url, backgroundSlots)
+            dualStreamStatus = plan.status
+            val factory = trialPlainDataFactory
+            if (plan.active && factory != null) {
+                DualHlsDataSourceFactory(factory, Net.UA, plan.slots) { streamHealth.newTransferListener() }
+                    .also { dualStreamSession = it }
+            } else null
+        }
+        if (trial != null) {
             val source = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(trial)
                 .setLoadErrorHandlingPolicy(androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy(8))
                 .createMediaSource(item)
             p.setMediaSource(source)
-        } else p.setMediaItem(item)
+        } else {
+            val smoothSources = smoothProgressiveSources
+            if (isSmoothDirectLive() && smoothSources != null &&
+                androidx.media3.common.util.Util.inferContentType(Uri.parse(ch.url)) == C.CONTENT_TYPE_OTHER) {
+                p.setMediaSource(smoothSources.createMediaSource(item))
+            } else p.setMediaItem(item)
+        }
         // Set the requested state while IDLE, before prepare. An internal paused
         // fallback must not look like a new user Pause and start another writer.
         p.playWhenReady = startPlaying
@@ -4072,7 +4115,7 @@ object Playback {
         val wasBackground = backgroundSuspended
         backgroundSuspended = false
         val p = player ?: return
-        if (!wasBackground) return
+        if (!wasBackground || (isSmoothDirectLive() && streamDeadC.value)) return
         val prefs=prefsRef
         val context=appContext
         val remote=queue.getOrNull(currentIdxC.intValue)?.url?.let { it.startsWith("http://") || it.startsWith("https://") }==true
@@ -4095,13 +4138,13 @@ object Playback {
     }
 
     internal fun onProviderBudgetChanged() {
-        if (dualStreamSession == null) return
+        val trial = dualStreamSession ?: return
         val prefs = prefsRef ?: return
         val context = appContext ?: return
         val channel = queue.getOrNull(currentIdxC.intValue) ?: return
         val background = (if (Recorder.activeName.value != null) maxOf(1, ProviderStreams.recordingSlots()) else 0) +
             ProviderStreams.downloadSlots(context, prefs)
-        if (!planDualStreamTrial(prefs, channel.url, background).active) {
+        if (planDualStreamTrial(prefs, channel.url, background).slots < trial.copyCount) {
             zapTo(currentIdxC.intValue, preserveDirect = true, startPlaying = player?.playWhenReady == true)
         }
     }
@@ -4119,11 +4162,11 @@ object Playback {
         val cur = queue.getOrNull(currentIdxC.intValue) ?: return 0
         if (cur.url.startsWith("/") || cur.url.startsWith("file:")) return 0
         if (player == null) return 0
-        if (liveProviderReserved) return if (dualStreamSession != null) 2 else 1
+        if (liveProviderReserved) return dualStreamSession?.copyCount ?: 1
         if (playStateC.intValue == Player.STATE_IDLE) return 0
         return if (liveMode && !simpleRaw && !directLive) {
             if (Timeshift.active) 1 else 0
-        } else if (dualStreamSession != null) 2 else 1
+        } else dualStreamSession?.copyCount ?: 1
     }
 
     /** Canonical provider URL for the currently playing live channel. */
@@ -4137,6 +4180,7 @@ object Playback {
         closeDualStreamTrial()
         dualStreamStatus = "Off — no playback"
         trialPlainDataFactory = null
+        smoothProgressiveSources = null
         streamQuality.reset(player)
         streamHealth.reset()
         streamStats = null
@@ -5004,11 +5048,12 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
                 colors = androidx.compose.material3.SwitchDefaults.colors(checkedThumbColor = Ink, checkedTrackColor = MenuVioletSelected)
             )
         }
-        Text("A lighter live player with no added startup or recovery wait, mini guide or buffering message. Try Smooth when larger buffers keep stopping to refill. A 20-second buffer helps with brief interruptions only if the stream can refill it fast enough. Neither mode fixes a slow connection or an overloaded provider. Your buffer settings below are saved for when Smooth is off.",
+        Text("Plays close to the live edge with a single connection and no added startup or recovery wait. If the feed stops, Smooth can jump forward when the provider exposes a newer position. Otherwise it offers Try again. Your buffer and trial settings apply when Smooth is off.",
             fontSize = 12.sp, color = Muted, modifier = Modifier.padding(top = 4.dp, bottom = 16.dp))
 
         var dualTrial by remember { mutableStateOf(prefs.getBoolean("dual_stream_trial", false)) }
-        Text("Dual Stream Trial", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
+        var trialCopies by remember { mutableIntStateOf(prefs.getInt("dual_stream_count", 2).coerceIn(2, 3)) }
+        Text("Multi-stream Trial", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(if (dualTrial) "Allowed" else "Off", color = Ink, modifier = Modifier.weight(1f))
             androidx.compose.material3.Switch(checked = dualTrial, onCheckedChange = { enabled ->
@@ -5018,7 +5063,20 @@ fun SettingsPane(prefs: SharedPreferences, onModeChanged: () -> Unit) {
             }, modifier = Modifier.testTag("dual-stream-switch").tvFocus(RoundedCornerShape(18.dp)),
                 colors = androidx.compose.material3.SwitchDefaults.colors(checkedThumbColor = Ink, checkedTrackColor = MenuVioletSelected))
         }
-        Text("Experimental and off by default. For compatible HLS feeds, race two copies of a complete video segment and use the first copy. Requires two free provider-stream slots; other feeds stay single-stream. Uses extra data and may add live delay. Open a channel again after changing this setting; Stream health shows whether the trial is active. Both copies can still fail when the source itself stops.",
+        if (dualTrial) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                for (copies in 2..3) {
+                    Chip("Up to $copies streams", trialCopies == copies) {
+                        if (trialCopies != copies) {
+                            trialCopies = copies
+                            prefs.edit().putInt("dual_stream_count", copies).apply()
+                            onModeChanged()
+                        }
+                    }
+                }
+            }
+        }
+        Text("Experimental. Uses up to the free slots in your provider limit, with at least two required. Compatible HLS feeds can race copies of each segment and repair missing bytes when the server verifies a match. This uses extra data and can add live delay. Smooth and raw feeds use one stream. Stream health shows the active mode.",
             fontSize = 12.sp, color = Muted, modifier = Modifier.padding(top = 4.dp, bottom = 16.dp))
         Text("Stream buffer", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Ink)
         Spacer(Modifier.height(4.dp))
@@ -7350,8 +7408,11 @@ fun PlayerScreen(
                     if (queue.getOrNull(Playback.currentIdxC.intValue)?.isLive == true && !miniGuideOpen) {
                         pvRef?.hideController()
                         overlayVisible = false
-                        if (smoothLive) onBack(Playback.currentIdxC.intValue, exo.currentPosition.coerceAtLeast(0L))
-                        else miniGuideOpen = true
+                        when {
+                            smoothLive && streamDead.value && !showStreamHealth -> Playback.tryAgain()
+                            smoothLive -> onBack(Playback.currentIdxC.intValue, exo.currentPosition.coerceAtLeast(0L))
+                            else -> miniGuideOpen = true
+                        }
                         true
                     } else false
                 }
@@ -7820,7 +7881,8 @@ fun PlayerScreen(
                 Text("This channel isn't coming in", color = Ink, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "Playback stopped after several attempts to reconnect. You can try again or switch channels.",
+                    if (smoothLive && current.isLive) "The live feed stopped. You can try again or switch channels."
+                    else "Playback stopped after several attempts to reconnect. You can try again or switch channels.",
                     color = Muted, fontSize = 12.sp
                 )
                 Spacer(Modifier.height(12.dp))

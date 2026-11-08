@@ -21,11 +21,9 @@ import okhttp3.Request
 import okhttp3.Response
 
 /**
- * EXPERIMENTAL: the caller must gate this factory on a separate, default-OFF HLS trial
- * and a two-stream account budget. Never use it for progressive/raw TS delivery.
- * Two copies compete for one whole segment; partial copies are never combined.
- * At the memory cap we retain just one ordinary streaming response, including its
- * buffered prefix. This bounds buffering, but offers no capacity/server benefit guarantee.
+ * Experimental HLS segment redundancy. The caller reserves two or three provider slots.
+ * Copies race for one complete segment. A truncated prefix may be repaired with one
+ * verified byte-range request in its original slot. Oversize copies stream normally.
  *
  * Supply an UNOBSERVED baseFactory and a fresh passive listener per DataSource.
  * Trial transfer callbacks count usable segment payload, not duplicate wire traffic;
@@ -35,13 +33,16 @@ import okhttp3.Response
 internal class DualHlsDataSourceFactory(
     private val baseFactory: DataSource.Factory,
     private val userAgent: String,
+    val copyCount: Int,
     private val listenerFactory: () -> TransferListener,
 ) : HlsDataSourceFactory, AutoCloseable {
     private val lifecycle = Any()
     private val sessions = mutableSetOf<Session>()
-    private val pairPermit = Semaphore(1)
-    // Includes playlist/key/baseline requests, not just the redundant pair.
-    private val networkPermits = Semaphore(2, true)
+    init { require(copyCount in 2..3) }
+
+    private val racePermit = Semaphore(1)
+    // Includes playlist/key/baseline requests, not just the redundant copies.
+    private val networkPermits = Semaphore(copyCount, true)
     val isDeliveryObservationPending: Boolean
         get() = synchronized(lifecycle) { sessions.any { it.observationPending } }
     private val client = OkHttpClient.Builder()
@@ -140,9 +141,9 @@ internal class DualHlsDataSourceFactory(
         fun open(media: Boolean): Long {
             checkOpen()
             observationPending = true
-            if (!media || !eligible(spec) || !pairPermit.tryAcquire()) return openBaseline()
-            if (!networkPermits.tryAcquire(2)) {
-                pairPermit.release()
+            if (!media || !eligible(spec) || !racePermit.tryAcquire()) return openBaseline()
+            if (!networkPermits.tryAcquire(copyCount)) {
+                racePermit.release()
                 return openBaseline()
             }
             var ownedRace: Race? = null
@@ -173,8 +174,8 @@ internal class DualHlsDataSourceFactory(
                 return winner.length
             } catch (error: Exception) {
                 if (ownedRace == null) {
-                    pairPermit.release()
-                    networkPermits.release(2)
+                    racePermit.release()
+                    networkPermits.release(copyCount)
                 } else ownedRace.cancel()
                 if (error is IOException) throw error
                 throw IOException("Unable to open HLS trial segment")
@@ -199,9 +200,16 @@ internal class DualHlsDataSourceFactory(
             listeners.forEach { base.addTransferListener(it) }
             synchronized(lock) { checkOpen(); delegate = base }
             // No lock is held across a network operation, so factory close can cancel a race.
-            val length = base.open(spec)
-            checkOpen()
-            return length
+            try {
+                val length = base.open(spec)
+                checkOpen()
+                return length
+            } catch (error: Exception) {
+                // A factory close can run while the delegate is still opening.
+                // Clean up any socket the delegate installed after that close.
+                if (cancelled.get()) runCatching { base.close() }
+                throw error
+            }
         }
 
         fun read(buffer: ByteArray, offset: Int, length: Int): Int {
@@ -293,13 +301,14 @@ internal class DualHlsDataSourceFactory(
         }
     }
 
-    private inner class Race(request: Request) {
+    private inner class Race(private val request: Request) {
         private val lock = Any()
-        private val calls = List(2) { client.newCall(request) }
+        private val calls = List(copyCount) { client.newCall(request) }
         private val results = LinkedBlockingQueue<Outcome>()
         private val released = AtomicBoolean()
-        private val networkReleased = List(2) { AtomicBoolean() }
-        private val enqueued = BooleanArray(2)
+        private val networkReleased = List(copyCount) { AtomicBoolean() }
+        private val enqueued = BooleanArray(copyCount)
+        private val repairCalls = arrayOfNulls<Call>(copyCount)
         private fun releaseNetwork(call: Call) {
             val index = calls.indexOfFirst { it === call }
             if (index >= 0 && networkReleased[index].compareAndSet(false, true)) networkPermits.release()
@@ -319,15 +328,20 @@ internal class DualHlsDataSourceFactory(
                         var retained = false
                         var candidate: Payload? = null
                         try {
-                            if (!response.isSuccessful) throw IOException("Unsuccessful HLS response")
-                            val buffered = buffer(call, response)
+                            if (response.code != 200) throw IOException("Expected a complete HLS response")
+                            val buffered = buffer(call, response, MAX_RACE_BYTES / copyCount) { chunks, total, expected ->
+                                repair(index, response, chunks, total, expected)
+                            }
                             candidate = buffered
                             synchronized(lock) {
                                 if (!stopped && winner == null) {
                                     winner = buffered
                                     retained = true
                                     // Cancel before publishing, including a loser currently reading a body.
-                                    calls.filter { it !== call }.forEach { it.cancel() }
+                                    calls.indices.filter { it != index }.forEach {
+                                        calls[it].cancel()
+                                        repairCalls[it]?.cancel()
+                                    }
                                     results.offer(Outcome.Success(buffered))
                                 }
                             }
@@ -345,6 +359,56 @@ internal class DualHlsDataSourceFactory(
             }
         }
 
+        private fun repair(index: Int, original: Response, chunks: MutableList<Chunk>, start: Int, total: Long): Payload {
+            val etag = original.headers.values("ETag").singleOrNull()
+            if (start <= 0 || start >= total || etag == null || !strongEtag(etag) ||
+                !identityEncoding(original) || original.header("Content-Range") != null) {
+                throw IOException("Incomplete HLS segment without a verifiable range")
+            }
+            // Reuse this lane only after closing its original socket. Keep the
+            // request in the race's cancellation set while the repair is running.
+            original.close()
+            val last = total - 1
+            val range = request.newBuilder().header("Range", "bytes=$start-$last")
+                .header("If-Range", etag).build()
+            val repair = synchronized(lock) {
+                if (stopped || winner != null || isClosed) throw IOException("HLS repair cancelled")
+                client.newCall(range).also {
+                    it.timeout().timeout(3, TimeUnit.SECONDS)
+                    repairCalls[index] = it
+                }
+            }
+            try {
+                repair.execute().use { response ->
+                    val body = response.body ?: throw IOException("Missing HLS repair body")
+                    if (response.code != 206 || response.request.url != original.request.url ||
+                        response.headers.values("ETag").singleOrNull() != etag || !identityEncoding(response) ||
+                        response.headers.values("Content-Range").singleOrNull() != "bytes $start-$last/$total" ||
+                        (body.contentLength() >= 0 && body.contentLength() != total - start)) {
+                        throw IOException("HLS repair does not match the original segment")
+                    }
+                    val input = body.byteStream()
+                    var remaining = (total - start).toInt()
+                    while (remaining > 0) {
+                        val bytes = ByteArray(minOf(CHUNK_BYTES, remaining))
+                        var offset = 0
+                        while (offset < bytes.size) {
+                            val count = input.read(bytes, offset, bytes.size - offset)
+                            if (count == -1) throw IOException("Incomplete HLS repair")
+                            offset += count
+                        }
+                        chunks.add(Chunk(bytes, bytes.size))
+                        remaining -= bytes.size
+                    }
+                    if (input.read() != -1) throw IOException("HLS repair exceeds its verified range")
+                }
+                return Payload(chunks, null, null, Uri.parse(original.request.url.toString()),
+                    original.headers.toMultimap(), total, null)
+            } finally {
+                synchronized(lock) { repairCalls[index] = null }
+            }
+        }
+
         private fun failed() = synchronized(lock) {
             if (!stopped && winner == null) results.offer(Outcome.Failure)
             Unit
@@ -357,7 +421,7 @@ internal class DualHlsDataSourceFactory(
                     when (val next = results.take()) {
                         is Outcome.Success -> return next.payload
                         Outcome.Cancelled -> throw IOException("HLS trial request cancelled")
-                        Outcome.Failure -> if (++failures == 2) throw IOException("Both HLS segment requests failed")
+                        Outcome.Failure -> if (++failures == copyCount) throw IOException("All HLS segment copies failed")
                     }
                 }
             } catch (_: InterruptedException) {
@@ -367,7 +431,7 @@ internal class DualHlsDataSourceFactory(
             }
         }
 
-        fun releasePermit() { if (released.compareAndSet(false, true)) pairPermit.release() }
+        fun releasePermit() { if (released.compareAndSet(false, true)) racePermit.release() }
 
         fun cancel() {
             val selected = synchronized(lock) {
@@ -375,6 +439,7 @@ internal class DualHlsDataSourceFactory(
                 stopped = true
                 calls.forEachIndexed { index, call ->
                     call.cancel()
+                    repairCalls[index]?.cancel()
                     if (!enqueued[index]) releaseNetwork(call)
                 }
                 results.clear()
@@ -411,7 +476,7 @@ internal class DualHlsDataSourceFactory(
     }
 
     private companion object {
-        const val MAX_COPY_BYTES = 8 * 1024 * 1024
+        const val MAX_RACE_BYTES = 16 * 1024 * 1024
         const val CHUNK_BYTES = 64 * 1024
 
         fun eligible(spec: DataSpec): Boolean =
@@ -420,7 +485,15 @@ internal class DualHlsDataSourceFactory(
                 (spec.uri.scheme.equals("http", true) || spec.uri.scheme.equals("https", true)) &&
                 spec.httpRequestHeaders.keys.none { it.equals("Range", true) }
 
-        fun buffer(call: Call, response: Response): Payload {
+        fun identityEncoding(response: Response): Boolean =
+            response.header("Content-Encoding")?.equals("identity", ignoreCase = true) ?: true
+
+        fun strongEtag(value: String): Boolean =
+            value.length >= 2 && value.first() == '"' && value.last() == '"' &&
+                value.substring(1, value.lastIndex).none { it == '"' || it <= ' ' || it == '\u007f' }
+
+        fun buffer(call: Call, response: Response, cap: Int,
+            repair: (MutableList<Chunk>, Int, Long) -> Payload): Payload {
             val body = response.body ?: throw IOException("Missing HLS response body")
             val expected = body.contentLength()
             val input = body.byteStream()
@@ -428,27 +501,34 @@ internal class DualHlsDataSourceFactory(
             val headers = response.headers.toMultimap()
             val chunks = ArrayList<Chunk>()
             fun streaming() = Payload(chunks, input, response, uri, headers, expected, call)
-            if (expected > MAX_COPY_BYTES) return streaming()
+            if (expected > cap) return streaming()
             var total = 0
-            while (total < MAX_COPY_BYTES) {
+            while (total < cap) {
                 if (call.isCanceled()) throw IOException("HLS trial request cancelled")
-                val bytes = ByteArray(minOf(CHUNK_BYTES, MAX_COPY_BYTES - total))
+                val bytes = ByteArray(minOf(CHUNK_BYTES, cap - total))
                 var size = 0
-                while (size < bytes.size) {
-                    val count = input.read(bytes, size, bytes.size - size)
-                    if (count == -1) {
-                        if (size > 0) chunks.add(Chunk(bytes, size))
-                        total += size
-                        if (expected >= 0 && expected != total.toLong()) throw IOException("Incomplete HLS segment")
-                        response.close()
-                        return Payload(chunks, null, null, uri, headers, total.toLong(), call)
+                var finished = false
+                try {
+                    while (size < bytes.size) {
+                        val count = input.read(bytes, size, bytes.size - size)
+                        if (count == -1) {
+                            finished = true
+                            break
+                        }
+                        size += count
                     }
-                    size += count
+                } catch (error: IOException) {
+                    if (call.isCanceled() || expected < 0) throw error
+                    finished = true
                 }
-                chunks.add(Chunk(bytes, size))
+                if (size > 0) chunks.add(Chunk(if (size < bytes.size) bytes.copyOf(size) else bytes, size))
                 total += size
+                if (finished) {
+                    if (expected >= 0 && expected != total.toLong()) return repair(chunks, total, expected)
+                    response.close()
+                    return Payload(chunks, null, null, uri, headers, total.toLong(), call)
+                }
             }
-            // No extra allocation/probe, concatenation with the other copy, or reopening.
             return streaming()
         }
     }

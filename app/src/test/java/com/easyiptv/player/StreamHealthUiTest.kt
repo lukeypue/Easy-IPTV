@@ -83,14 +83,18 @@ class StreamHealthUiTest {
         } finally { ui.runOnIdle { Playback.releaseAll() } }
     }
 
-    @Test fun experimentalDualReservesTwoProviderSlotsAndReleaseFreesThem() {
-        prefs.edit().clear().putBoolean("dual_stream_trial", true).putInt("provider_streams", 2).commit()
+    @Test fun experimentalTrialReservesThreeSlotsAndDowngradesWithAccountLimit() {
+        prefs.edit().clear().putBoolean("dual_stream_trial", true).putInt("dual_stream_count", 3)
+            .putInt("provider_streams", 3).commit()
         try {
             ui.runOnIdle {
                 Playback.resumeFromBackground()
                 Playback.open(ui.activity, prefs, listOf(channel.copy(url = "http://127.0.0.1:9/live.m3u8")), 0, null, false)
-                assertEquals("The redundant trial must reserve both plan streams", 2, ProviderStreams.playbackSlots())
+                assertEquals("The trial must reserve all three selected streams", 3, ProviderStreams.playbackSlots())
                 assertFalse(ProviderStreams.canUse(ui.activity, prefs, 1))
+                ProviderStreams.setMax(prefs, 2)
+                Playback.onProviderBudgetChanged()
+                assertEquals("The trial must downgrade to two streams", 2, ProviderStreams.playbackSlots())
                 ProviderStreams.setMax(prefs, 1)
                 Playback.onProviderBudgetChanged()
                 assertEquals("Lowering the account limit must return the trial to one stream", 1, ProviderStreams.playbackSlots())

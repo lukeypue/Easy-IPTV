@@ -63,6 +63,58 @@ class DualHlsDataSourceTest {
         }
     }
 
+    @Test fun thirdCopyCanRecoverAChannelWhenTheFirstTwoFail() {
+        val allCopies = CountDownLatch(3)
+        Fixture { request, socket ->
+            allCopies.countDown()
+            allCopies.awaitOrFail()
+            if (request.number < 3) request.reply(socket, byteArrayOf(), 503)
+            else request.reply(socket, "third-copy".toByteArray())
+        }.use { server ->
+            factory(copies = 3).use {
+                assertArrayEquals("third-copy".toByteArray(), load(it.media(), spec(server.url)))
+                assertEquals(3, server.requests.size)
+                assertEquals(0, it.base.opens.get())
+            }
+        }
+    }
+
+    @Test fun truncatedSegmentIsRepairedWithVerifiedMissingBytes() {
+        Fixture { request, socket ->
+            if (request.values["range"] == "bytes=6-10") {
+                assertEquals("\"revision-1\"", request.values["if-range"])
+                request.headers(socket, 5, 206, "ETag: \"revision-1\"\r\nContent-Range: bytes 6-10/11\r\n")
+                socket.getOutputStream().write("video".toByteArray())
+            } else if (request.number == 1) {
+                request.headers(socket, 11, extra = "ETag: \"revision-1\"\r\n")
+                socket.getOutputStream().write("first-".toByteArray())
+            } else request.reply(socket, byteArrayOf(), 503)
+        }.use { server ->
+            factory().use {
+                assertArrayEquals("first-video".toByteArray(), load(it.media(), spec(server.url)))
+                assertEquals(3, server.requests.size)
+                assertEquals(11, it.meters.single().bytes.get())
+            }
+        }
+    }
+
+    @Test fun changedSegmentCannotSupplyMissingBytes() {
+        Fixture { request, socket ->
+            if (request.values.containsKey("range")) {
+                request.headers(socket, 5, 206, "ETag: \"different\"\r\nContent-Range: bytes 6-10/11\r\n")
+                socket.getOutputStream().write("wrong".toByteArray())
+            } else if (request.number == 1) {
+                request.headers(socket, 11, extra = "ETag: \"revision-1\"\r\n")
+                socket.getOutputStream().write("first-".toByteArray())
+            } else request.reply(socket, byteArrayOf(), 503)
+        }.use { server ->
+            factory().use {
+                expectIo { load(it.media(), spec(server.url)) }
+                assertEquals(3, server.requests.size)
+            }
+        }
+    }
+
     @Test fun twoHttpFailuresThrowIOExceptionWithoutLeakingTheUrl() {
         Fixture { request, socket -> request.reply(socket, byteArrayOf(), 403) }.use { server ->
             factory().use { factory ->
@@ -504,15 +556,10 @@ class DualHlsDataSourceTest {
         assertTrue("Timed out waiting for fixture/transport", await(seconds, TimeUnit.SECONDS))
     }
 
-    /** Reflection deliberately keeps the parent RED build compilable with no production class. */
-    private fun factory(base: TrackingFactory = TrackingFactory()): FactoryHandle {
+    private fun factory(base: TrackingFactory = TrackingFactory(), copies: Int = 2): FactoryHandle {
         val meters = CopyOnWriteArrayList<Meter>()
-        val listenerFactory: () -> TransferListener = { Meter().also { meters += it } }
-        val type = try { Class.forName("com.easyiptv.player.DualHlsDataSourceFactory") }
-        catch (missing: ClassNotFoundException) { throw AssertionError("DualHlsDataSourceFactory is not implemented yet", missing) }
-        val constructor = type.getDeclaredConstructor(DataSource.Factory::class.java, String::class.java, kotlin.jvm.functions.Function0::class.java)
-        constructor.isAccessible = true
-        return FactoryHandle(constructor.newInstance(base, USER_AGENT, listenerFactory) as HlsDataSourceFactory, base, meters)
+        val factory = DualHlsDataSourceFactory(base, USER_AGENT, copies) { Meter().also { meters += it } }
+        return FactoryHandle(factory, base, meters)
     }
 
     private class FactoryHandle(val value: HlsDataSourceFactory, val base: TrackingFactory, val meters: List<Meter>) : AutoCloseable {
@@ -623,10 +670,11 @@ class DualHlsDataSourceTest {
     }
 
     private class Request(val fixture: Fixture, val number: Int, val line: String, val values: Map<String, String>) {
-        fun headers(socket: Socket, length: Int?, code: Int = 200) {
+        fun headers(socket: Socket, length: Int?, code: Int = 200, extra: String = "") {
             val header = buildString {
                 append("HTTP/1.1 $code Fixture\r\n")
                 if (length != null) append("Content-Length: $length\r\n")
+                append(extra)
                 append("Content-Type: video/mp2t\r\nX-Segment: fixture\r\nConnection: close\r\n\r\n")
             }
             socket.getOutputStream().apply { write(header.toByteArray(Charsets.ISO_8859_1)); flush() }

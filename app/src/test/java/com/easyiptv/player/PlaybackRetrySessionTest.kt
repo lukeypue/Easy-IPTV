@@ -41,6 +41,34 @@ class PlaybackRetrySessionTest {
         } finally { Playback.releaseAll() }
     }
 
+    @Test fun smoothDoesNotReopenAFiniteFeedAfterPlayback() {
+        prefs.edit().putBoolean("live_smooth", true).commit()
+        try {
+            val p = Playback.open(ctx, prefs, listOf(Playable("Live", "http://127.0.0.1:9/live.ts", true)), 0, null, false)
+            val field = p.javaClass.getDeclaredField("listeners").apply { isAccessible = true }
+            @Suppress("UNCHECKED_CAST")
+            val listeners = field.get(p) as ListenerSet<Player.Listener>
+            listeners.sendEvent(Player.EVENT_PLAYBACK_STATE_CHANGED) { it.onPlaybackStateChanged(Player.STATE_READY) }
+            listeners.sendEvent(Player.EVENT_PLAYBACK_STATE_CHANGED) { it.onPlaybackStateChanged(Player.STATE_ENDED) }
+            assertTrue("Smooth must offer Try again when the source cannot prove it can advance", Playback.streamDeadC.value)
+        } finally { Playback.releaseAll() }
+    }
+
+    @Test fun smoothDoesNotRetuneAnEmptyFeedAtStartup() {
+        prefs.edit().putBoolean("live_smooth", true).commit()
+        try {
+            val p = Playback.open(ctx, prefs, listOf(Playable("Live", "http://127.0.0.1:9/live.ts", true)), 0, null, false)
+            val field = p.javaClass.getDeclaredField("listeners").apply { isAccessible = true }
+            @Suppress("UNCHECKED_CAST")
+            val listeners = field.get(p) as ListenerSet<Player.Listener>
+            listeners.sendEvent(Player.EVENT_PLAYBACK_STATE_CHANGED) { it.onPlaybackStateChanged(Player.STATE_ENDED) }
+            assertTrue("A source that ended while tuning must not loop in Smooth", Playback.streamDeadC.value)
+            Playback.suspendForBackground()
+            Playback.resumeFromBackground()
+            assertTrue("Returning to the app must keep Smooth waiting for Try again", Playback.streamDeadC.value)
+        } finally { Playback.releaseAll() }
+    }
+
     @Test fun browserCompatibilityRetryPreservesPause() {
         for(code in listOf(403,406)) try {
             val p=open("blocked$code")

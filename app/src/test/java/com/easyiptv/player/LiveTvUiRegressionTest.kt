@@ -28,12 +28,34 @@ class LiveTvUiRegressionTest {
         }
         try {
             ui.setContent {PlayerScreen(listOf(Playable("Live","http://127.0.0.1:9/live.ts",true,epgId="1")),0,source=source,prefs=prefs,onOpenSettings={_,_->},onBack={i,_->guideIndex=i})}
-            ui.runOnIdle {assertTrue(PlayerKeys.priority?.invoke(KeyEvent.KEYCODE_DPAD_CENTER)==true)}
+            ui.runOnIdle {
+                Playback.streamDeadC.value = false
+                assertTrue(PlayerKeys.priority?.invoke(KeyEvent.KEYCODE_DPAD_CENTER)==true)
+            }
             ui.onNodeWithTag("live-buffer-health").assertDoesNotExist()
             ui.onNodeWithText("Connecting…").assertDoesNotExist()
             ui.runOnIdle {assertEquals(0,guideIndex);assertEquals(0,epgCalls);assertFalse(Timeshift.active)}
         } finally {ui.runOnIdle {Playback.releaseAll()}}
     }
+    @Test fun smoothRemoteOkRetriesAStoppedFeedWithoutLeavingThePlayer() {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        val prefs = ctx.getSharedPreferences("smooth-live-retry-ui", Context.MODE_PRIVATE)
+        prefs.edit().clear().putBoolean("live_smooth", true).commit()
+        var leftPlayer = false
+        try {
+            ui.setContent {
+                PlayerScreen(listOf(Playable("Live", "http://127.0.0.1:9/live.ts", true)), 0,
+                    source = null, prefs = prefs, onOpenSettings = { _, _ -> }, onBack = { _, _ -> leftPlayer = true })
+            }
+            ui.runOnIdle {
+                Playback.streamDeadC.value = true
+                assertTrue(PlayerKeys.priority?.invoke(KeyEvent.KEYCODE_DPAD_CENTER) == true)
+                assertFalse("OK must retry in place", leftPlayer)
+                assertFalse("Try again clears the stopped state and opens a new attempt", Playback.streamDeadC.value)
+            }
+        } finally { ui.runOnIdle { Playback.releaseAll() } }
+    }
+
     @Test fun miniGuideOpensWithoutPausingOrStartingTemporaryStorage() {
         val ctx=ApplicationProvider.getApplicationContext<Context>()
         val prefs=ctx.getSharedPreferences("live-ui",Context.MODE_PRIVATE)
