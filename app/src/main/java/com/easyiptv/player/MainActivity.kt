@@ -144,6 +144,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
@@ -605,7 +606,11 @@ fun App() {
     val prefs = remember { context.getSharedPreferences("easyiptv", Context.MODE_PRIVATE) }
     LaunchedEffect(Unit) { prefs.edit().putBoolean("autoplay_last", false).apply() }
 
-    var playlists by remember { mutableStateOf(PlaylistStore.load(prefs)) }
+    var playlists by remember {
+        val saved = PlaylistStore.load(prefs)
+        FavoritesStore.migrateLive(prefs, saved)
+        mutableStateOf(saved)
+    }
     var activeIdx by remember { mutableIntStateOf(PlaylistStore.activeIndex(prefs)) }
     var nav by remember { mutableStateOf<Nav>(Nav.Home) }
     var data by remember { mutableStateOf<AppData?>(null) }
@@ -761,6 +766,9 @@ fun App() {
     val source = remember(playlists, activeIdx) {
         playlists.getOrNull(activeIdx)?.let { buildSource(it) }
     }
+
+    val favoritePlaylist = playlists.getOrNull(activeIdx)
+    val favorites = remember(prefs, favoritePlaylist, activeIdx) { FavoritesStore(prefs, favoritePlaylist, activeIdx) }
 
     val cacheKey = remember(playlists, activeIdx) {
         playlists.getOrNull(activeIdx)?.let { DataCache.keyFor(it) }
@@ -939,6 +947,7 @@ fun App() {
                 source = source,
                 s = cur.s,
                 prefs = prefs,
+                favorites = favorites,
                 onPlayQueue = { q, i -> openPlay(Nav.Play(q, i, from = cur)) },
                 onBack = { nav = Nav.Home }
             )
@@ -1010,7 +1019,8 @@ fun App() {
             onRetry = { reload++ },
             onPlay = { openPlay(Nav.Play(listOf(it), from = Nav.Home)) },
             onPlayLive = { q, i -> openPlay(Nav.Play(q, i, from = Nav.Home)) },
-            onSeries = { nav = Nav.Series(it) }
+            onSeries = { nav = Nav.Series(it) },
+            favoriteStore = favorites
         )
     }
 }
@@ -1232,8 +1242,13 @@ fun HomeScreen(
     onPlay: (Playable) -> Unit,
     onPlayLive: (List<Playable>, Int) -> Unit,
     onSeries: (SeriesItem) -> Unit,
-    searchSession: SearchSession? = null
+    searchSession: SearchSession? = null,
+    favoriteStore: FavoritesStore? = null
 ) {
+    val favoritePlaylist = playlists.getOrNull(activeIdx)
+    val favorites = favoriteStore ?: remember(prefs, favoritePlaylist, activeIdx) {
+        FavoritesStore(prefs, favoritePlaylist, activeIdx)
+    }
     val guideRefreshScope = rememberCoroutineScope()
     // The guide, provider categories and app menu are three distinct levels.
     // A selected section is not proof that focus entered its content.
@@ -1526,12 +1541,15 @@ fun HomeScreen(
                                 guideRefreshScope.launch { EpgStore.load(source?.xmltvUrl(), force = true) }
                             }, onUpToPreview = if (mini != null && Recorder.activeName.value == null) {
                                 { runCatching { previewFocus.requestFocus() }; Unit }
-                            } else null, requestInitialFocus = menuLevel == 0, entryRequest = contentRequest + 1, showGuideTools = false)
-                        depth == 1 && section == "movies" -> MoviesPane(source, prefs, safeData, movieCat, onPlay, onLeftToRail = { menuLevel = 1; railReturnRequest++ }, onRefresh=onRefreshMovies, refreshing=catalogLoading, refreshWarning=catalogError, requestInitialFocus=menuLevel == 0, entryRequest=contentRequest)
+                            } else null, requestInitialFocus = menuLevel == 0, entryRequest = contentRequest + 1, showGuideTools = false, favoriteStore = favorites)
+                        depth == 1 && section == "movies" -> MoviesPane(source, prefs, safeData, movieCat, onPlay, onLeftToRail = { menuLevel = 1; railReturnRequest++ }, onRefresh=onRefreshMovies, refreshing=catalogLoading, refreshWarning=catalogError, requestInitialFocus=menuLevel == 0, entryRequest=contentRequest, favorites=favorites)
                         depth == 1 && section == "series" -> SeriesPane(source, safeData, seriesCat, onSeries, onLeftToRail = { menuLevel = 1; railReturnRequest++ }, onRefresh=onRefreshSeries, refreshing=catalogLoading, refreshWarning=catalogError, requestInitialFocus=menuLevel == 0, entryRequest=contentRequest)
                         section == "search" -> SearchTab(
                             source, prefs, safeData, searchQuery, onSearchQuery, onPlay, onPlayLive, onSeries,
-                            onDemandWarning = if (!catalogLoading) catalogError else null, session = searchSession
+                            onDemandWarning = if (!catalogLoading) catalogError else null, session = searchSession, favorites = favorites
+                        )
+                        section == "favorites" -> FavoritesPane(
+                            prefs, source, safeData, favorites, onPlay, onPlayLive, onSeries
                         )
                         section == "downloads" -> DownloadsPane(prefs, onPlay, requestInitialFocus = menuLevel == 0, onLeftToRail = { menuLevel = 2; railReturnRequest++ })
                         section == "recordings" -> RecordingsPane(prefs, onPlay, requestInitialFocus = menuLevel == 0, onLeftToRail = { menuLevel = 2; railReturnRequest++ })
@@ -1557,6 +1575,7 @@ private val RootItems = listOf(
     "live" to "Live TV",
     "movies" to "Movies",
     "series" to "Series",
+    "favorites" to "Favorites",
     "search" to "Search",
     "downloads" to "Downloads",
     "recordings" to "Recordings",
@@ -1617,9 +1636,10 @@ private fun HomeRail(
         contentPadding = PaddingValues(vertical = 6.dp)
     ) {
         if (depth == 0) {
-            itemsIndexed(RootItems) { pos, p ->
+            itemsIndexed(RootItems) { _, p ->
                 RailItem(
                     p.second, section == p.first,
+                    verticalPadding = 6.dp,
                     modifier = (if (p.first == section) Modifier.focusRequester(externalFocus) else Modifier)
                         .onPreviewKeyEvent { ev ->
                             if(ev.type==KeyEventType.KeyDown && ev.key==Key.DirectionRight) { onRoot(p.first); true }
@@ -1654,7 +1674,13 @@ private fun HomeRail(
 }
 
 @Composable
-private fun RailItem(label: String, active: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+private fun RailItem(
+    label: String,
+    active: Boolean,
+    modifier: Modifier = Modifier,
+    verticalPadding: Dp = 10.dp,
+    onClick: () -> Unit
+) {
     val bubbleColor = if (active) MenuVioletSelected else MenuViolet
     Row(
         modifier = modifier
@@ -1667,7 +1693,7 @@ private fun RailItem(label: String, active: Boolean, modifier: Modifier = Modifi
                 RoundedCornerShape(24.dp)
             )
             .clickable { onClick() }
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .padding(horizontal = 12.dp, vertical = verticalPadding),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(
@@ -1850,14 +1876,15 @@ fun LivePane(
     onUpToPreview: (() -> Unit)? = null,
     requestInitialFocus: Boolean = true,
     entryRequest: Int = 0,
-    showGuideTools: Boolean = true
+    showGuideTools: Boolean = true,
+    favoriteStore: FavoritesStore? = null
 ) {
     val context = LocalContext.current
-    val favKey = "fav_live_$activeIdx"
-    var favs by remember(activeIdx) { mutableStateOf(prefs.getStringSet(favKey, emptySet())?.toSet() ?: emptySet()) }
+    val favorites = favoriteStore ?: remember(prefs, activeIdx) { FavoritesStore(prefs, null, activeIdx) }
+    val saved = if (selectedCat == "fav") favorites.items else emptyList()
     var expandedId by remember { mutableStateOf<String?>(null) }
     var manualListChannel by remember { mutableStateOf<LiveChannel?>(null) }
-    manualListChannel?.let { ch -> ManualRecordingDialog(prefs,ch,onClose={manualListChannel=null}) }
+    manualListChannel?.let { ch -> ManualRecordingDialog(prefs,ch,onClose={manualListChannel=null}, favorites=favorites) }
     // ZAKO_V431_LIVE_INFO
     var liveInfo by remember { mutableStateOf<Pair<LiveChannel, EpgEntry?>?>(null) }
     var showGridGuide by remember { mutableStateOf(true) }
@@ -1865,19 +1892,13 @@ fun LivePane(
     val guideLoading = EpgStore.loading.value
     val guideReady = EpgStore.loaded.value
 
-    fun toggleFav(id: String) {
-        val n = favs.toMutableSet()
-        if (!n.add(id)) n.remove(id)
-        favs = n
-        prefs.edit().putStringSet(favKey, n).apply()
-    }
-
     // ZAKO_V433_REMEMBER_FILTERS: category lists only rebuild when their inputs change.
-    val filtered = remember(data.live, selectedCat, favs) {
-        data.live.filter { c ->
+    val filtered = remember(data.live, selectedCat, saved) {
+        val favoriteKeys = saved.mapTo(HashSet()) { it.key }
+        val legacyIds = saved.filter { it.kind == FavoriteKind.LIVE && it.url == null }.mapTo(HashSet()) { it.id }
+        if (selectedCat == "all") data.live else data.live.filter { c ->
             when (selectedCat) {
-                "all" -> true
-                "fav" -> favs.contains(c.id)
+                "fav" -> c.id in legacyIds || FavoriteItem.keyFor(FavoriteKind.LIVE, c.id, c.url) in favoriteKeys
                 else -> c.categoryId == selectedCat
             }
         }
@@ -1931,12 +1952,7 @@ fun LivePane(
                         Text("Program information is not available for this channel right now.", color = Muted, fontSize = 12.sp)
                     }
                     Spacer(Modifier.height(10.dp))
-                    TextButton(
-                        modifier = Modifier.tvFocus(RoundedCornerShape(16.dp)),
-                        onClick = { toggleFav(infoChannel.id) }
-                    ) {
-                        Text(if (favs.contains(infoChannel.id)) "★ REMOVE FAVORITE" else "☆ ADD FAVORITE", color = Accent, fontWeight = FontWeight.Bold)
-                    }
+                    FavoriteButton(favorites, FavoriteItem.from(infoChannel))
                     if (recordable && entry != null) {
                         TextButton(
                             modifier = Modifier.tvFocus(RoundedCornerShape(16.dp)),
@@ -1978,7 +1994,7 @@ fun LivePane(
         if (showGridGuide && filtered.isNotEmpty()) {
             key(selectedCat) { LiveGridGuide(
                 prefs = prefs, channels = filtered,
-                favs = favs, onToggleFavorite = { toggleFav(it) },
+                favorites = favorites,
                 onPlayLive = onPlayLive,
                 onLeftToRail = onLeftToRail, onUpToPreview = onUpToPreview, requestInitialFocus = requestInitialFocus,
                 entryRequest = entryRequest, categoryName = when (selectedCat) {
@@ -2073,11 +2089,11 @@ fun LivePane(
                                     tint = if (expandedId == ch.id) Accent else Muted
                                 )
                             }
-                            IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = { toggleFav(ch.id) }) {
+                            IconButton(modifier = Modifier.tvFocus(RoundedCornerShape(24.dp)), onClick = { favorites.toggle(FavoriteItem.from(ch)) }) {
                                 Icon(
-                                    if (favs.contains(ch.id)) Icons.Filled.Star else Icons.Filled.StarBorder,
+                                    if (favorites.contains(FavoriteItem.from(ch))) Icons.Filled.Star else Icons.Filled.StarBorder,
                                     contentDescription = "Favorite",
-                                    tint = if (favs.contains(ch.id)) Accent else Muted
+                                    tint = if (favorites.contains(FavoriteItem.from(ch))) Accent else Muted
                                 )
                             }
                         }
@@ -2145,8 +2161,7 @@ fun LivePane(
 private fun LiveGridGuide(
     prefs: SharedPreferences,
     channels: List<LiveChannel>,
-    favs: Set<String>,
-    onToggleFavorite: (String) -> Unit,
+    favorites: FavoritesStore,
     onPlayLive: (List<Playable>, Int) -> Unit,
     onLeftToRail: () -> Unit,
     onUpToPreview: (() -> Unit)?,
@@ -2354,7 +2369,7 @@ private fun LiveGridGuide(
         }
     }
 
-    manualChannel?.let { ch -> ManualRecordingDialog(prefs,ch,onClose={manualChannel=null}) }
+    manualChannel?.let { ch -> ManualRecordingDialog(prefs,ch,onClose={manualChannel=null}, favorites=favorites) }
 
     selected?.let { pair ->
         val ch = pair.first
@@ -2377,6 +2392,7 @@ private fun LiveGridGuide(
                         entry.desc.ifBlank { "No description was supplied in the lightweight guide." },
                         color = Ink, fontSize = 12.sp
                     )
+                    FavoriteButton(favorites, FavoriteItem.from(ch))
                 }
             },
             confirmButton = {
@@ -2390,9 +2406,6 @@ private fun LiveGridGuide(
                             Recorder.start(context,ch.url,entry.title+" ("+ch.name+")",entry.endMs+2*60*1000);toast(context,"Recording "+entry.title+".");selected=null
                         } else { toast(context,ScheduleStore.add(context,prefs,entry.title,ch.name,ch.url,entry.startMs,entry.endMs));selected=null }
                     }) { Text(if(airing)"● RECORD" else "● SCHEDULE",color=Live,fontWeight=FontWeight.Bold,fontSize=10.sp) }
-                    TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(14.dp)),onClick={onToggleFavorite(ch.id)}) {
-                        Text(if(favs.contains(ch.id))"★ FAVORITE" else "☆ FAVORITE",color=Accent,fontWeight=FontWeight.Bold,fontSize=10.sp)
-                    }
                     TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(14.dp)),onClick={selected=null}) { Text("CLOSE",color=Ink,fontSize=10.sp) }
                 }
             },
@@ -2402,7 +2415,8 @@ private fun LiveGridGuide(
 }
 
 @Composable
-private fun ManualRecordingDialog(prefs:SharedPreferences,ch:LiveChannel,onClose:()->Unit,onSaved:()->Unit={}) {
+private fun ManualRecordingDialog(prefs:SharedPreferences,ch:LiveChannel,onClose:()->Unit,
+                                  onSaved:()->Unit={}, favorites: FavoritesStore? = null) {
     val context=LocalContext.current
     var day by remember { mutableIntStateOf(0) }
     var hour by remember { mutableIntStateOf(java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)) }
@@ -2454,7 +2468,12 @@ private fun ManualRecordingDialog(prefs:SharedPreferences,ch:LiveChannel,onClose
             val error=ScheduleStore.validateManual(chosen.timeInMillis,end)
             if(error!=null) toast(context,error) else confirmation=chosen.timeInMillis to end
         }){Text("RECORD",color=Live,fontWeight=FontWeight.Bold)}},
-        dismissButton={TextButton(modifier=Modifier.tvFocus(),onClick=onClose){Text("CLOSE",color=Ink)}})
+        dismissButton={
+            Row {
+                if (favorites != null) FavoriteButton(favorites, FavoriteItem.from(ch))
+                TextButton(modifier=Modifier.tvFocus(),onClick=onClose){Text("CLOSE",color=Ink)}
+            }
+        })
 }
 
 private fun chIndexOf(channels: List<LiveChannel>, target: LiveChannel): Int =
@@ -4168,7 +4187,9 @@ private fun VodInfoDialog(
     prefs: SharedPreferences,
     movie: Movie,
     onPlay: (Playable) -> Unit,
-    onClose: () -> Unit
+    onClose: () -> Unit,
+    favorites: FavoritesStore? = null,
+    onFavoriteRemoved: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     var info by remember(movie.id) { mutableStateOf<MediaInfo?>(null) }
@@ -4206,6 +4227,7 @@ private fun VodInfoDialog(
                         Text(facts.joinToString("  •  "), color = ProgramCyan, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                     }
                 }
+                if (favorites != null) FavoriteButton(favorites, FavoriteItem.from(movie), onFavoriteRemoved)
                 Spacer(Modifier.height(12.dp))
             }
         },
@@ -4227,6 +4249,136 @@ private fun VodInfoDialog(
 }
 
 @Composable
+private fun FavoriteButton(store: FavoritesStore, item: FavoriteItem, onRemoved: (() -> Unit)? = null) {
+    val saved = store.contains(item)
+    TextButton(modifier = Modifier.tvFocus(), onClick = {
+        store.toggle(item)
+        if (saved) onRemoved?.invoke()
+    }) {
+        Text(if (saved) "★ REMOVE FAVORITE" else "☆ ADD FAVORITE", color = Accent, fontWeight = FontWeight.Bold)
+    }
+}
+
+@Composable
+private fun FavoritesPane(
+    prefs: SharedPreferences,
+    source: Source?,
+    data: AppData,
+    store: FavoritesStore,
+    onPlay: (Playable) -> Unit,
+    onPlayLive: (List<Playable>, Int) -> Unit,
+    onSeries: (SeriesItem) -> Unit
+) {
+    var filter by remember(store) { mutableStateOf<FavoriteKind?>(null) }
+    var opened by remember(store) { mutableStateOf<FavoriteItem?>(null) }
+    var schedule by remember(store) { mutableStateOf<LiveChannel?>(null) }
+    var focusAfterRemoval by remember(store) { mutableIntStateOf(0) }
+    val filterFocus = remember { FocusRequester() }
+    val saved = store.items
+    val shown = remember(saved, filter) { saved.filter { filter == null || it.kind == filter } }
+    // Keep only the matches for saved channels, rather than indexing the whole lineup.
+    val currentChannels = remember(saved, data.live) {
+        val liveFavorites = saved.filter { it.kind == FavoriteKind.LIVE }
+        val savedKeys = liveFavorites.mapTo(HashSet()) { it.key }
+        val legacyIds = liveFavorites.filter { it.url == null }.mapTo(HashSet()) { it.id }
+        buildMap {
+            if (savedKeys.isNotEmpty()) for (channel in data.live) {
+                val key = FavoriteItem.keyFor(FavoriteKind.LIVE, channel.id, channel.url)
+                if (key in savedKeys) putIfAbsent(key, channel)
+                if (channel.id in legacyIds) putIfAbsent("LIVE:${channel.id}", channel)
+            }
+        }
+    }
+    fun channelFor(item: FavoriteItem): LiveChannel? = currentChannels[item.key] ?: item.channel()
+    fun closeAfterRemoval() {
+        opened = null
+        focusAfterRemoval++
+    }
+    LaunchedEffect(focusAfterRemoval) {
+        if (focusAfterRemoval > 0) {
+            androidx.compose.runtime.withFrameNanos { }
+            androidx.compose.runtime.withFrameNanos { }
+            filterFocus.requestFocus()
+        }
+    }
+    Column(Modifier.fillMaxSize().padding(horizontal = 10.dp)) {
+        SectionHeader("Favorites")
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier.padding(bottom = 4.dp).horizontalScroll(rememberScrollState())) {
+            for (kind in listOf<FavoriteKind?>(null) + FavoriteKind.entries) {
+                val selected = filter == kind
+                Chip(kind?.label ?: "All", selected, modifier = if (selected) Modifier.focusRequester(filterFocus) else Modifier) {
+                    filter = kind
+                }
+            }
+        }
+        if (shown.isEmpty()) {
+            Text("No favorites here yet. Open a channel, movie, or series and choose Add favorite.",
+                color = Muted, modifier = Modifier.padding(12.dp))
+        } else {
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(vertical = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                items(shown, key = { it.key }) { item ->
+                    val current = if (item.kind == FavoriteKind.LIVE) currentChannels[item.key] else null
+                    MediaRow(name = current?.name ?: item.name, icon = current?.icon ?: item.icon,
+                        onClick = { opened = item }, subtitle = if (filter == null) item.kind.label else null)
+                }
+            }
+        }
+    }
+    schedule?.let { channel ->
+        ManualRecordingDialog(prefs, channel, onClose = { schedule = null })
+    }
+    opened?.let { item ->
+        val movie = if (item.kind == FavoriteKind.MOVIE) data.movies.firstOrNull {
+            if (item.id.startsWith("m3u_")) it.url == item.url else it.id == item.id
+        } ?: item.movie() else null
+        if (movie != null) {
+            VodInfoDialog(source, prefs, movie, onPlay, onClose = { opened = null },
+                favorites = store, onFavoriteRemoved = { closeAfterRemoval() })
+        } else {
+            val channel = if (item.kind == FavoriteKind.LIVE) channelFor(item) else null
+            AlertDialog(
+                onDismissRequest = { opened = null }, containerColor = SurfaceCol,
+                title = { Text(channel?.name ?: item.name, color = Ink, fontWeight = FontWeight.Bold) },
+                text = {
+                    Column {
+                        if (channel != null) {
+                            TextButton(modifier = Modifier.tvFocus(), onClick = {
+                                val queue = saved.filter { it.kind == FavoriteKind.LIVE }.mapNotNull(::channelFor)
+                                    .map { livePlayable(prefs, it) }
+                                val index = queue.indexOfFirst { it.url == channel.url }
+                                opened = null
+                                if (index >= 0) onPlayLive(queue, index)
+                            }) { Text("▶ WATCH", color = ProgramCyan, fontWeight = FontWeight.Bold) }
+                            if (livePlayable(prefs, channel).canRecord) TextButton(modifier = Modifier.tvFocus(), onClick = {
+                                opened = null
+                                schedule = channel
+                            }) { Text("● SCHEDULE RECORDING", color = Live, fontWeight = FontWeight.Bold) }
+                        } else if (item.kind == FavoriteKind.SERIES && source?.supportsSeries == true) {
+                            TextButton(modifier = Modifier.tvFocus(), onClick = {
+                                val series = data.series.firstOrNull { it.id == item.id } ?: item.series()
+                                opened = null
+                                onSeries(series)
+                            }) { Text("OPEN SEASONS", color = ProgramCyan, fontWeight = FontWeight.Bold) }
+                        } else {
+                            Text("This item is unavailable from the current playlist.", color = Muted)
+                        }
+                        FavoriteButton(store, item, onRemoved = { closeAfterRemoval() })
+                    }
+                },
+                confirmButton = {
+                    TextButton(modifier = Modifier.tvFocus(), onClick = { opened = null }) { Text("CLOSE", color = Ink) }
+                }
+            )
+        }
+    }
+}
+
+@Composable
 private fun CatalogRefreshButton(section:String,refreshing:Boolean,onRefresh:()->Unit) {
     TextButton(onClick=onRefresh,enabled=!refreshing,modifier=Modifier.tvFocus(RoundedCornerShape(10.dp))) {
         Text(if(refreshing) "UPDATING…" else "UPDATE $section",color=Ink,fontWeight=FontWeight.Bold,fontSize=12.sp)
@@ -4245,7 +4397,8 @@ fun MoviesPane(
     refreshing: Boolean = false,
     refreshWarning: String? = null,
     requestInitialFocus: Boolean = true,
-    entryRequest: Int = 0
+    entryRequest: Int = 0,
+    favorites: FavoritesStore? = null
 ) {
     var paneHasFocus by remember { mutableStateOf(false) }
     BackHandler(enabled = paneHasFocus) { onLeftToRail() }
@@ -4255,7 +4408,7 @@ fun MoviesPane(
     infoMovie?.let { movie ->
         VodInfoDialog(
             source = source, prefs = prefs, movie = movie, onPlay = onPlay,
-            onClose = { infoMovie = null }
+            onClose = { infoMovie = null }, favorites = favorites
         )
     }
 
@@ -5334,7 +5487,8 @@ fun SearchTab(
     onPlayLive: (List<Playable>, Int) -> Unit,
     onSeries: (SeriesItem) -> Unit,
     onDemandWarning: String? = null,
-    session: SearchSession? = null
+    session: SearchSession? = null,
+    favorites: FavoritesStore? = null
 ) {
     val searchSession = session ?: remember { SearchSession() }
     // ZAKO_V440_SEARCH_MOVIE_DETAILS: Search movies use the same details dialog as Movies.
@@ -5342,7 +5496,7 @@ fun SearchTab(
     searchInfoMovie?.let { movie ->
         VodInfoDialog(
             source = source, prefs = prefs, movie = movie, onPlay = onPlay,
-            onClose = { searchInfoMovie = null }
+            onClose = { searchInfoMovie = null }, favorites = favorites
         )
     }
     var recents by remember { mutableStateOf(loadRecents(prefs)) }
@@ -5833,7 +5987,8 @@ fun SeriesDetailScreen(
     s: SeriesItem,
     prefs: SharedPreferences,
     onPlayQueue: (List<Playable>, Int) -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    favorites: FavoritesStore? = null
 ) {
     val context = LocalContext.current
     var eps by remember(source, s.id) { mutableStateOf<Map<Int, List<Episode>>?>(null) }
@@ -5908,6 +6063,7 @@ fun SeriesDetailScreen(
                 ) { Text("Reset watched", color = Muted, fontSize = 12.sp) }
             }
         }
+        if (favorites != null) FavoriteButton(favorites, FavoriteItem.from(s))
         selectedSeason?.let { SectionHeader("Season $it") }
         when {
             err != null -> ErrorBox(err!!, onRetry = { err = null }, title = "Couldn't load episodes")
@@ -6537,9 +6693,9 @@ fun PlaylistsPane(
 
 /* ----------------------------- shared rows ----------------------------- */
 @Composable
-private fun Chip(label: String, active: Boolean, onClick: () -> Unit) {
+private fun Chip(label: String, active: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
     Box(
-        modifier = Modifier
+        modifier = modifier
             .tvFocus(RoundedCornerShape(999.dp), backgroundColor = if (active) MenuVioletSelected else MenuViolet)
             .border(if(active) 2.dp else 1.dp, Color.White.copy(alpha=if(active) .95f else .30f), RoundedCornerShape(999.dp))
             .clickable { onClick() }
@@ -6777,6 +6933,7 @@ private fun MediaRow(
     icon: String?,
     onClick: () -> Unit,
     onLongAction: (() -> Unit)? = null,
+    subtitle: String? = null,
     trailing: (@Composable (Modifier) -> Unit)? = null
 ) {
     // Arrow RIGHT from the row lands directly on the trailing button
@@ -6813,15 +6970,11 @@ private fun MediaRow(
     ) {
         ChannelIcon(name, icon)
         Spacer(Modifier.width(12.dp))
-        Text(
-            name,
-            modifier = Modifier.weight(1f),
-            color = Ink,
-            fontSize = 15.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
+        Column(Modifier.weight(1f)) {
+            Text(name, color = Ink, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (subtitle != null) Text(subtitle, color = Muted, fontSize = 11.sp, maxLines = 1)
+        }
         if (trailing != null) trailing(Modifier.focusRequester(trailingFocus))
     }
 }
