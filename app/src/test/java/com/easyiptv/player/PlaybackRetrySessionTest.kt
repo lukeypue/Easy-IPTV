@@ -22,6 +22,25 @@ class PlaybackRetrySessionTest {
     private val ctx=ApplicationProvider.getApplicationContext<Context>()
     private val prefs=ctx.getSharedPreferences("retry-session",Context.MODE_PRIVATE)
     private fun open(name:String)=Playback.open(ctx,prefs,listOf(Playable(name,"http://127.0.0.1:9/$name.mp4",false)),0,null,false)
+    @Test fun cleanLiveDisconnectConsumesTheSameBudgetAsErrors() {
+        try {
+            val p = Playback.open(ctx, prefs, listOf(Playable("Live", "http://127.0.0.1:9/live.ts", true)), 0, null, false)
+            val retries = Playback.javaClass.getDeclaredField("retriesP").apply { isAccessible = true }
+            val field = p.javaClass.getDeclaredField("listeners").apply { isAccessible = true }
+            @Suppress("UNCHECKED_CAST")
+            val listeners = field.get(p) as ListenerSet<Player.Listener>
+            retries.setInt(Playback, 5)
+            fun ended() = listeners.sendEvent(Player.EVENT_PLAYBACK_STATE_CHANGED) {
+                it.onPlaybackStateChanged(Player.STATE_ENDED)
+            }
+            ended()
+            assertEquals("A clean disconnect must count as a recovery attempt", 6, retries.getInt(Playback))
+            assertFalse(Playback.streamDeadC.value)
+            ended()
+            assertTrue("Repeated clean disconnects must offer Try Again", Playback.streamDeadC.value)
+        } finally { Playback.releaseAll() }
+    }
+
     @Test fun browserCompatibilityRetryPreservesPause() {
         for(code in listOf(403,406)) try {
             val p=open("blocked$code")

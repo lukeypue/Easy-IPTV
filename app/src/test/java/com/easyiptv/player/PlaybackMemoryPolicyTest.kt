@@ -92,6 +92,17 @@ class PlaybackMemoryPolicyTest {
         }
     }
 
+    @Test fun automaticLiveReconnectRebuildsTheRecoveryCushion() {
+        configuredControl(false, lockMs = 4_000) { control ->
+            withPlayer(control) { f -> assertTrue(f.startPlayback(4_000_000L)) }
+            withPlayer(control, tag = "ryzod-live-recovery-buffer") { f ->
+                assertFalse(f.startPlayback(4_000_000L))
+                assertTrue(f.startPlayback(8_000_000L))
+                assertTrue("Short HLS windows can still start", f.startPlayback(3_000_000L, targetLiveOffsetUs = 6_000_000L))
+            }
+        }
+    }
+
     @Test fun steadyActuallyRebuildsMoreReserveThanNaturalAtTenSeconds() {
         configuredControl(false) { control ->
             withPlayer(control) { f -> assertTrue(f.startPlayback(20_000_000L, rebuffering=true)) }
@@ -217,9 +228,10 @@ class PlaybackMemoryPolicyTest {
         control: LoadControl,
         uri: String = "http://127.0.0.1/live.ts",
         mimeType: String = MimeTypes.VIDEO_H264,
+        tag: String? = if (uri.endsWith("live.ts")) LIVE_BUFFER_TAG else null,
         block: (PlayerFixture) -> Unit
     ) {
-        val fixture = PlayerFixture(control, uri, mimeType)
+        val fixture = PlayerFixture(control, uri, mimeType, tag)
         try {
             block(fixture)
         } finally {
@@ -227,10 +239,10 @@ class PlaybackMemoryPolicyTest {
         }
     }
 
-    private class PlayerFixture(val control: LoadControl, uri: String, mimeType: String) {
+    private class PlayerFixture(val control: LoadControl, uri: String, mimeType: String, tag: String?) {
         val playerId = PlayerId("memory-policy-test")
         private val timeline = SinglePeriodTimeline(
-            120_000_000L, true, true, false, null, MediaItem.Builder().setUri(uri).setTag(if(uri.endsWith("live.ts")) LIVE_BUFFER_TAG else null).build()
+            120_000_000L, true, true, false, null, MediaItem.Builder().setUri(uri).setTag(tag).build()
         )
         private val periodId = MediaSource.MediaPeriodId(timeline.getUidOfPeriod(0))
         val allocator = control.getAllocator(playerId)

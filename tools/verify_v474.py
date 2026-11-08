@@ -35,9 +35,12 @@ class LiveSearchContracts(unittest.TestCase):
         self.assertTrue('startPlaying: Boolean = if (preserveDirect) player?.playWhenReady ?: true else true' in s,
                         'Automatic direct retries currently resume a paused stream')
     def test_live_window_recovery_does_not_force_play(self):
-        branch=s[s.index('if (liveMode && error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW)'):]
-        branch=branch[:branch.index('return')]
-        self.assertFalse('p.playWhenReady = true' in branch,'Live-window retry currently resumes paused playback')
+        recovery = s[s.index('private fun scheduleLiveRecovery'):s.index('// Temporary-DVR stall supervision')]
+        branch = recovery[recovery.index('if (seekLiveWindow)'):recovery.index('else if (!recoverTemporaryLive())')]
+        self.assertIn('p.seekToDefaultPosition()', branch)
+        self.assertIn('p.prepare()', branch)
+        self.assertNotIn('p.playWhenReady = true', branch, 'Live-window retry currently resumes paused playback')
+        self.assertNotIn('p.play()', branch, 'Live-window retry currently resumes paused playback')
     def test_background_resume_remembers_intent(self):
         self.assertTrue('backgroundResumePlaying' in s,'Background/foreground currently discards paused intent')
 if __name__=='__main__': unittest.main()

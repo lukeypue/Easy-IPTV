@@ -11,6 +11,7 @@ import androidx.media3.exoplayer.source.TrackGroupArray
 import androidx.media3.exoplayer.trackselection.ExoTrackSelection
 
 internal const val LIVE_BUFFER_TAG = "ryzod-live-buffer"
+internal const val LIVE_RECOVERY_BUFFER_TAG = "ryzod-live-recovery-buffer"
 
 /** One allocator; live waits must never become movie/download startup waits. */
 @OptIn(UnstableApi::class)
@@ -35,12 +36,24 @@ internal class LiveAwareLoadControl(
 
     override fun shouldStartPlayback(parameters: LoadControl.Parameters): Boolean {
         val timeline = parameters.timeline
-        val live = if (timeline.isEmpty) false else {
+        val tag = if (timeline.isEmpty) null else {
             val period = timeline.getPeriodByUid(parameters.mediaPeriodId.periodUid, Timeline.Period())
             timeline.getWindow(period.windowIndex, Timeline.Window())
-                .mediaItem.localConfiguration?.tag == LIVE_BUFFER_TAG
+                .mediaItem.localConfiguration?.tag
         }
-        if (live) return delegate.shouldStartPlayback(parameters)
+        if (tag == LIVE_BUFFER_TAG || parameters.rebuffering && tag == LIVE_RECOVERY_BUFFER_TAG) {
+            return delegate.shouldStartPlayback(parameters)
+        }
+        if (tag == LIVE_RECOVERY_BUFFER_TAG) {
+            // A new provider source looks like a first tune to Media3, even
+            // when it is replacing a stream whose playback was interrupted.
+            return delegate.shouldStartPlayback(LoadControl.Parameters(
+                parameters.playerId, timeline, parameters.mediaPeriodId,
+                parameters.playbackPositionUs, parameters.bufferedDurationUs,
+                parameters.playbackSpeed, parameters.playWhenReady,
+                /* rebuffering = */ true, parameters.targetLiveOffsetUs, parameters.lastRebufferRealtimeMs
+            ))
+        }
         // Network and saved on-demand items keep a small, fixed startup wait.
         // A full low-RAM allocator still escapes rather than waiting forever.
         val requiredUs = 4_000_000L

@@ -3418,15 +3418,9 @@ object Playback {
                     noteReadyForStall()
                     if (liveMode) noteLiveReady()
                 } else if (playbackState == Player.STATE_ENDED && liveMode && queue.isNotEmpty()) {
-                    // Some IPTV servers close a live HTTP response cleanly instead
-                    // of throwing an error. Treat that as a reconnect event so the
-                    // picture does not sit paused waiting for the customer to press Play.
-                    val myGen = playbackGen
-                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                        if (myGen == playbackGen && liveMode && player === p && !backgroundSuspended) {
-                            if (!recoverTemporaryLive()) zapTo(currentIdxC.intValue, preserveDirect = true)
-                        }
-                    }, 700)
+                    // Providers can close cleanly and send the same short feed
+                    // on every reconnect. Count EOF against the error budget too.
+                    scheduleLiveRecovery(p, "feed_ended")
                 }
             }
 
@@ -3457,16 +3451,12 @@ object Playback {
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                 if (backgroundSuspended) return
                 StabilityCore.note("playback_error code=${error.errorCode} live=$liveMode type=${error.cause?.javaClass?.simpleName}")
-                // ZAKO_V437_LIVE_EDGE_RECOVERY: Media3 documents this as the
-                // correct recovery when an HLS/live player falls behind the live window.
-                if (liveMode && error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) {
-                    StabilityCore.note("live_edge_recover")
-                    p.seekToDefaultPosition()
-                    p.prepare()
+                if (liveMode) {
+                    // ZAKO_V437_LIVE_EDGE_RECOVERY: move back into the current
+                    // playlist window, with the same limit as other recoveries.
+                    scheduleLiveRecovery(p, "error_${error.errorCode}",
+                        seekLiveWindow = error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW)
                     return
-                }
-                if (liveMode && prefsRef?.getBoolean("live_steady_recovery", false) == true) {
-                    StabilityCore.note("steady_player_error_safe code=${error.errorCode} direct=$directLive")
                 }
                 // VOD-only compatibility retry: if the provider explicitly
                 // rejects our normal UA with 403/406, rebuild the SAME queue
@@ -3493,33 +3483,13 @@ object Playback {
                         return
                     }
                 }
-                if (retriesP >= 6) {
-                    streamDeadC.value = true
-                    return
-                }
-                retriesP++
-                val wait = (1_000L * retriesP).coerceAtMost(5_000L)
-                // Generation guard (panel bug fix): if the viewer changes
-                // channel before this delayed retry fires, the retry belongs to
-                // a DEAD session — firing it would restart the NEW channel and
-                // look exactly like random buffering. Stale retries do nothing.
+                val wait = playbackRetryDelay() ?: return
                 val myGen = playbackGen
                 android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                     if (myGen != playbackGen || backgroundSuspended || player !== p) return@postDelayed
-                    runCatching {
-                        if (liveMode) {
-                            // Timeshift trouble? After 3 strikes, flip to direct
-                            // provider playback so video ALWAYS works.
-                            if (!recoverTemporaryLive()) {
-                                noteLiveFail()
-                                zapTo(currentIdxC.intValue, preserveDirect = true)
-                            }
-                        } else {
-                            // prepare preserves playWhenReady, including a Pause
-                            // pressed while this retry was waiting.
-                            p.prepare()
-                        }
-                    }
+                    // prepare preserves playWhenReady, including a Pause
+                    // pressed while this retry was waiting.
+                    runCatching { p.prepare() }
                 }, wait)
             }
 
@@ -3541,6 +3511,35 @@ object Playback {
         })
         player = p
         return p
+    }
+
+    private fun playbackRetryDelay(): Long? {
+        if (retriesP >= 6) {
+            streamDeadC.value = true
+            return null
+        }
+        retriesP++
+        return (1_000L * retriesP).coerceAtMost(5_000L)
+    }
+
+    private fun scheduleLiveRecovery(p: ExoPlayer, reason: String, seekLiveWindow: Boolean = false) {
+        if (backgroundSuspended) return
+        val wait = playbackRetryDelay()
+        StabilityCore.note("live_reconnect reason=$reason attempt=$retriesP exhausted=${wait == null}")
+        if (wait == null) return
+        val myGen = playbackGen
+        videoHealthHandler.postDelayed({
+            if (myGen != playbackGen || backgroundSuspended || player !== p || streamDeadC.value) return@postDelayed
+            runCatching {
+                if (seekLiveWindow) {
+                    p.seekToDefaultPosition()
+                    p.prepare()
+                } else if (!recoverTemporaryLive()) {
+                    noteLiveFail()
+                    zapTo(currentIdxC.intValue, preserveDirect = true)
+                }
+            }
+        }, wait)
     }
 
     // -----------------------------------------------------------------------
@@ -3882,7 +3881,8 @@ object Playback {
         val ch = q[i]
         liveProviderReserved = true
         currentIdxC.intValue = i
-        everReadyC.value = false
+        val recovery = preserveDirect && !Timeshift.active && everReadyC.value
+        everReadyC.value = recovery
         videoFpsC.floatValue = 0f
         streamDeadC.value = false
         bufferingSince = 0L
@@ -3907,7 +3907,7 @@ object Playback {
         streamHealth.reset()
         val policy = StreamBufferPolicy.from(prefsRef ?: return)
         val item = MediaItem.Builder()
-            .setTag(LIVE_BUFFER_TAG)
+            .setTag(if (recovery) LIVE_RECOVERY_BUFFER_TAG else LIVE_BUFFER_TAG)
             .setLiveConfiguration(MediaItem.LiveConfiguration.Builder()
                 .setTargetOffsetMs(policy.rebufferMs.toLong() * 2)
                 .setMinPlaybackSpeed(1.0f).setMaxPlaybackSpeed(1.0f).build())
@@ -7820,7 +7820,7 @@ fun PlayerScreen(
                 Text("This channel isn't coming in", color = Ink, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "We tried several times. This is on your IPTV service's end — not your internet or this device. Try another channel, or ask your IPTV service about this one.",
+                    "Playback stopped after several attempts to reconnect. You can try again or switch channels.",
                     color = Muted, fontSize = 12.sp
                 )
                 Spacer(Modifier.height(12.dp))
