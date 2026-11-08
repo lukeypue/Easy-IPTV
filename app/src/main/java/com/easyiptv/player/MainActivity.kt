@@ -2392,21 +2392,52 @@ private fun LiveGridGuide(
                         entry.desc.ifBlank { "No description was supplied in the lightweight guide." },
                         color = Ink, fontSize = 12.sp
                     )
-                    FavoriteButton(favorites, FavoriteItem.from(ch))
                 }
             },
             confirmButton = {
                 // RYZOD_V459_ONE_ACTION_ROW
-                Row(horizontalArrangement=Arrangement.spacedBy(3.dp),verticalAlignment=Alignment.CenterVertically) {
-                    if(airing) TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(14.dp)),onClick={
-                        val queue=channels.map{livePlayable(prefs,it)};selected=null;onPlayLive(queue,chIndexOf(channels,ch))
-                    }) { Text("▶ WATCH",color=ProgramCyan,fontWeight=FontWeight.Bold,fontSize=10.sp) }
-                    if(recordable) TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(14.dp)),onClick={
-                        if(airing) {
-                            Recorder.start(context,ch.url,entry.title+" ("+ch.name+")",entry.endMs+2*60*1000);toast(context,"Recording "+entry.title+".");selected=null
-                        } else { toast(context,ScheduleStore.add(context,prefs,entry.title,ch.name,ch.url,entry.startMs,entry.endMs));selected=null }
-                    }) { Text(if(airing)"● RECORD" else "● SCHEDULE",color=Live,fontWeight=FontWeight.Bold,fontSize=10.sp) }
-                    TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(14.dp)),onClick={selected=null}) { Text("CLOSE",color=Ink,fontSize=10.sp) }
+                val favorite = FavoriteItem.from(ch)
+                val saved = favorites.contains(favorite)
+                val padding = PaddingValues(horizontal = 2.dp)
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (airing) TextButton(
+                        modifier = Modifier.weight(1f).tvFocus(RoundedCornerShape(14.dp)),
+                        contentPadding = padding,
+                        onClick = {
+                            val queue = channels.map { livePlayable(prefs, it) }
+                            selected = null
+                            onPlayLive(queue, chIndexOf(channels, ch))
+                        }
+                    ) { Text("▶ WATCH", color = ProgramCyan, fontWeight = FontWeight.Bold, fontSize = 10.sp) }
+                    TextButton(
+                        modifier = Modifier.weight(1.25f).tvFocus(RoundedCornerShape(14.dp)),
+                        contentPadding = padding,
+                        onClick = { favorites.toggle(favorite) }
+                    ) {
+                        Text(if (saved) "UNFAVORITE" else "FAVORITE",
+                            color = Accent, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                    }
+                    if (recordable) TextButton(
+                        modifier = Modifier.weight(1.1f).tvFocus(RoundedCornerShape(14.dp)),
+                        contentPadding = padding,
+                        onClick = {
+                            if (airing) {
+                                Recorder.start(context, ch.url, "${entry.title} (${ch.name})", entry.endMs + 2 * 60 * 1000)
+                                toast(context, "Recording ${entry.title}.")
+                            } else {
+                                toast(context, ScheduleStore.add(context, prefs, entry.title, ch.name, ch.url, entry.startMs, entry.endMs))
+                            }
+                            selected = null
+                        }
+                    ) { Text(if (airing) "● RECORD" else "● SCHEDULE", color = Live, fontWeight = FontWeight.Bold, fontSize = 10.sp) }
+                    TextButton(
+                        modifier = Modifier.weight(0.85f).tvFocus(RoundedCornerShape(14.dp)),
+                        contentPadding = padding,
+                        onClick = { selected = null }
+                    ) { Text("CLOSE", color = Ink, fontSize = 10.sp) }
                 }
             },
             dismissButton = {}

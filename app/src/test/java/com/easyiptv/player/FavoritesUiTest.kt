@@ -108,6 +108,22 @@ class FavoritesUiTest {
         ui.onNodeWithText(series.name).assertDoesNotExist()
     }
 
+    @Test fun guidePopupPlacesFavoriteBetweenWatchAndRecordOnTheSameRow() {
+        render("live")
+        ui.onAllNodesWithText("No information").onFirst().performClick()
+        val watch = ui.onNodeWithText("▶ WATCH").assertIsDisplayed()
+        val favorite = ui.onNodeWithText("FAVORITE").assertIsDisplayed()
+        val record = ui.onNodeWithText("● RECORD").assertIsDisplayed()
+        val close = ui.onNodeWithText("CLOSE").assertIsDisplayed()
+        val actions = listOf(watch, favorite, record, close).map { it.fetchSemanticsNode().boundsInRoot.center }
+        assertTrue(actions.zipWithNext().all { (a, b) -> a.x < b.x && kotlin.math.abs(a.y - b.y) < 1f })
+        watch.performSemanticsAction(SemanticsActions.RequestFocus) { it() }
+        watch.performKeyInput { pressKey(Key.DirectionRight) }
+        favorite.assertIsFocused().performKeyInput { pressKey(Key.DirectionCenter) }
+        ui.onNodeWithText("UNFAVORITE").assertIsDisplayed().performClick()
+        favorite.assertIsDisplayed()
+    }
+
     @Test fun channelTimerCanFavoriteAndSavedChannelOffersWatchAndRecord() {
         render("live")
         ui.onNodeWithText(channel.name).performClick()
