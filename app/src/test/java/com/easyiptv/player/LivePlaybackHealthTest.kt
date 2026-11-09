@@ -52,6 +52,48 @@ class LivePlaybackHealthTest {
         assertFalse("A recovery must not trigger on every poll", sample(monitor, 20_000, 20_000, 10))
     }
 
+    @Test fun aNewTuneConfirmsFrozenPictureAfterFiveSecondsOfAdvancingPlayback() {
+        val monitor = monitor()
+        assertFalse(sample(monitor, 4_000, 4_000, 96, settling = true))
+        assertFalse(sample(monitor, 5_000, 5_000, 120, settling = true))
+        for (second in 6L..9L) {
+            assertFalse(sample(monitor, second * 1_000, second * 1_000, 120, settling = true))
+        }
+        assertTrue(sample(monitor, 10_000, 10_000, 120, settling = true))
+        assertFalse("The recovery must not repeat on the next tick",
+            sample(monitor, 11_000, 11_000, 120, settling = true))
+    }
+
+    @Test fun refreshingVideoDoesNotDelayAFullRecoveryIfThePictureStaysFrozen() {
+        val monitor = monitor()
+        assertFalse(monitor.sample(0, 1, true, 0, 12, settling = true, canRefreshOutput = true))
+        assertTrue(monitor.sample(5_000, 1, true, 5_000, 12, settling = true, canRefreshOutput = true))
+        monitor.sample(5_000, 1, false, 0, 0)
+        assertFalse(sample(monitor, 6_000, 6_000, 12, settling = true))
+        assertTrue(sample(monitor, 11_000, 11_000, 12, settling = true))
+        assertFalse(sample(monitor, 16_000, 16_000, 12, settling = true))
+    }
+
+    @Test fun interruptedPauseReaderUsesAppRecoveryInsteadOfReloadingItsOriginalOffset() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val prefs = context.getSharedPreferences("pause-reader-recovery", Context.MODE_PRIVATE)
+        try {
+            Playback.open(context, prefs, listOf(Playable("Live", "http://127.0.0.1:9/live.ts", true)), 0, null, false)
+            val factory = Playback.javaClass.getDeclaredField("liveDvrMediaSources")
+                .apply { isAccessible = true }.get(Playback) as androidx.media3.exoplayer.source.MediaSource.Factory
+            val uri = android.net.Uri.parse("http://127.0.0.1:1234/live/1?offset=0")
+            val source = factory.createMediaSource(androidx.media3.common.MediaItem.fromUri(uri))
+            val policy = source.javaClass.getDeclaredField("loadableLoadErrorHandlingPolicy")
+                .apply { isAccessible = true }.get(source) as androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
+            val error = androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy.LoadErrorInfo(
+                androidx.media3.exoplayer.source.LoadEventInfo.Builder(1L, androidx.media3.datasource.DataSpec(uri), 0L).build(),
+                androidx.media3.exoplayer.source.MediaLoadData(androidx.media3.common.C.DATA_TYPE_MEDIA),
+                java.io.IOException("Local reader disconnected"), 1
+            )
+            assertEquals(androidx.media3.common.C.TIME_UNSET, policy.getRetryDelayMsFor(error))
+        } finally { Playback.releaseAll() }
+    }
+
     @Test fun normalFramesAndMotionlessPlaybackDoNotTriggerRecovery() {
         val monitor = monitor()
         assertFalse(sample(monitor, 0, 0, 10))
@@ -139,18 +181,9 @@ class LivePlaybackHealthTest {
         method.invoke(Playback, now, eligible, position)
     }
 
-    // Reflection allows the initial red run to report a missing behavior as an
-    // assertion, while keeping the test source compilable before the policy exists.
-    private fun monitor(): Any {
-        val type = runCatching { Class.forName("com.easyiptv.player.VideoHealthMonitor") }.getOrNull()
-        assertNotNull("Video-only stalls need a bounded health policy", type)
-        return type!!.getDeclaredConstructor().newInstance()
-    }
+    private fun monitor() = VideoHealthMonitor()
 
-    private fun sample(monitor: Any, now: Long, position: Long, frames: Long,
-                       eligible: Boolean = true, generation: Long = 1): Boolean =
-        monitor.javaClass.getDeclaredMethod("sample", Long::class.javaPrimitiveType,
-            Long::class.javaPrimitiveType, Boolean::class.javaPrimitiveType,
-            Long::class.javaPrimitiveType, Long::class.javaPrimitiveType)
-            .invoke(monitor, now, generation, eligible, position, frames) as Boolean
+    private fun sample(monitor: VideoHealthMonitor, now: Long, position: Long, frames: Long,
+                       eligible: Boolean = true, generation: Long = 1, settling: Boolean = false) =
+        monitor.sample(now, generation, eligible, position, frames, settling)
 }

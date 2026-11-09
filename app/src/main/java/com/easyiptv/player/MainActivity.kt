@@ -3085,7 +3085,12 @@ object Playback {
     private var smoothProgressiveSources: androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory? = null
     private var standardMediaSources: androidx.media3.exoplayer.source.DefaultMediaSourceFactory? = null
     private var tolerantTsMediaSources: androidx.media3.exoplayer.source.DefaultMediaSourceFactory? = null
-    private var liveDvrMediaSources: androidx.media3.exoplayer.source.DefaultMediaSourceFactory? = null
+    private var liveDvrMediaSources: androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory? = null
+    // Unknown-length progressive retries can silently reopen the source at byte zero.
+    private val appControlledProgressiveRecovery = object : androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy() {
+        override fun getRetryDelayMsFor(loadErrorInfo: androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy.LoadErrorInfo) =
+            C.TIME_UNSET
+    }
     private var browserVodMediaSources: androidx.media3.exoplayer.source.DefaultMediaSourceFactory? = null
     private var vodUaFallbackUsed = false
     private var skipNativePause = false
@@ -3099,6 +3104,8 @@ object Playback {
     private val videoHealthHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var videoHealthRunning = false
     private var videoHealthSession = 0L
+    private var directTuneFirstFrameAtMs = C.TIME_UNSET
+    private var videoOutputRefreshSession = Long.MIN_VALUE
     private var observedVideoCounters: androidx.media3.exoplayer.DecoderCounters? = null
     private var observedVideoView: PlayerView? = null
     private val videoViews = ArrayList<java.lang.ref.WeakReference<PlayerView>>()
@@ -3126,13 +3133,27 @@ object Playback {
 
     private fun visibleVideoView(p: ExoPlayer): PlayerView? {
         videoViews.removeAll { it.get() == null }
-        return videoViews.asReversed().firstNotNullOfOrNull { ref ->
-            ref.get()?.takeIf { view ->
-                val surface = view.videoSurfaceView as? android.view.SurfaceView
-                view.player === p && view.isAttachedToWindow && view.isShown &&
-                    view.width > 0 && view.height > 0 && surface?.holder?.surface?.isValid == true
+        // The newest bound view owns video output, even while its surface
+        // is being created during a guide-to-fullscreen transition.
+        val view = videoViews.asReversed().firstNotNullOfOrNull { ref ->
+            ref.get()?.takeIf { it.player === p }
+        } ?: return null
+        val surface = view.videoSurfaceView as? android.view.SurfaceView
+        return view.takeIf { it.isAttachedToWindow && it.isShown &&
+            it.width > 0 && it.height > 0 && surface?.holder?.surface?.isValid == true }
+    }
+
+    private fun refreshLiveVideoOutput(p: ExoPlayer, surface: android.view.Surface) {
+        val renderers = (0 until p.rendererCount).filter { p.getRendererType(it) == C.TRACK_TYPE_VIDEO }
+            .flatMap { listOfNotNull(p.getRenderer(it), p.getSecondaryRenderer(it)) }
+        // Keep Media3's holder ownership. A synchronous surface detach on the
+        // app thread could itself time out waiting for a wedged video renderer.
+        p.createMessage { _, _ ->
+            if (surface.isValid) for (renderer in renderers) {
+                renderer.handleMessage(androidx.media3.exoplayer.Renderer.MSG_SET_VIDEO_OUTPUT, null)
+                renderer.handleMessage(androidx.media3.exoplayer.Renderer.MSG_SET_VIDEO_OUTPUT, surface)
             }
-        }
+        }.send()
     }
 
     private fun resetVideoObservation() {
@@ -3166,8 +3187,12 @@ object Playback {
             val playingReady = p.isPlaying && p.playbackState == Player.STATE_READY && !pausePreparing
             val eligible = view != null && counters != null && playingReady &&
                 p.currentTracks.isTypeSelected(C.TRACK_TYPE_VIDEO)
-            val recover = videoHealth.sample(now, videoHealthSession, eligible,
-                p.currentPosition, counters?.renderedOutputBufferCount?.toLong() ?: 0L)
+            val settling = simpleRaw && directTuneFirstFrameAtMs != C.TIME_UNSET &&
+                now - directTuneFirstFrameAtMs < 20_000L
+            val output = (view?.videoSurfaceView as? android.view.SurfaceView)?.holder?.surface
+            val canRefreshOutput = simpleRaw && output != null && videoOutputRefreshSession != videoHealthSession
+            val recover = videoHealth.sample(now, videoHealthSession, eligible, p.currentPosition,
+                counters?.renderedOutputBufferCount?.toLong() ?: 0L, settling, canRefreshOutput)
             if (videoHealth.stableProgressMs >= 15_000L) retriesP = 0
             // An invisible selected-video surface cannot use advancing audio to
             // erase failures. Genuinely audio-only streams earn a fresh budget
@@ -3179,20 +3204,23 @@ object Playback {
                     (p.playbackState == Player.STATE_READY || p.playbackState == Player.STATE_BUFFERING),
                 p.currentPosition, p.totalBufferedDuration)
             if (recover || progressStalled) {
-                val myGen = playbackGen
                 StabilityCore.note("live_stall_recover clock=$progressStalled state=${p.playbackState} buffered=${p.totalBufferedDuration} direct=$directLive temporary=${Timeshift.active} mime=${p.videoFormat?.sampleMimeType}")
-                // Disable the decoder before rebuilding the same source. Do not
-                // recreate the shared player or steal a recording's provider slot.
-                if (myGen == playbackGen && player === p && !backgroundSuspended &&
-                    p.playWhenReady && !recoverSmoothLive(p)) {
-                    val wasPlaying = p.playWhenReady
-                    p.stop()
-                    if (!recoverTemporaryLive()) {
-                        zapTo(currentIdxC.intValue, preserveDirect = true)
-                    } else p.playWhenReady = wasPlaying && !backgroundSuspended
+                if (p.playWhenReady) {
+                    if (recover && canRefreshOutput && output != null) {
+                        videoOutputRefreshSession = videoHealthSession
+                        StabilityCore.note("live_video_output_refresh pos=${p.currentPosition} settling=$settling")
+                        refreshLiveVideoOutput(p, output)
+                        resetVideoObservation()
+                    } else if (!recoverSmoothLive(p)) {
+                        val wasPlaying = p.playWhenReady
+                        p.stop()
+                        if (!recoverTemporaryLive()) {
+                            zapTo(currentIdxC.intValue, preserveDirect = true)
+                        } else p.playWhenReady = wasPlaying && !backgroundSuspended
+                    }
                 }
             }
-            if (videoHealthRunning) videoHealthHandler.postDelayed(this, 5_000L)
+            if (videoHealthRunning) videoHealthHandler.postDelayed(this, if (settling) 1_000L else 5_000L)
         }
     }
 
@@ -3284,7 +3312,12 @@ object Playback {
         val p = player ?: return false
         val ch = queue.getOrNull(currentIdxC.intValue) ?: return false
         val pos = dvrAbsolutePositionMs()
-        val offset = (pos * dvrBytesPerMs()).toLong().coerceIn(Timeshift.oldestVirtualByte(), Timeshift.newestVirtualByte())
+        val newest = Timeshift.newestVirtualByte()
+        val minimum = maxOf(dvrSourceOffsetBytes, Timeshift.oldestVirtualByte()).coerceAtMost(newest)
+        val relativeMs = (pos - dvrSourceBaseMs).coerceAtLeast(0L)
+        val sourceOffset = dvrSourceOffsetBytes.coerceAtMost(newest)
+        val advanceBytes = (relativeMs * dvrBytesPerMs()).toLong().coerceAtMost(newest - sourceOffset)
+        val offset = (((sourceOffset + advanceBytes) / 188L) * 188L).coerceAtLeast(minimum)
         // Pending retries belong to the old localhost source, not this reopen.
         playbackGen++
         setGrowingDvrSource(p, ch, offset, pos, p.playWhenReady)
@@ -3368,10 +3401,7 @@ object Playback {
             // Progressive Media3 loads can silently restart unknown-length feeds
             // at byte zero. Let Smooth's controller decide whether to recover.
             smoothProgressiveSources = androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(mediaData, extractors)
-                .setLoadErrorHandlingPolicy(object : androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy() {
-                    override fun getRetryDelayMsFor(loadErrorInfo: androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy.LoadErrorInfo) =
-                        C.TIME_UNSET
-                })
+                .setLoadErrorHandlingPolicy(appControlledProgressiveRecovery)
         }
         tolerantTsMediaSources = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(mediaData, tolerantTsExtractors)
             .setLoadErrorHandlingPolicy(androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy(8))
@@ -3386,8 +3416,8 @@ object Playback {
                 androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS or
                     androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES
             )
-        liveDvrMediaSources = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(mediaData, liveDvrExtractors)
-            .setLoadErrorHandlingPolicy(androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy(8))
+        liveDvrMediaSources = androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(mediaData, liveDvrExtractors)
+            .setLoadErrorHandlingPolicy(appControlledProgressiveRecovery)
         // Some IPTV VOD hosts accept the Xtream/API login but reject a custom
         // player User-Agent with 403/406. Keep one passive browser-UA fallback
         // and use it ONLY after Media3 proves that exact response code.
@@ -3467,7 +3497,15 @@ object Playback {
             }
 
             override fun onRenderedFirstFrame() {
-                if (liveMode) StabilityCore.note("live_first_frame pos=${p.currentPosition} buffered=${p.totalBufferedDuration} mime=${p.videoFormat?.sampleMimeType}")
+                if (!liveMode) return
+                StabilityCore.note("live_first_frame pos=${p.currentPosition} buffered=${p.totalBufferedDuration} mime=${p.videoFormat?.sampleMimeType}")
+                if (simpleRaw && directTuneFirstFrameAtMs == C.TIME_UNSET) {
+                    directTuneFirstFrameAtMs = android.os.SystemClock.elapsedRealtime()
+                    if (videoHealthRunning) {
+                        videoHealthHandler.removeCallbacks(videoHealthTick)
+                        videoHealthHandler.post(videoHealthTick)
+                    }
+                }
             }
 
             override fun onPlaybackSuppressionReasonChanged(playbackSuppressionReason: Int) {
@@ -3944,6 +3982,7 @@ object Playback {
         liveProviderReserved = true
         currentIdxC.intValue = i
         val recovery = preserveDirect && !Timeshift.active && everReadyC.value
+        directTuneFirstFrameAtMs = C.TIME_UNSET
         everReadyC.value = recovery
         videoFpsC.floatValue = 0f
         streamDeadC.value = false
@@ -8836,5 +8875,6 @@ private fun applyFrameRateMatch(activity: android.app.Activity, fps: Float) {
         val lp = activity.window.attributes
         lp.preferredDisplayModeId = target.modeId
         activity.window.attributes = lp
+        StabilityCore.note("display_frame_rate_match mode=${target.modeId} hz=${target.refreshRate} fps=$fps")
     }
 }
