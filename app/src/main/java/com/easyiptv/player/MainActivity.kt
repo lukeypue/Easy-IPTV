@@ -396,6 +396,7 @@ internal fun wireStockPlayerDpad(root: PlayerView) {
 }
 
 
+@OptIn(UnstableApi::class)
 internal fun handleVodNavigationKey(root: PlayerView, keyCode: Int): Boolean {
     val player = root.player ?: return false
     if (keyCode !in listOf(android.view.KeyEvent.KEYCODE_DPAD_DOWN,
