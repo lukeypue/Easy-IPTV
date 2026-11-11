@@ -38,8 +38,8 @@ android {
         applicationId = "com.easyiptv.player"
         minSdk = 26
         targetSdk = 36
-        versionCode = 118
-        versionName = "4.94"
+        versionCode = 119
+        versionName = "4.95"
         buildConfigField("boolean", "TV_ARTWORK", tvArtwork.toString())
         buildConfigField("boolean", "SELF_UPDATES", selfUpdates.toString())
         buildConfigField("String", "DISTRIBUTION", "\"$ryzodDistribution\"")

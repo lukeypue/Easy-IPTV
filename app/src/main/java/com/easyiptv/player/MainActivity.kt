@@ -349,7 +349,7 @@ private fun FocusButton(
  * only VOD / saved recordings / downloads; live TV uses RYZOD's own controller.
  */
 @OptIn(UnstableApi::class)
-private fun wireStockPlayerDpad(root: PlayerView) {
+internal fun wireStockPlayerDpad(root: PlayerView) {
     // Movies and episodes use the stock controller, whose bottom-right gear
     // cannot be reached reliably with the Fire TV remote. Keep app settings in
     // the main menu and remove this unused control before wiring remote focus.
@@ -358,7 +358,11 @@ private fun wireStockPlayerDpad(root: PlayerView) {
         isFocusable = false
         isClickable = false
     }
+    root.findViewById<androidx.media3.ui.PlayerControlView>(androidx.media3.ui.R.id.exo_controller)?.setAnimationEnabled(false)
     val progress = root.findViewById<android.view.View>(androidx.media3.ui.R.id.exo_progress) ?: return
+    progress.setOnFocusChangeListener { _, focused ->
+        root.controllerShowTimeoutMs = if (focused) 0 else 5000
+    }
     val play = root.findViewById<android.view.View>(androidx.media3.ui.R.id.exo_play_pause)
     progress.isFocusable = true
     progress.isFocusableInTouchMode = true
@@ -383,7 +387,7 @@ private fun wireStockPlayerDpad(root: PlayerView) {
             v.setOnKeyListener { _, keyCode, event ->
                 if (event.action == android.view.KeyEvent.ACTION_DOWN &&
                     keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN) {
-                    progress.requestFocus(); true
+                    progress.isEnabled && progress.requestFocus()
                 } else false
             }
         }
@@ -391,6 +395,26 @@ private fun wireStockPlayerDpad(root: PlayerView) {
     walk(root)
 }
 
+
+internal fun handleVodNavigationKey(root: PlayerView, keyCode: Int): Boolean {
+    val player = root.player ?: return false
+    if (keyCode !in listOf(android.view.KeyEvent.KEYCODE_DPAD_DOWN,
+            android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD, android.view.KeyEvent.KEYCODE_MEDIA_REWIND)) return false
+    wireStockPlayerDpad(root)
+    root.showController()
+    if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN) {
+        val progress = root.findViewById<android.view.View>(androidx.media3.ui.R.id.exo_progress) ?: return false
+        return progress.isEnabled && progress.requestFocus()
+    }
+    val command = if (keyCode == android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD)
+        Player.COMMAND_SEEK_FORWARD else Player.COMMAND_SEEK_BACK
+    if (player.isCommandAvailable(command)) {
+        if (keyCode == android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD) player.seekForward() else player.seekBack()
+    } else {
+        toast(root.context, "This video does not currently provide seeking.")
+    }
+    return true
+}
 
 /** One inexpensive CC switch for embedded/subtitle tracks Media3 already exposes. */
 @OptIn(UnstableApi::class)
@@ -4341,20 +4365,25 @@ private fun VodInfoDialog(
                         Text(facts.joinToString("  •  "), color = ProgramCyan, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                     }
                 }
-                if (favorites != null) FavoriteButton(favorites, FavoriteItem.from(movie), onFavoriteRemoved)
                 Spacer(Modifier.height(12.dp))
             }
         },
         confirmButton = {
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(18.dp)),onClick={
-                    onClose();onPlay(Playable(movie.name,movie.url,isLive=false,artwork=movie.icon))
-                }) { Text("▶ PLAY",color=ProgramCyan,fontWeight=FontWeight.Bold) }
-                TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(18.dp)),onClick={
-                    toast(context,DownloadStore.start(context,prefs,movie.name,movie.url))
-                }) { Text("⬇ DOWNLOAD",color=DownloadGreen,fontWeight=FontWeight.Bold) }
-                TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(18.dp)),onClick=onClose) {
-                    Text("CLOSE",color=Ink)
+            Row(horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
+                TextButton(modifier = Modifier.weight(1f).tvFocus(RoundedCornerShape(18.dp)),
+                    contentPadding = PaddingValues(horizontal = 2.dp), onClick = {
+                        onClose()
+                        onPlay(Playable(movie.name, movie.url, isLive = false, artwork = movie.icon))
+                    }) { Text("▶ PLAY", color = ProgramCyan, fontWeight = FontWeight.Bold, fontSize = 12.sp) }
+                if (favorites != null) FavoriteButton(favorites, FavoriteItem.from(movie), onFavoriteRemoved,
+                    modifier = Modifier.weight(1.3f), compact = true)
+                TextButton(modifier = Modifier.weight(1.5f).tvFocus(RoundedCornerShape(18.dp)),
+                    contentPadding = PaddingValues(horizontal = 2.dp), onClick = {
+                        toast(context, DownloadStore.start(context, prefs, movie.name, movie.url))
+                    }) { Text("⬇ DOWNLOAD", color = DownloadGreen, fontWeight = FontWeight.Bold, fontSize = 12.sp) }
+                TextButton(modifier = Modifier.weight(0.85f).tvFocus(RoundedCornerShape(18.dp)),
+                    contentPadding = PaddingValues(horizontal = 2.dp), onClick = onClose) {
+                    Text("CLOSE", color = Ink, fontSize = 12.sp)
                 }
             }
         },
@@ -4363,13 +4392,21 @@ private fun VodInfoDialog(
 }
 
 @Composable
-private fun FavoriteButton(store: FavoritesStore, item: FavoriteItem, onRemoved: (() -> Unit)? = null) {
+private fun FavoriteButton(
+    store: FavoritesStore, item: FavoriteItem, onRemoved: (() -> Unit)? = null,
+    modifier: Modifier = Modifier, compact: Boolean = false
+) {
     val saved = store.contains(item)
-    TextButton(modifier = Modifier.tvFocus(), onClick = {
+    TextButton(
+        modifier = modifier.tvFocus(),
+        contentPadding = if (compact) PaddingValues(horizontal = 2.dp) else androidx.compose.material3.ButtonDefaults.TextButtonContentPadding,
+        onClick = {
         store.toggle(item)
         if (saved) onRemoved?.invoke()
     }) {
-        Text(if (saved) "★ REMOVE FAVORITE" else "☆ ADD FAVORITE", color = Accent, fontWeight = FontWeight.Bold)
+        Text(if (saved) "★ REMOVE FAVORITE" else "☆ ADD FAVORITE", color = Accent, fontWeight = FontWeight.Bold,
+            fontSize = if (compact) 12.sp else 14.sp,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center)
     }
 }
 
@@ -5710,11 +5747,6 @@ fun SearchTab(
                 }
             }
         }
-        Text(
-            "Search titles, actors, directors, genres and live TV — all from one box.",
-            fontSize = 11.sp, color = Muted,
-            modifier = Modifier.padding(horizontal = 16.dp)
-        )
         if (!onDemandWarning.isNullOrBlank()) {
             Text(
                 "Movies/Series are still loading or unavailable; Live TV search still works. $onDemandWarning",
@@ -5723,8 +5755,11 @@ fun SearchTab(
             )
         }
 
+        val waitingForTyping = typedQuery.isNotEmpty() && typedQuery != appliedQuery
         val q = if (typedQuery.isEmpty()) "" else appliedQuery
         if (q.isEmpty()) {
+            SearchStatusLine(waitingForTyping)
+            if (waitingForTyping) return
             if (recents.isEmpty()) {
                 Column(
                     Modifier.fillMaxSize(),
@@ -5773,7 +5808,32 @@ fun SearchTab(
 
         SearchResultsPane(source,prefs,data,q,activeIndexes,resultsFocusRequested,resultsFocus,
             keyboardOpen,keyboardFocus,{saveRecent(it)},{searchInfoMovie=it},onPlayLive,onSeries,searchSession,
-            onResultsFocusConsumed={resultsFocusRequested=false})
+            onResultsFocusConsumed={resultsFocusRequested=false}, waitingForTyping = waitingForTyping)
+    }
+}
+
+@Composable
+private fun SearchStatusLine(searching: Boolean) {
+    if (!searching) {
+        Text("Search titles, actors, directors, genres and live TV — all from one box.",
+            fontSize = 11.sp, color = Muted, modifier = Modifier.padding(horizontal = 16.dp))
+        return
+    }
+    var dotsVisible by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(400)
+            dotsVisible = !dotsVisible
+        }
+    }
+    Row(
+        Modifier.padding(horizontal = 16.dp)
+            .testTag("search-activity").semantics { contentDescription = "Searching" },
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("Searching", color = ProgramCyan, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+        Text("...", color = if (dotsVisible) ProgramCyan else Color.Transparent,
+            fontWeight = FontWeight.Bold, fontSize = 11.sp)
     }
 }
 
@@ -5786,7 +5846,7 @@ private fun SearchResultsPane(
     keyboardOpen: Boolean, keyboardFocus: FocusRequester,
     onSaveRecent: (String) -> Unit, onMovieInfo: (Movie) -> Unit,
     onPlayLive: (List<Playable>, Int) -> Unit, onSeries: (SeriesItem) -> Unit, session: SearchSession,
-    onResultsFocusConsumed: () -> Unit
+    onResultsFocusConsumed: () -> Unit, waitingForTyping: Boolean
 ) {
     // Catalog results never wait for the guide index to finish.
     val matches by androidx.compose.runtime.produceState<SearchMatches?>(session.matchesFor(data,q,indexes),q,indexes,data) {
@@ -5830,14 +5890,14 @@ private fun SearchResultsPane(
         value = built
     }
     val currentMatches=matches?.takeIf { it.query==q && it.indexIdentity===data }
-    if(currentMatches==null) {
-        Text("Searching…",color=Muted,modifier=Modifier.padding(16.dp))
-        return
-    }
+    val currentGuideMatches = guideMatches?.takeIf { it.first == q && it.second == revision }
+    val searching = waitingForTyping || currentMatches == null || currentGuideMatches == null
+    SearchStatusLine(searching)
+    if (currentMatches == null) return
     val liveHits=currentMatches.live
     val movieHits=currentMatches.movies
     val seriesHits=currentMatches.series
-    val guideHits=guideMatches?.takeIf { it.first==q && it.second==revision }?.third.orEmpty().filter { it.entry.endMs > System.currentTimeMillis() }
+    val guideHits = currentGuideMatches?.third.orEmpty().filter { it.entry.endMs > System.currentTimeMillis() }
 
 
     // Match guide channels back to playable channels (by guide id, then by name).
@@ -5859,6 +5919,7 @@ private fun SearchResultsPane(
     }
 
     if (liveHits.isEmpty() && movieHits.isEmpty() && seriesHits.isEmpty() && guideHits.isEmpty()) {
+        if (searching) return
         Column(
             Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.Center,
@@ -6052,7 +6113,9 @@ private fun EpisodeInfoDialog(
     episode: Episode,
     prefs: SharedPreferences,
     onPlay: () -> Unit,
-    onClose: () -> Unit
+    onClose: () -> Unit,
+    favorites: FavoritesStore?,
+    series: SeriesItem
 ) {
     val context = LocalContext.current
     val epName = "$seriesName S${season}E${episode.episodeNum}"
@@ -6093,15 +6156,18 @@ private fun EpisodeInfoDialog(
             }
         },
         confirmButton = {
-            Row(horizontalArrangement=Arrangement.spacedBy(6.dp)) {
-                TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(18.dp)),onClick={onClose();onPlay()}) {
-                    Text("▶ PLAY",color=ProgramCyan,fontWeight=FontWeight.Bold,fontSize=14.sp)
+            Row(horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
+                TextButton(modifier = Modifier.weight(1f).tvFocus(RoundedCornerShape(18.dp)),
+                    contentPadding = PaddingValues(horizontal = 2.dp), onClick = { onClose(); onPlay() }) {
+                    Text("▶ PLAY",color=ProgramCyan,fontWeight=FontWeight.Bold,fontSize=12.sp)
                 }
-                TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(18.dp)),onClick={
+                if (favorites != null) FavoriteButton(favorites, FavoriteItem.from(series),
+                    modifier = Modifier.weight(1.3f), compact = true)
+                TextButton(modifier=Modifier.weight(1.5f).tvFocus(RoundedCornerShape(18.dp)), contentPadding = PaddingValues(horizontal = 2.dp), onClick={
                     toast(context,DownloadStore.start(context,prefs,epName,episode.url))
-                }) { Text("⬇ DOWNLOAD",color=DownloadGreen,fontWeight=FontWeight.Bold,fontSize=14.sp) }
-                TextButton(modifier=Modifier.tvFocus(RoundedCornerShape(18.dp)),onClick=onClose) {
-                    Text("CLOSE",color=Ink,fontWeight=FontWeight.Bold)
+                }) { Text("⬇ DOWNLOAD",color=DownloadGreen,fontWeight=FontWeight.Bold,fontSize=12.sp) }
+                TextButton(modifier=Modifier.weight(0.85f).tvFocus(RoundedCornerShape(18.dp)), contentPadding = PaddingValues(horizontal = 2.dp), onClick=onClose) {
+                    Text("CLOSE",color=Ink,fontWeight=FontWeight.Bold,fontSize=12.sp)
                 }
             }
         },
@@ -6161,7 +6227,7 @@ fun SeriesDetailScreen(
                 val idx = queue.indexOfFirst { it.url == ep.url }.coerceAtLeast(0)
                 onPlayQueue(queue, idx)
             },
-            onClose = { infoEpisode = null }
+            onClose = { infoEpisode = null }, favorites = favorites, series = s
         )
     }
 
@@ -6191,7 +6257,7 @@ fun SeriesDetailScreen(
                 ) { Text("Reset watched", color = Muted, fontSize = 12.sp) }
             }
         }
-        if (favorites != null) FavoriteButton(favorites, FavoriteItem.from(s))
+        if (favorites != null && queue.isEmpty()) FavoriteButton(favorites, FavoriteItem.from(s))
         selectedSeason?.let { SectionHeader("Season $it") }
         when {
             err != null -> ErrorBox(err!!, onRetry = { err = null }, title = "Couldn't load episodes")
@@ -7486,6 +7552,12 @@ fun PlayerScreen(
                         true
                     } else false
                 }
+                android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD,
+                android.view.KeyEvent.KEYCODE_MEDIA_REWIND -> {
+                    val view = pvRef
+                    if (!current.isLive && !showStopWatching && !showStreamHealth && view != null)
+                        handleVodNavigationKey(view, key) else false
+                }
                 // Real channel buttons (many TV remotes have them): always zap.
                 // Channel UP = next channel up the lineup (higher position);
                 // DOWN = previous. (Was reversed.)
@@ -7496,8 +7568,15 @@ fun PlayerScreen(
                 // D-pad up = channel up (next); down = previous.
                 android.view.KeyEvent.KEYCODE_DPAD_UP ->
                     if (zapReady() && !overlayVisible && !miniGuideOpen) { zap(+1); true } else false
-                android.view.KeyEvent.KEYCODE_DPAD_DOWN ->
-                    if (zapReady() && !overlayVisible && !miniGuideOpen) { zap(-1); true } else false
+                android.view.KeyEvent.KEYCODE_DPAD_DOWN -> {
+                    val view = pvRef
+                    when {
+                        !current.isLive && !showStopWatching && !showStreamHealth && view != null ->
+                            handleVodNavigationKey(view, key)
+                        zapReady() && !overlayVisible && !miniGuideOpen -> { zap(-1); true }
+                        else -> false
+                    }
+                }
                 else -> false
             }
         }
@@ -7673,6 +7752,7 @@ fun PlayerScreen(
         AndroidView(
             factory = { ctx ->
                 PlayerView(ctx).apply {
+                    if (!current.isLive) wireStockPlayerDpad(this)
                     player = exo
                     Playback.attachVideoView(this)
                     // Live TV has ONE controller: RYZOD's cable-box mini guide.
@@ -7723,41 +7803,7 @@ fun PlayerScreen(
                         }
                     )
 
-                    // Fire TV focus bridge for VOD/recordings. Media3's stock
-                    // controller can move UP from the seek bar but on some Fire
-                    // OS builds spatial focus will not move DOWN again. Explicitly
-                    // bridge the main play row <-> progress bar so the viewer can
-                    // always get back to the bottom timeline.
-                    if (!current.isLive) {
-                        // v4.22: wire the actual Android View focus graph instead
-                        // of hoping the PlayerView parent receives child key
-                        // events. This fixes the Fire OS trap where UP reaches
-                        // Play/FF/RW/title but DOWN can never return to the bar.
-                        post { wireStockPlayerDpad(this) }
-                        setOnKeyListener { _, keyCode, event ->
-                            if (event.action != android.view.KeyEvent.ACTION_DOWN) {
-                                false
-                            } else {
-                                val progress = findViewById<android.view.View>(androidx.media3.ui.R.id.exo_progress)
-                                val play = findViewById<android.view.View>(androidx.media3.ui.R.id.exo_play_pause)
-                                when (keyCode) {
-                                    android.view.KeyEvent.KEYCODE_DPAD_DOWN -> {
-                                        if (progress != null && !progress.hasFocus()) {
-                                            progress.requestFocus()
-                                            true
-                                        } else false
-                                    }
-                                    android.view.KeyEvent.KEYCODE_DPAD_UP -> {
-                                        if (progress?.hasFocus() == true && play != null) {
-                                            play.requestFocus()
-                                            true
-                                        } else false
-                                    }
-                                    else -> false
-                                }
-                            }
-                        }
-                    }
+
                 }
             },
             update = { view ->

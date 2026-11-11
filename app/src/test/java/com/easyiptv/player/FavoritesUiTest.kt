@@ -79,6 +79,9 @@ class FavoritesUiTest {
     @Test fun movieFavoritesKeepPlaybackAndDownloadWithoutLoadedCatalog() {
         render("movies")
         ui.onNodeWithText(movie.name).performClick()
+        val play = ui.onNodeWithText("▶ PLAY").fetchSemanticsNode().boundsInRoot.center
+        val favorite = ui.onNodeWithText("☆ ADD FAVORITE").fetchSemanticsNode().boundsInRoot.center
+        assertTrue("Favorite follows Play on the same row", play.x < favorite.x && kotlin.math.abs(play.y - favorite.y) < 1f)
         ui.onNodeWithText("☆ ADD FAVORITE").performClick()
         ui.onNodeWithText("CLOSE").performClick()
         ui.runOnIdle { catalogVisible.value = false }
@@ -92,11 +95,39 @@ class FavoritesUiTest {
         ui.onNodeWithText(movie.name).assertDoesNotExist()
     }
 
+    @Test
+    @Config(qualifiers = "w360dp-h640dp-port")
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun movieFavoriteActionsStayInlineOnANarrowScreen() {
+        render("movies")
+        ui.onNodeWithText("ⓘ").performClick()
+        ui.onNodeWithText("▶ PLAY").assertExists()
+        fun assertRow(favoriteLabel: String) {
+            val labels = listOf("▶ PLAY", favoriteLabel, "⬇ DOWNLOAD", "CLOSE")
+            val positions = labels.map {
+                val node = ui.onNodeWithText(it)
+                assertTrue("$it must be visible on a narrow screen", node.isDisplayed())
+                node.fetchSemanticsNode().boundsInRoot.center
+            }
+            assertTrue(positions.zipWithNext().all { (a, b) -> a.x < b.x && kotlin.math.abs(a.y - b.y) < 1f })
+        }
+        assertRow("☆ ADD FAVORITE")
+        ui.onNodeWithText("☆ ADD FAVORITE").performClick()
+        assertRow("★ REMOVE FAVORITE")
+
+    }
+
     @Test fun seriesFavoritesOpenSeasonsAndCanBeRemoved() {
         render("series")
         ui.onNodeWithText(series.name).performClick()
+        ui.onNodeWithText("Season 1").performClick()
+        ui.onNodeWithText("E1  Pilot").performClick()
+        val play = ui.onNodeWithText("▶ PLAY").fetchSemanticsNode().boundsInRoot.center
+        val favorite = ui.onNodeWithText("☆ ADD FAVORITE").fetchSemanticsNode().boundsInRoot.center
+        assertTrue("Favorite follows episode Play on the same row", play.x < favorite.x && kotlin.math.abs(play.y - favorite.y) < 1f)
         ui.onNodeWithText("☆ ADD FAVORITE").performClick()
-        ui.onNodeWithContentDescription("Back").performClick()
+        ui.onNodeWithText("CLOSE").performClick()
+        repeat(2) { ui.onNodeWithContentDescription("Back").performClick() }
         openFavorites()
         ui.onNodeWithText(series.name).performClick()
         ui.onNodeWithText("OPEN SEASONS").performClick()
