@@ -44,7 +44,7 @@ internal class VideoHealthMonitor {
             lastRecoveryAt = Long.MIN_VALUE
             clearObservation()
         }
-        if (!eligible || renderedFrames <= 0L) {
+        if (!eligible) {
             clearObservation()
             return false
         }
@@ -79,7 +79,7 @@ internal class VideoHealthMonitor {
             frameProgressAt = nowMs
             return false
         }
-        val confirmationMs = if (settling) 5_000L else 15_000L
+        val confirmationMs = if (settling || canRefreshOutput) 5_000L else 15_000L
         if (nowMs - frameProgressAt < confirmationMs) return false
         // An output refresh leaves the stream intact. Give it a fresh
         // observation window without spending or delaying a stream recovery.

@@ -3068,9 +3068,9 @@ private object TimeshiftServer {
  * PLAYBACK STREAM OWNERSHIP.
  * There is still exactly ONE ExoPlayer. The viewer chooses an IPTV-provider
  * connection budget of 1, 2, or 3 in Settings. Ordinary playback consumes one
- * remote slot; same-channel DVR recording tees from the existing timeshift and
- * costs zero extra; only independent recording/download requests consume extra
- * provider connections. Full-screen and corner views share the same player.
+ * remote slot. The optional HLS trial can reserve spare slots for segment
+ * requests. Same-channel DVR recording tees from the existing timeshift.
+ * Full-screen and corner views share the same player.
  * ------------------------------------------------------------------------- */
 @OptIn(UnstableApi::class)
 object Playback {
@@ -3131,6 +3131,7 @@ object Playback {
     private var videoHealthSession = 0L
     private var directTuneFirstFrameAtMs = C.TIME_UNSET
     private var videoOutputRefreshSession = Long.MIN_VALUE
+    private var smoothPictureRetuneSession = Long.MIN_VALUE
     private var observedVideoCounters: androidx.media3.exoplayer.DecoderCounters? = null
     private var observedVideoView: PlayerView? = null
     private val videoViews = ArrayList<java.lang.ref.WeakReference<PlayerView>>()
@@ -3169,12 +3170,13 @@ object Playback {
     }
 
     private fun refreshLiveVideoOutput(p: ExoPlayer, surface: android.view.Surface) {
+        val generation = playbackGen
         val renderers = (0 until p.rendererCount).filter { p.getRendererType(it) == C.TRACK_TYPE_VIDEO }
             .flatMap { listOfNotNull(p.getRenderer(it), p.getSecondaryRenderer(it)) }
         // Keep Media3's holder ownership. A synchronous surface detach on the
         // app thread could itself time out waiting for a wedged video renderer.
         p.createMessage { _, _ ->
-            if (surface.isValid) for (renderer in renderers) {
+            if (generation == playbackGen && surface.isValid) for (renderer in renderers) {
                 renderer.handleMessage(androidx.media3.exoplayer.Renderer.MSG_SET_VIDEO_OUTPUT, null)
                 renderer.handleMessage(androidx.media3.exoplayer.Renderer.MSG_SET_VIDEO_OUTPUT, surface)
             }
@@ -3210,15 +3212,23 @@ object Playback {
             }
             counters?.ensureUpdated()
             val playingReady = p.isPlaying && p.playbackState == Player.STATE_READY && !pausePreparing
+            val renderedFrames = counters?.renderedOutputBufferCount?.toLong() ?: 0L
+            // A zero-frame start is a picture stall only when audio is selected
+            // and the playback clock actually advances.
             val eligible = view != null && counters != null && playingReady &&
-                p.currentTracks.isTypeSelected(C.TRACK_TYPE_VIDEO)
+                p.currentTracks.isTypeSelected(C.TRACK_TYPE_VIDEO) &&
+                (renderedFrames > 0L || p.currentTracks.isTypeSelected(C.TRACK_TYPE_AUDIO))
             val settling = simpleRaw && directTuneFirstFrameAtMs != C.TIME_UNSET &&
                 now - directTuneFirstFrameAtMs < 20_000L
             val output = (view?.videoSurfaceView as? android.view.SurfaceView)?.holder?.surface
-            val canRefreshOutput = simpleRaw && output != null && videoOutputRefreshSession != videoHealthSession
+            val canRefreshOutput = output != null && videoOutputRefreshSession != videoHealthSession
             val recover = videoHealth.sample(now, videoHealthSession, eligible, p.currentPosition,
-                counters?.renderedOutputBufferCount?.toLong() ?: 0L, settling, canRefreshOutput)
+                renderedFrames, settling, canRefreshOutput)
             if (videoHealth.stableProgressMs >= 15_000L) retriesP = 0
+            if (videoHealth.stableProgressMs >= 60_000L) {
+                videoOutputRefreshSession = Long.MIN_VALUE
+                smoothPictureRetuneSession = Long.MIN_VALUE
+            }
             // An invisible selected-video surface cannot use advancing audio to
             // erase failures. Genuinely audio-only streams earn a fresh budget
             // after sustained READY position progress without needing a surface.
@@ -3236,16 +3246,12 @@ object Playback {
                         StabilityCore.note("live_video_output_refresh pos=${p.currentPosition} settling=$settling")
                         refreshLiveVideoOutput(p, output)
                         resetVideoObservation()
-                    } else if (!recoverSmoothLive(p)) {
-                        val wasPlaying = p.playWhenReady
-                        p.stop()
-                        if (!recoverTemporaryLive()) {
-                            zapTo(currentIdxC.intValue, preserveDirect = true)
-                        } else p.playWhenReady = wasPlaying && !backgroundSuspended
+                    } else if (!recoverSmoothLive(p, pictureStalled = recover) && !recoverTemporaryLive()) {
+                        zapTo(currentIdxC.intValue, preserveDirect = true)
                     }
                 }
             }
-            if (videoHealthRunning) videoHealthHandler.postDelayed(this, if (settling) 1_000L else 5_000L)
+            if (videoHealthRunning) videoHealthHandler.postDelayed(this, if (settling) 1_000L else 2_000L)
         }
     }
 
@@ -3253,7 +3259,7 @@ object Playback {
         if (videoHealthRunning || backgroundSuspended || !liveMode) return
         if (videoViews.isEmpty() && player?.let { isAudioOnly(it) } != true) return
         videoHealthRunning = true
-        videoHealthHandler.postDelayed(videoHealthTick, 5_000L)
+        videoHealthHandler.postDelayed(videoHealthTick, 2_000L)
     }
 
     private fun stopVideoHealthWatchdog() {
@@ -3629,7 +3635,7 @@ object Playback {
 
     private fun isSmoothDirectLive() = liveMode && simpleRaw && prefsRef?.getBoolean("live_smooth", false) == true
 
-    private fun recoverSmoothLive(p: ExoPlayer): Boolean {
+    private fun recoverSmoothLive(p: ExoPlayer, pictureStalled: Boolean = false): Boolean {
         if (!isSmoothDirectLive()) return false
         val canAdvance = p.isCurrentWindowLive && p.isCurrentWindowDynamic &&
             p.currentTimeline.getWindow(p.currentMediaItemIndex, androidx.media3.common.Timeline.Window())
@@ -3638,6 +3644,13 @@ object Playback {
             StabilityCore.note("smooth_live_advance")
             p.seekToDefaultPosition()
             p.prepare()
+        } else if (!canAdvance && pictureStalled && smoothPictureRetuneSession != videoHealthSession &&
+            playbackRetryDelay() != null) {
+            // A raw feed cannot seek forward. A confirmed picture-only stall
+            // gets one same-channel retune, without reopening a paused recording.
+            smoothPictureRetuneSession = videoHealthSession
+            StabilityCore.note("smooth_live_picture_retune")
+            zapTo(currentIdxC.intValue, preserveDirect = true)
         } else {
             StabilityCore.note("smooth_live_no_forward_position")
             p.stop()
@@ -4004,6 +4017,7 @@ object Playback {
         if (q.isEmpty()) return
         val i = ((idx % q.size) + q.size) % q.size
         val ch = q[i]
+        resetVideoObservation()
         liveProviderReserved = true
         currentIdxC.intValue = i
         val recovery = preserveDirect && !Timeshift.active && everReadyC.value

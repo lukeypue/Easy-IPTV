@@ -43,6 +43,26 @@ class LivePlaybackHealthTest {
         } finally { Playback.releaseAll() }
     }
 
+    @Test fun smoothPictureStallGetsOneSameChannelRetuneWhenTheFeedCannotSeek() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val prefs = context.getSharedPreferences("smooth-picture-retune", Context.MODE_PRIVATE)
+        prefs.edit().clear().putBoolean("live_smooth", true).commit()
+        val uri = "http://127.0.0.1:9/live.ts"
+        val recover = Playback.javaClass.getDeclaredMethod(
+            "recoverSmoothLive", androidx.media3.exoplayer.ExoPlayer::class.java, Boolean::class.javaPrimitiveType
+        ).apply { isAccessible = true }
+        try {
+            val player = Playback.open(context, prefs, listOf(Playable("Live", uri, true)), 0, null, false)
+            assertEquals(true, recover.invoke(Playback, player, true))
+            assertEquals(uri, player.currentMediaItem?.localConfiguration?.uri.toString())
+            assertTrue(player.playWhenReady)
+            assertFalse(Playback.streamDeadC.value)
+            assertFalse(Timeshift.active)
+            assertEquals(true, recover.invoke(Playback, player, true))
+            assertTrue("A second unchanged stall should not reopen the same feed again", Playback.streamDeadC.value)
+        } finally { Playback.releaseAll() }
+    }
+
     @Test fun advancingAudioWithFrozenVideoTriggersOnlyAfterAConfirmedStall() {
         val monitor = monitor()
         assertFalse(sample(monitor, 0, 0, 10))
@@ -66,8 +86,8 @@ class LivePlaybackHealthTest {
 
     @Test fun refreshingVideoDoesNotDelayAFullRecoveryIfThePictureStaysFrozen() {
         val monitor = monitor()
-        assertFalse(monitor.sample(0, 1, true, 0, 12, settling = true, canRefreshOutput = true))
-        assertTrue(monitor.sample(5_000, 1, true, 5_000, 12, settling = true, canRefreshOutput = true))
+        assertFalse(monitor.sample(0, 1, true, 0, 12, canRefreshOutput = true))
+        assertTrue(monitor.sample(5_000, 1, true, 5_000, 12, canRefreshOutput = true))
         monitor.sample(5_000, 1, false, 0, 0)
         assertFalse(sample(monitor, 6_000, 6_000, 12, settling = true))
         assertTrue(sample(monitor, 11_000, 11_000, 12, settling = true))
@@ -123,10 +143,19 @@ class LivePlaybackHealthTest {
         assertTrue("A new channel has a fresh recovery budget", sample(monitor, 115_000, 15_000, 1, generation = 2))
     }
 
-    @Test fun startupWithoutAnyVideoFrameIsNotMistakenForAStoppedPicture() {
+    @Test fun startupWithoutAnyVideoFrameCanRecoverWhenThePlaybackClockAdvances() {
         val monitor = monitor()
         assertFalse(sample(monitor, 0, 0, 0))
-        assertFalse(sample(monitor, 30_000, 30_000, 0))
+        assertFalse(sample(monitor, 10_000, 0, 0))
+        assertFalse(sample(monitor, 20_000, 10_000, 0))
+        assertTrue(sample(monitor, 25_000, 15_000, 0))
+    }
+
+    @Test fun aReplacementDecoderCanReportZeroFramesBeforeItStartsRendering() {
+        val monitor = monitor()
+        assertFalse(sample(monitor, 0, 0, 42))
+        assertFalse(sample(monitor, 20_000, 20_000, 0))
+        assertFalse(sample(monitor, 22_000, 22_000, 12))
     }
 
     @Test fun sustainedAudioOnlyPlaybackEarnsAFreshRetryBudget() {
