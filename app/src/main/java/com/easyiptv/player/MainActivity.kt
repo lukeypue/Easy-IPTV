@@ -1448,7 +1448,6 @@ fun HomeScreen(
                                     AndroidView(
                                         factory = { ctx ->
                                             PlayerView(ctx).apply {
-                                                player = Playback.player
                                                 useController = false
                                                 isFocusable = false
                                                 isFocusableInTouchMode = false
@@ -1456,10 +1455,9 @@ fun HomeScreen(
                                                 Playback.attachVideoView(this)
                                             }
                                         },
-                                        update = { it.player = Playback.player },
                                         // The shared player outlives this corner view. Remove
                                         // its listeners when returning to full-screen playback.
-                                        onRelease = { Playback.detachVideoView(it); it.player = null },
+                                        onRelease = Playback::detachVideoView,
                                         modifier = Modifier.fillMaxSize()
                                     )
                                     // Phones: the video view eats touches, so this
@@ -3122,7 +3120,7 @@ object Playback {
     private var pausePreparing = false
     private var pauseResumeRequested = false
 
-    // One coarse check for a video-only stall, including direct/Simple live.
+    // Poll only foreground playback with a video view or audio-only live playback.
     // Decoder counters track rendered output, not screenshots or screen pixels.
     private val videoHealth = VideoHealthMonitor()
     private val liveProgress = LiveProgressMonitor()
@@ -3130,27 +3128,33 @@ object Playback {
     private var videoHealthRunning = false
     private var videoHealthSession = 0L
     private var directTuneFirstFrameAtMs = C.TIME_UNSET
-    private var videoOutputRefreshSession = Long.MIN_VALUE
+    private var vodPictureRecoverySession = Long.MIN_VALUE
     private var smoothPictureRetuneSession = Long.MIN_VALUE
     private var observedVideoCounters: androidx.media3.exoplayer.DecoderCounters? = null
     private var observedVideoView: PlayerView? = null
-    private val videoViews = ArrayList<java.lang.ref.WeakReference<PlayerView>>()
+    private var videoOwner = java.lang.ref.WeakReference<PlayerView>(null)
 
-    /** Views share the existing player; registration never prepares a source. */
+    /** Transfer the shared player to the new view before detaching the old one. */
     fun attachVideoView(view: PlayerView) {
-        videoViews.removeAll { it.get() == null }
-        if (videoViews.none { it.get() === view }) videoViews.add(java.lang.ref.WeakReference(view))
-        if (view.player === player && player?.playWhenReady == true) startVideoHealthWatchdog()
+        val p = player ?: return
+        val old = videoOwner.get()
+        if (old !== view || view.player !== p) {
+            PlayerView.switchTargetView(p, old?.takeIf { it !== view }, view)
+            videoOwner = java.lang.ref.WeakReference(view)
+            resetVideoObservation()
+        }
+        if (p.playWhenReady) startVideoHealthWatchdog()
     }
 
     fun detachVideoView(view: PlayerView) {
-        videoViews.removeAll { it.get() == null || it.get() === view }
-        if (observedVideoView === view) resetVideoObservation()
-        if (videoViews.isEmpty()) {
+        if (videoOwner.get() === view) {
+            videoOwner.clear()
             stopVideoHealthWatchdog()
-            // Audio-only live playback has no rendering surface to supervise.
-            if (player?.let { it.playWhenReady && isAudioOnly(it) } == true) startVideoHealthWatchdog()
+            if (liveMode && player?.let { it.playWhenReady && isAudioOnly(it) } == true) {
+                startVideoHealthWatchdog()
+            }
         }
+        view.player = null
     }
 
     private fun isAudioOnly(p: ExoPlayer): Boolean =
@@ -3158,29 +3162,10 @@ object Playback {
             !p.currentTracks.isTypeSelected(C.TRACK_TYPE_VIDEO)
 
     private fun visibleVideoView(p: ExoPlayer): PlayerView? {
-        videoViews.removeAll { it.get() == null }
-        // The newest bound view owns video output, even while its surface
-        // is being created during a guide-to-fullscreen transition.
-        val view = videoViews.asReversed().firstNotNullOfOrNull { ref ->
-            ref.get()?.takeIf { it.player === p }
-        } ?: return null
+        val view = videoOwner.get()?.takeIf { it.player === p } ?: return null
         val surface = view.videoSurfaceView as? android.view.SurfaceView
         return view.takeIf { it.isAttachedToWindow && it.isShown &&
             it.width > 0 && it.height > 0 && surface?.holder?.surface?.isValid == true }
-    }
-
-    private fun refreshLiveVideoOutput(p: ExoPlayer, surface: android.view.Surface) {
-        val generation = playbackGen
-        val renderers = (0 until p.rendererCount).filter { p.getRendererType(it) == C.TRACK_TYPE_VIDEO }
-            .flatMap { listOfNotNull(p.getRenderer(it), p.getSecondaryRenderer(it)) }
-        // Keep Media3's holder ownership. A synchronous surface detach on the
-        // app thread could itself time out waiting for a wedged video renderer.
-        p.createMessage { _, _ ->
-            if (generation == playbackGen && surface.isValid) for (renderer in renderers) {
-                renderer.handleMessage(androidx.media3.exoplayer.Renderer.MSG_SET_VIDEO_OUTPUT, null)
-                renderer.handleMessage(androidx.media3.exoplayer.Renderer.MSG_SET_VIDEO_OUTPUT, surface)
-            }
-        }.send()
     }
 
     private fun resetVideoObservation() {
@@ -3198,7 +3183,7 @@ object Playback {
     private val videoHealthTick = object : Runnable {
         override fun run() {
             val p = player
-            if (!videoHealthRunning || p == null || !liveMode || backgroundSuspended) {
+            if (!videoHealthRunning || p == null || backgroundSuspended) {
                 stopVideoHealthWatchdog()
                 return
             }
@@ -3218,37 +3203,43 @@ object Playback {
             val eligible = view != null && counters != null && playingReady &&
                 p.currentTracks.isTypeSelected(C.TRACK_TYPE_VIDEO) &&
                 (renderedFrames > 0L || p.currentTracks.isTypeSelected(C.TRACK_TYPE_AUDIO))
-            val settling = simpleRaw && directTuneFirstFrameAtMs != C.TIME_UNSET &&
+            val settling = liveMode && simpleRaw && directTuneFirstFrameAtMs != C.TIME_UNSET &&
                 now - directTuneFirstFrameAtMs < 20_000L
-            val output = (view?.videoSurfaceView as? android.view.SurfaceView)?.holder?.surface
-            val canRefreshOutput = output != null && videoOutputRefreshSession != videoHealthSession
-            val recover = videoHealth.sample(now, videoHealthSession, eligible, p.currentPosition,
-                renderedFrames, settling, canRefreshOutput)
+            val position = p.currentPosition
+            val recover = videoHealth.sample(now, videoHealthSession, eligible, position,
+                renderedFrames, quickConfirmation = settling || !liveMode)
             if (videoHealth.stableProgressMs >= 15_000L) retriesP = 0
             if (videoHealth.stableProgressMs >= 60_000L) {
-                videoOutputRefreshSession = Long.MIN_VALUE
+                vodPictureRecoverySession = Long.MIN_VALUE
                 smoothPictureRetuneSession = Long.MIN_VALUE
+            }
+            if (!liveMode) {
+                if (recover && vodPictureRecoverySession != videoHealthSession) {
+                    synchronized(DownloadService.dispatchLock) {
+                        if (restartOnDemandPictureAtCurrentPosition(p)) {
+                            playbackGen++
+                            vodPictureRecoverySession = videoHealthSession
+                            StabilityCore.note("vod_picture_reprepare pos=$position mime=${p.videoFormat?.sampleMimeType}")
+                        }
+                    }
+                }
+                if (videoHealthRunning) videoHealthHandler.postDelayed(this, 2_000L)
+                return
             }
             // An invisible selected-video surface cannot use advancing audio to
             // erase failures. Genuinely audio-only streams earn a fresh budget
             // after sustained READY position progress without needing a surface.
-            noteAudioPlaybackProgress(now, playingReady && isAudioOnly(p), p.currentPosition)
+            noteAudioPlaybackProgress(now, playingReady && isAudioOnly(p), position)
             val progressStalled = liveProgress.sample(now, videoHealthSession,
                 view != null && p.playWhenReady && !pausePreparing &&
                     p.playbackSuppressionReason == Player.PLAYBACK_SUPPRESSION_REASON_NONE &&
                     (p.playbackState == Player.STATE_READY || p.playbackState == Player.STATE_BUFFERING),
-                p.currentPosition, p.totalBufferedDuration)
+                position, p.totalBufferedDuration)
             if (recover || progressStalled) {
                 StabilityCore.note("live_stall_recover clock=$progressStalled state=${p.playbackState} buffered=${p.totalBufferedDuration} direct=$directLive temporary=${Timeshift.active} mime=${p.videoFormat?.sampleMimeType}")
-                if (p.playWhenReady) {
-                    if (recover && canRefreshOutput && output != null) {
-                        videoOutputRefreshSession = videoHealthSession
-                        StabilityCore.note("live_video_output_refresh pos=${p.currentPosition} settling=$settling")
-                        refreshLiveVideoOutput(p, output)
-                        resetVideoObservation()
-                    } else if (!recoverSmoothLive(p, pictureStalled = recover) && !recoverTemporaryLive()) {
-                        zapTo(currentIdxC.intValue, preserveDirect = true)
-                    }
+                if (p.playWhenReady && !recoverSmoothLive(p, pictureStalled = recover) &&
+                    !recoverTemporaryLive(resetDecoder = recover)) {
+                    zapTo(currentIdxC.intValue, preserveDirect = true)
                 }
             }
             if (videoHealthRunning) videoHealthHandler.postDelayed(this, if (settling) 1_000L else 2_000L)
@@ -3256,8 +3247,8 @@ object Playback {
     }
 
     private fun startVideoHealthWatchdog() {
-        if (videoHealthRunning || backgroundSuspended || !liveMode) return
-        if (videoViews.isEmpty() && player?.let { isAudioOnly(it) } != true) return
+        if (videoHealthRunning || backgroundSuspended) return
+        if (videoOwner.get() == null && !(liveMode && player?.let { isAudioOnly(it) } == true)) return
         videoHealthRunning = true
         videoHealthHandler.postDelayed(videoHealthTick, 2_000L)
     }
@@ -3338,7 +3329,7 @@ object Playback {
     }
 
     /** Retry localhost playback without deleting the paused channel history. */
-    private fun recoverTemporaryLive(): Boolean {
+    private fun recoverTemporaryLive(resetDecoder: Boolean = false): Boolean {
         if (!liveMode || !Timeshift.active || Timeshift.isPreparing) return false
         val p = player ?: return false
         val ch = queue.getOrNull(currentIdxC.intValue) ?: return false
@@ -3351,7 +3342,9 @@ object Playback {
         val offset = (((sourceOffset + advanceBytes) / 188L) * 188L).coerceAtLeast(minimum)
         // Pending retries belong to the old localhost source, not this reopen.
         playbackGen++
-        setGrowingDvrSource(p, ch, offset, pos, p.playWhenReady)
+        val keepPlaying = p.playWhenReady
+        if (resetDecoder) p.stop()
+        setGrowingDvrSource(p, ch, offset, pos, keepPlaying)
         return true
     }
 
@@ -3491,7 +3484,7 @@ object Playback {
             private var prevIdx = 0
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
                 StabilityCore.note("live_play_request playing=$playWhenReady reason=$reason state=${p.playbackState}")
-                if (playWhenReady && liveMode && !backgroundSuspended) startVideoHealthWatchdog()
+                if (playWhenReady && (liveMode || p.isPlaying)) startVideoHealthWatchdog()
                 else stopVideoHealthWatchdog()
                 if (backgroundSuspended && playWhenReady) {
                     p.pause()
@@ -3555,7 +3548,7 @@ object Playback {
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
-                if (player?.playWhenReady == true && liveMode && !backgroundSuspended) startVideoHealthWatchdog()
+                if (p.playWhenReady && (liveMode || isPlaying)) startVideoHealthWatchdog()
                 else stopVideoHealthWatchdog()
             }
 
@@ -3609,7 +3602,12 @@ object Playback {
                 val q = queue
                 val prev = prevIdx
                 prevIdx = p.currentMediaItemIndex
-                currentIdxC.intValue = p.currentMediaItemIndex
+                if (prev != prevIdx) {
+                    playbackGen++
+                    videoHealthSession++
+                    resetVideoObservation()
+                }
+                currentIdxC.intValue = prevIdx
                 everReadyC.value = false
                 videoFpsC.floatValue = 0f
                 p.setPlaybackSpeed(1.0f)
@@ -3640,17 +3638,16 @@ object Playback {
         val canAdvance = p.isCurrentWindowLive && p.isCurrentWindowDynamic &&
             p.currentTimeline.getWindow(p.currentMediaItemIndex, androidx.media3.common.Timeline.Window())
                 .defaultPositionMs > p.currentPosition
-        if (canAdvance && playbackRetryDelay() != null) {
-            StabilityCore.note("smooth_live_advance")
-            p.seekToDefaultPosition()
-            p.prepare()
-        } else if (!canAdvance && pictureStalled && smoothPictureRetuneSession != videoHealthSession &&
+        if (pictureStalled && smoothPictureRetuneSession != videoHealthSession &&
             playbackRetryDelay() != null) {
-            // A raw feed cannot seek forward. A confirmed picture-only stall
-            // gets one same-channel retune, without reopening a paused recording.
+            // Retuning releases the stalled decoder as well as reopening the feed.
             smoothPictureRetuneSession = videoHealthSession
             StabilityCore.note("smooth_live_picture_retune")
             zapTo(currentIdxC.intValue, preserveDirect = true)
+        } else if (canAdvance && playbackRetryDelay() != null) {
+            StabilityCore.note("smooth_live_advance")
+            p.seekToDefaultPosition()
+            p.prepare()
         } else {
             StabilityCore.note("smooth_live_no_forward_position")
             p.stop()
@@ -4129,9 +4126,9 @@ object Playback {
             startGovernor()
             zapTo(s)
         } else {
-            // Movies / episodes / downloads / recordings: no periodic live-TV
-            // supervision at all. Keep the Fire Stick focused on decode/render.
+            // On-demand recovery supervises the picture without running live transport logic.
             liveMode = false
+            videoHealthSession++
             closeDualStreamTrial()
             dualStreamStatus = "Off — on-demand playback uses one stream"
             streamQuality.reset(p)
@@ -4299,7 +4296,7 @@ object Playback {
         pausePreparing = false
         stopGovernor()
         stopVideoHealthWatchdog()
-        videoViews.clear()
+        videoOwner.clear()
         Timeshift.stop()
         TimeshiftServer.stop()
         runCatching { player?.release() }
@@ -4323,6 +4320,17 @@ object Playback {
         browserVodMediaSources = null
         vodUaFallbackUsed = false
     }
+}
+
+/** Restart the codec and the current item through Media3 while retaining its playlist and play intent. */
+internal fun restartOnDemandPictureAtCurrentPosition(player: Player): Boolean {
+    if (!player.isPlaying || !player.isCurrentMediaItemSeekable ||
+        !player.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)) return false
+    val position = player.currentPosition.coerceAtLeast(0L)
+    player.stop()
+    player.seekTo(position)
+    player.prepare()
+    return true
 }
 
 private object BrowseFocusMemory {
@@ -7380,7 +7388,7 @@ fun PlayerScreen(
             // Browsing/settings can keep the stream alive. A confirmed stop
             // saved progress before releasing it, so don't read that player again.
             if (!playbackStopped) savePlaybackPosition()
-            pvRef?.let { Playback.detachVideoView(it); it.player = null }
+            pvRef?.let(Playback::detachVideoView)
             if (matchFps) (context as? android.app.Activity)?.let { clearFrameRateMatch(it) }
         }
     }
@@ -7768,19 +7776,14 @@ fun PlayerScreen(
             factory = { ctx ->
                 PlayerView(ctx).apply {
                     if (!current.isLive) wireStockPlayerDpad(this)
-                    player = exo
-                    Playback.attachVideoView(this)
                     // Live TV has ONE controller: RYZOD's cable-box mini guide.
                     // Media3's stock controller was competing for OK/focus and
                     // trapping the remote on its gear/title row. VOD/recordings
                     // still use Media3's normal controller.
                     useController = !current.isLive
                     setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
-                    // Hold the last good frame across prepare()/reconnect cycles
-                    // instead of flashing black 3–4 times when a live channel
-                    // starts. Also use a SurfaceView (cheaper on Fire TV) and a
-                    // black shutter so intermediate states never flash through.
-                    setKeepContentOnPlayerReset(true)
+                    // Show the shutter when the source resets instead of showing the old title's picture.
+                    setKeepContentOnPlayerReset(false)
                     setShutterBackgroundColor(android.graphics.Color.BLACK)
                     // Never let the screen saver / sleep kick in while watching.
                     keepScreenOn = true
@@ -7817,8 +7820,7 @@ fun PlayerScreen(
                             }
                         }
                     )
-
-
+                    Playback.attachVideoView(this)
                 }
             },
             update = { view ->

@@ -36,8 +36,7 @@ internal class VideoHealthMonitor {
 
     /** Eligibility is supplied by Playback: visible video, READY, playing, foreground. */
     fun sample(nowMs: Long, generation: Long, eligible: Boolean,
-               positionMs: Long, renderedFrames: Long, settling: Boolean = false,
-               canRefreshOutput: Boolean = false): Boolean {
+               positionMs: Long, renderedFrames: Long, quickConfirmation: Boolean = false): Boolean {
         if (session != generation) {
             session = generation
             recoveries = 0
@@ -79,14 +78,8 @@ internal class VideoHealthMonitor {
             frameProgressAt = nowMs
             return false
         }
-        val confirmationMs = if (settling || canRefreshOutput) 5_000L else 15_000L
+        val confirmationMs = if (quickConfirmation) 5_000L else 15_000L
         if (nowMs - frameProgressAt < confirmationMs) return false
-        // An output refresh leaves the stream intact. Give it a fresh
-        // observation window without spending or delaying a stream recovery.
-        if (canRefreshOutput) {
-            frameProgressAt = nowMs
-            return true
-        }
         val cooldownPassed = lastRecoveryAt == Long.MIN_VALUE || nowMs - lastRecoveryAt >= 30_000L
         if (!cooldownPassed || recoveries >= 2) return false
         recoveries++

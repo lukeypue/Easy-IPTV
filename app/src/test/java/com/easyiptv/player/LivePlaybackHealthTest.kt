@@ -63,6 +63,27 @@ class LivePlaybackHealthTest {
         } finally { Playback.releaseAll() }
     }
 
+    @Test fun removingTheGuideViewAfterHandoffLeavesTheFullscreenPlayerBound() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val prefs = context.getSharedPreferences("video-view-handoff", Context.MODE_PRIVATE)
+        val guide = androidx.media3.ui.PlayerView(context)
+        val fullscreen = androidx.media3.ui.PlayerView(context)
+        try {
+            val player = Playback.open(context, prefs,
+                listOf(Playable("Live", "http://127.0.0.1:9/live.ts", true)), 0, null, false)
+            Playback.attachVideoView(guide)
+            assertSame(player, guide.player)
+            Playback.attachVideoView(fullscreen)
+            assertSame(player, fullscreen.player)
+            assertNull(guide.player)
+            Playback.detachVideoView(guide)
+            assertSame(player, fullscreen.player)
+        } finally {
+            Playback.detachVideoView(fullscreen)
+            Playback.releaseAll()
+        }
+    }
+
     @Test fun advancingAudioWithFrozenVideoTriggersOnlyAfterAConfirmedStall() {
         val monitor = monitor()
         assertFalse(sample(monitor, 0, 0, 10))
@@ -82,16 +103,6 @@ class LivePlaybackHealthTest {
         assertTrue(sample(monitor, 10_000, 10_000, 120, settling = true))
         assertFalse("The recovery must not repeat on the next tick",
             sample(monitor, 11_000, 11_000, 120, settling = true))
-    }
-
-    @Test fun refreshingVideoDoesNotDelayAFullRecoveryIfThePictureStaysFrozen() {
-        val monitor = monitor()
-        assertFalse(monitor.sample(0, 1, true, 0, 12, canRefreshOutput = true))
-        assertTrue(monitor.sample(5_000, 1, true, 5_000, 12, canRefreshOutput = true))
-        monitor.sample(5_000, 1, false, 0, 0)
-        assertFalse(sample(monitor, 6_000, 6_000, 12, settling = true))
-        assertTrue(sample(monitor, 11_000, 11_000, 12, settling = true))
-        assertFalse(sample(monitor, 16_000, 16_000, 12, settling = true))
     }
 
     @Test fun interruptedPauseReaderUsesAppRecoveryInsteadOfReloadingItsOriginalOffset() {
